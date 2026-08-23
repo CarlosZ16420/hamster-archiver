@@ -16,17 +16,20 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test \"test/**/*.test.js\"",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer/ui-state.js && node --check src/renderer/i18n.js && node --check src/renderer/app.js && node --check src/core/archive-engine.js && node --check src/core/queue-manager.js && node --check src/core/storage-paths.js && node --check src/core/storage-migration.js && node --check src/core/sqlite-repository.js && node --check src/core/media-service.js && node --check src/core/recycle-bin.js && node --check src/core/update-checker.js && node --check src/core/update-manager.js && node --check scripts/migrate-saves-to-sqlite.js && node --check scripts/migrate-to-portable-userdata.js && node --check scripts/generate-app-icon.js && node --check scripts/embed-windows-icon.js && node --check scripts/build-release.js && node --check scripts/check-publish-safety.js",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/renderer/ui-state.js && node --check src/renderer/i18n.js && node --check src/renderer/app.js && node --check src/core/archive-engine.js && node --check src/core/queue-manager.js && node --check src/core/storage-paths.js && node --check src/core/storage-migration.js && node --check src/core/sqlite-repository.js && node --check src/core/media-service.js && node --check src/core/recycle-bin.js && node --check src/core/update-checker.js && node --check src/core/update-manager.js && node --check src/core/tool-integrity.js && node --check scripts/migrate-saves-to-sqlite.js && node --check scripts/migrate-to-portable-userdata.js && node --check scripts/generate-app-icon.js && node --check scripts/embed-windows-icon.js && node --check scripts/build-release.js && node --check scripts/check-publish-safety.js && node --check scripts/verify-toolchain.js && node --check scripts/prepare-tools.js",
+    "verify:dependencies": "node scripts/verify-toolchain.js --dependencies-only",
+    "verify:tools": "node scripts/verify-toolchain.js --installed",
+    "tools:prepare": "node scripts/prepare-tools.js",
     "publish:check": "node scripts/check-publish-safety.js",
     "migrate:portable": "node scripts/migrate-to-portable-userdata.js",
     "icon:build": "electron scripts/generate-app-icon.js",
     "build:release": "node scripts/build-release.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": "22.23.1"
   },
   "devDependencies": {
-    "electron": "^43.4.0",
-    "resedit": "^3.0.2"
+    "electron": "43.4.0",
+    "resedit": "3.0.2"
   }
 }

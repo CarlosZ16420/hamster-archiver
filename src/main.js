@@ -33,6 +33,7 @@ const {
   manualUpdateInstructions
 } = require('./core/update-manager');
 const { findTrashItems, isTrashItemPresent, restoreTrashItem } = require('./core/recycle-bin');
+const { readAndVerifyReleaseManifest } = require('./core/tool-integrity');
 
 const appIconPath = path.join(__dirname, '..', 'assets', 'app-icon.png');
 const releasesUrl = 'https://github.com/CarlosZ16420/hamster-archiver/releases';
@@ -1126,6 +1127,7 @@ function registerIpc() {
 
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const workspaceRoot = applicationRoot;
+  if (app.isPackaged && !isSmokeTest) await readAndVerifyReleaseManifest(workspaceRoot);
   const userDataLayout = makeUserDataLayout(workspaceRoot, null, configuredUserDataRoot);
   const store = new AppStore(userDataLayout);
   appStore = store;

@@ -5,6 +5,8 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const packageJson = require('../package.json');
 const { embedWindowsIcon } = require('./embed-windows-icon');
+const { createFileIntegrityEntries, hashFile } = require('../src/core/tool-integrity');
+const { dependencyLock, verifyToolchain } = require('./verify-toolchain');
 
 const projectRoot = path.resolve(__dirname, '..');
 const electronDist = path.join(projectRoot, 'node_modules', 'electron', 'dist');
@@ -18,13 +20,28 @@ async function exists(targetPath) {
   }
 }
 
+async function copyVerifiedFile(relativePath, destinationRoot) {
+  const sourcePath = path.join(projectRoot, relativePath);
+  const destinationPath = path.join(destinationRoot, relativePath);
+  await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+  await fs.copyFile(sourcePath, destinationPath);
+  const [sourceDigest, destinationDigest] = await Promise.all([
+    hashFile(sourcePath),
+    hashFile(destinationPath)
+  ]);
+  if (sourceDigest !== destinationDigest) throw new Error('发布工具复制校验失败：' + relativePath);
+}
+
 async function main() {
+  const toolchain = await verifyToolchain({
+    strictNode: true,
+    requireInstalledPackages: true,
+    requireTools: true
+  });
   if (!(await exists(path.join(electronDist, 'electron.exe')))) {
-    throw new Error('缺少 Electron 运行时，请先执行 npm install。');
+    throw new Error('缺少 Electron 运行时，请先执行 npm ci。');
   }
   for (const requiredTool of [
-    path.join(projectRoot, 'tools', '7zip', '7z.exe'),
-    path.join(projectRoot, 'tools', 'ffmpeg', 'ffmpeg.exe'),
     path.join(projectRoot, 'assets', 'app-icon.png'),
     path.join(projectRoot, 'assets', 'app-icon.ico')
   ]) {
@@ -45,13 +62,8 @@ async function main() {
   await fs.mkdir(appDirectory, { recursive: true });
   await fs.cp(path.join(projectRoot, 'src'), path.join(appDirectory, 'src'), { recursive: true });
   await fs.cp(path.join(projectRoot, 'assets'), path.join(appDirectory, 'assets'), { recursive: true });
-  const outputTools = path.join(outputRoot, 'tools');
-  await fs.mkdir(outputTools, { recursive: true });
-  await fs.cp(path.join(projectRoot, 'tools', '7zip'), path.join(outputTools, '7zip'), { recursive: true });
-  const outputFfmpeg = path.join(outputTools, 'ffmpeg');
-  await fs.mkdir(outputFfmpeg, { recursive: true });
-  for (const name of ['ffmpeg.exe', 'BUILD-INFO.txt', 'LICENSE', 'README.txt']) {
-    await fs.copyFile(path.join(projectRoot, 'tools', 'ffmpeg', name), path.join(outputFfmpeg, name));
+  for (const tool of Object.values(dependencyLock.bundledTools)) {
+    for (const relativePath of tool.files) await copyVerifiedFile(relativePath, outputRoot);
   }
   await fs.copyFile(path.join(projectRoot, 'README.md'), path.join(outputRoot, 'README.md'));
   if (await exists(path.join(projectRoot, 'README.en.md'))) {
@@ -101,14 +113,40 @@ async function main() {
       commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: projectRoot, encoding: 'utf8' }).trim();
     } catch { /* 非 Git 环境也可以构建 */ }
   }
-  await fs.writeFile(path.join(outputRoot, 'release-manifest.json'), `${JSON.stringify({
+  const integrityPaths = [
+    'HamsterArchiver.exe',
+    'resources/app/package.json',
+    'resources/app/src/core/tool-integrity.js',
+    ...Object.values(dependencyLock.bundledTools).flatMap((tool) => tool.files)
+  ];
+  const integrityFiles = await createFileIntegrityEntries(outputRoot, integrityPaths);
+  const releaseManifest = {
+    schemaVersion: 2,
     name: releaseName,
     version: packageJson.version,
     platform: 'win32-x64',
     commit,
     builtAt: new Date().toISOString(),
-    portableUserData: 'userdata'
-  }, null, 2)}\n`, 'utf8');
+    portableUserData: 'userdata',
+    toolchain: {
+      node: toolchain.dependencies.node,
+      electron: toolchain.dependencies.packages.electron,
+      resedit: toolchain.dependencies.packages.resedit,
+      bundledTools: Object.fromEntries(Object.entries(toolchain.tools).map(([name, tool]) => [name, {
+        version: tool.version,
+        architecture: tool.architecture
+      }]))
+    },
+    integrity: {
+      algorithm: 'sha256',
+      files: integrityFiles
+    }
+  };
+  await fs.writeFile(
+    path.join(outputRoot, 'release-manifest.json'),
+    JSON.stringify(releaseManifest, null, 2) + '\n',
+    'utf8'
+  );
   console.log(outputRoot);
 }
 

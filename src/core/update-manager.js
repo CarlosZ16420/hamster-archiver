@@ -6,6 +6,7 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
+const { verifyFileIntegrityEntries } = require('./tool-integrity');
 
 const execFileAsync = promisify(execFile);
 const UPDATE_LAUNCH_TIMEOUT_MS = 8_000;
@@ -257,6 +258,8 @@ async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath,
     if (normalizeVersion(manifest.version) !== normalizeVersion(release.latestVersion)) {
       throw new Error('更新包版本与 Release 标签不一致。');
     }
+    if (manifest.schemaVersion !== 2) throw new Error('更新包发行清单版本不受支持。');
+    await verifyFileIntegrityEntries(packageRoot, manifest.integrity?.files);
     onProgress({ stage: 'prepared', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
     return { runRoot, packageRoot, archivePath, version: release.latestVersion, currentVersion, applicationRoot: path.resolve(applicationRoot) };
   } catch (error) {
