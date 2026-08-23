@@ -25,8 +25,15 @@ function verifyDependencyMetadata({ strictNode = false } = {}) {
   if (packageJson.engines?.node !== dependencyLock.node) {
     throw new Error('package.json 的 Node.js 版本没有与 dependency-lock.json 精确同步。');
   }
+  if (packageJson.packageManager !== 'npm@' + dependencyLock.npm) {
+    throw new Error('package.json 的 npm 版本没有与 dependency-lock.json 精确同步。');
+  }
   if (strictNode && process.versions.node !== dependencyLock.node) {
     throw new Error(`Node.js 版本不一致：要求 ${dependencyLock.node}，实际 ${process.versions.node}。`);
+  }
+  const npmAgent = String(process.env.npm_config_user_agent || '').match(/(?:^|\s)npm\/([^\s]+)/);
+  if (strictNode && npmAgent && npmAgent[1] !== dependencyLock.npm) {
+    throw new Error('npm 版本不一致：要求 ' + dependencyLock.npm + '，实际 ' + npmAgent[1] + '。');
   }
   const rootLock = packageLock.packages?.[''];
   if (!rootLock || packageLock.lockfileVersion !== 3) throw new Error('package-lock.json 格式无效。');
@@ -57,6 +64,7 @@ function verifyDependencyMetadata({ strictNode = false } = {}) {
   }
   return {
     node: dependencyLock.node,
+    npm: dependencyLock.npm,
     packages: { ...dependencyLock.packages }
   };
 }
@@ -108,6 +116,19 @@ async function verifyInstalledPackages() {
     }
     if (installed.version !== version) throw new Error(`${name} 安装版本不一致：要求 ${version}，实际 ${installed.version}。`);
   }
+  if (process.platform === 'win32') {
+    const electronExecutable = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
+    let result;
+    try {
+      result = await execFileAsync(electronExecutable, ['--version'], { windowsHide: true, timeout: 15_000 });
+    } catch (error) {
+      throw new Error('锁定的 Electron 运行时无法执行版本检查：' + (error.message || error));
+    }
+    const actualVersion = String(result.stdout || '').trim().replace(/^v/, '');
+    if (actualVersion !== dependencyLock.packages.electron) {
+      throw new Error('Electron 运行时版本不一致：要求 ' + dependencyLock.packages.electron + '，实际 ' + actualVersion + '。');
+    }
+  }
 }
 
 async function verifyToolchain({ strictNode = false, requireInstalledPackages = false, requireTools = true } = {}) {
@@ -129,7 +150,7 @@ if (require.main === module) {
     requireInstalledPackages: process.argv.includes('--installed'),
     requireTools: !dependenciesOnly
   }).then((report) => {
-    console.log(`依赖锁定检查通过：Node.js ${report.dependencies.node}；${Object.keys(report.dependencies.packages).length} 个直接依赖。`);
+    console.log('依赖锁定检查通过：Node.js ' + report.dependencies.node + '，npm ' + report.dependencies.npm + '；' + Object.keys(report.dependencies.packages).length + ' 个直接依赖。');
     for (const tool of Object.values(report.tools)) console.log(`${tool.displayName} ${tool.version} (${tool.architecture}) 校验通过。`);
   }).catch((error) => {
     console.error(error.stack || error.message);

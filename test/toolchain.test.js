@@ -11,6 +11,7 @@ const {
 test('direct dependencies, Node.js and third-party sources are exactly locked', () => {
   const report = verifyDependencyMetadata();
   assert.equal(report.node, dependencyLock.node);
+  assert.equal(report.npm, '10.9.8');
   assert.equal(report.packages.electron, '43.4.0');
   assert.equal(report.packages.resedit, '3.0.2');
   for (const tool of Object.values(dependencyLock.bundledTools)) {

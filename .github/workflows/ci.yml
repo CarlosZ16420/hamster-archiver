@@ -14,9 +14,16 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22.23.1
+          node-version: 22.23.2
           cache: npm
       - run: npm ci
+      - name: Prepare test 7-Zip
+        shell: pwsh
+        run: |
+          choco install 7zip.install --no-progress -y
+          New-Item -ItemType Directory -Force tools\7zip | Out-Null
+          Copy-Item "${env:ProgramFiles}\7-Zip\7z.exe" tools\7zip\7z.exe
+          Copy-Item "${env:ProgramFiles}\7-Zip\7z.dll" tools\7zip\7z.dll
       - run: npm run verify:dependencies
       - run: npm run check
       - run: npm test

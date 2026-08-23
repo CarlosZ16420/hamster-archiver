@@ -10,8 +10,8 @@ const { execFileSync } = require('node:child_process');
 const { QueueManager } = require('../src/core/queue-manager');
 const { AppStore } = require('../src/core/store');
 
-const DIST_ROOT = path.resolve(__dirname, '..', 'dist', 'HamsterArchiver-v4.1.1-win-x64');
-const SEVEN_ZIP_PATH = path.join(DIST_ROOT, 'tools', '7zip', '7z.exe');
+const PROJECT_ROOT = path.resolve(__dirname, '..');
+const SEVEN_ZIP_PATH = process.env.HAMSTER_TEST_7ZIP_PATH || path.join(PROJECT_ROOT, 'tools', '7zip', '7z.exe');
 
 function makeCatalogRecords(warehouseDir) {
   return [

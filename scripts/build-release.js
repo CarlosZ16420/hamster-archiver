@@ -33,6 +33,9 @@ async function copyVerifiedFile(relativePath, destinationRoot) {
 }
 
 async function main() {
+  if (process.platform !== 'win32' || process.arch !== 'x64') {
+    throw new Error('Windows x64 发行包只能在锁定的 Windows x64 工具链中构建。');
+  }
   const toolchain = await verifyToolchain({
     strictNode: true,
     requireInstalledPackages: true,
@@ -116,7 +119,12 @@ async function main() {
   const integrityPaths = [
     'HamsterArchiver.exe',
     'resources/app/package.json',
+    'resources/app/src/main.js',
+    'resources/app/src/core/archive-engine.js',
+    'resources/app/src/core/media-service.js',
+    'resources/app/src/core/paths.js',
     'resources/app/src/core/tool-integrity.js',
+    'resources/app/src/core/update-manager.js',
     ...Object.values(dependencyLock.bundledTools).flatMap((tool) => tool.files)
   ];
   const integrityFiles = await createFileIntegrityEntries(outputRoot, integrityPaths);
@@ -130,6 +138,7 @@ async function main() {
     portableUserData: 'userdata',
     toolchain: {
       node: toolchain.dependencies.node,
+      npm: toolchain.dependencies.npm,
       electron: toolchain.dependencies.packages.electron,
       resedit: toolchain.dependencies.packages.resedit,
       bundledTools: Object.fromEntries(Object.entries(toolchain.tools).map(([name, tool]) => [name, {

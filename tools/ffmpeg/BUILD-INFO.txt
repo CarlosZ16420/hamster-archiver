@@ -1,7 +1,5 @@
-FFmpeg 9.0.1 essentials build for Windows x64
-Build provider: https://www.gyan.dev/ffmpeg/builds/
-Provider listed by FFmpeg: https://ffmpeg.org/download.html
-Downloaded asset: ffmpeg-release-essentials.7z
-SHA-256: 49a73bdf0850092a252ac4641d922f3048d63ed113e196cc65ce1e4f7fb33e85
-License: GPLv3; see LICENSE and README.txt in this directory.
+FFmpeg 9.0.1-essentials_build-www.gyan.dev for Windows x64
+Immutable source: https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.7z
+Source archive SHA-256: 49a73bdf0850092a252ac4641d922f3048d63ed113e196cc65ce1e4f7fb33e85
 The application and release package use ffmpeg.exe only. FFprobe is not required or distributed.
+License: GPLv3; see LICENSE and README.txt in this directory.
