@@ -29,7 +29,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 - 📁 下载文件夹里堆了几个 TB 的视频和图片，**找起来像考古**
 - 🔁 同一个资源**重复下载了 3 次才想起来**"好像已经存过了"
-- 🗂 想整理，但**一打开文件夹就放弃了**
+- ，🗂 想整理，但**一打开文件夹就放弃了**
 - 😰 备份到云盘，但**文件凌乱**，传上去就再也找不到
 - 🔒 不想把私人媒体交给**云相册的 AI 扫描**
 
@@ -39,23 +39,21 @@ Local-first batch archiver and searchable media vault for Windows.
 
 - 快速将选中的文件夹变成可视化的仓库
 
-  <p align="center">
-    <img src="assets/readme/product-overview.zh-CN.png" width="100%" alt="Hamster Archiver 中文归档工作台与仓库大缩略图界面">
-  </p>
+  <img src="README.assets/归档工作台-主目录.png" alt="归档工作台-主目录" style="zoom:55%;" />
 
 - 忠实记录仓储情况
 
-  <p align="center">
-    <img src="assets/readme/warehouse-overview.zh-CN.png" width="100%" alt="Hamster Archiver 中文仓库概览与随机漫步界面">
-  </p>
+  <img src="README.assets/仓库-主目录.png" alt="仓库-主目录" style="zoom:55%;" />
+
+  <img src="README.assets/大缩略图模式.png" alt="大缩略图模式" style="zoom:55%;" />
+
 
   仓库不是一张压缩包清单。它提供封面浏览、活跃度统计和随机漫步。搜索覆盖标题、标签、备注、路径与文件名。
 
 - 准确记录文件信息
 
-  <p align="center">
-    <img src="assets/readme/project-detail.zh-CN.png" width="100%" alt="Hamster Archiver 中文项目整理、媒体预览与完整目录界面">
-  </p>
+  <img src="README.assets/项目详情.png" alt="项目详情" style="zoom:55%;" />
+
 
   项目中不仅包含了视频、图片的缩略截图，还包含完整的目录结构。每张图片都是缩略图，保存信息的同时也控制自身体积。
 
