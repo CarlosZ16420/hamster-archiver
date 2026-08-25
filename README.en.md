@@ -1,7 +1,5 @@
 <div align="center">
 
-[简体中文](README.md) · [English](README.en.md)
-
 <img src="README.assets/iconC_cropped_1022x1022.png" alt="Hamster Archiver pixel hamster icon" width="112">
 
 # Hamster Archiver 仓鼠症大结局
@@ -19,7 +17,7 @@ Local-first · Batch archiving · Media previews · Portable data
 ![SQLite](https://img.shields.io/badge/SQLite-WAL-b17422?style=flat-square)
 [![CI](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml)
 
-[Download a release](../../releases) · [Report an issue](../../issues) · [Contribute](CONTRIBUTING.md)
+[Download a release](../../releases) · [简体中文](README.md) · [English](README.en.md) · [Report an issue](../../issues) · [Contribute](CONTRIBUTING.md)
 
 </div>
 

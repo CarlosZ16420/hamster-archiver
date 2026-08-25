@@ -1,7 +1,5 @@
 <div align="center">
 
-[简体中文](README.md) · [English](README.en.md)
-
 <img src="README.assets/iconC_cropped_1022x1022.png" alt="Hamster Archiver 像素仓鼠图标" width="112">
 
 # 仓鼠症大结局 Hamster Archiver
@@ -19,7 +17,7 @@ Local-first batch archiver and searchable media vault for Windows.
 ![SQLite](https://img.shields.io/badge/SQLite-WAL-b17422?style=flat-square)
 [![CI](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml)
 
-[下载发行版](../../releases) · [报告问题](../../issues) · [参与贡献](CONTRIBUTING.md)
+[下载发行版](../../releases) · [简体中文](README.md) · [English](README.en.md) · [报告问题](../../issues) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
