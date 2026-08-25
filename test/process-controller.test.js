@@ -4,7 +4,11 @@ const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const test = require('node:test');
-const { PauseController, runPowerShellEncoded } = require('../src/core/process-controller');
+const {
+  PauseController,
+  controlWindowsProcess,
+  runPowerShellEncoded
+} = require('../src/core/process-controller');
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -62,7 +66,9 @@ test('Windows native pause suspends and resumes a real child process', {
     }
   };
 
-  const controller = new PauseController();
+  const controller = new PauseController((pid, action) => (
+    controlWindowsProcess(pid, action, { timeoutMs: 30_000 })
+  ));
   controller.attach(child.pid);
   await waitForTicks(2);
   await controller.pause();

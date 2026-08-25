@@ -45,7 +45,9 @@ function runPowerShellEncoded(script, {
   });
 }
 
-async function controlWindowsProcess(pid, action) {
+async function controlWindowsProcess(pid, action, {
+  timeoutMs = PROCESS_CONTROL_TIMEOUT_MS
+} = {}) {
   if (process.platform !== 'win32') {
     process.kill(pid, action === 'suspend' ? 'SIGSTOP' : 'SIGCONT');
     return;
@@ -63,7 +65,7 @@ try {
 } finally {
   [void][HamsterNativeProcess]::CloseHandle($handle)
 }`;
-  await runPowerShellEncoded(script);
+  await runPowerShellEncoded(script, { timeoutMs });
 }
 
 class PauseController {
