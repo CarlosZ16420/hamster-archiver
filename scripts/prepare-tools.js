@@ -81,6 +81,16 @@ async function replaceFile(sourcePath, relativeTarget) {
   }
 }
 
+async function provideFileIfMissing(sourcePath, relativeTarget) {
+  const targetPath = path.join(projectRoot, relativeTarget);
+  try {
+    if ((await fsp.stat(targetPath)).isFile()) return;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  await replaceFile(sourcePath, relativeTarget);
+}
+
 async function writeBuildInfo() {
   const sevenZip = dependencyLock.bundledTools.sevenZip;
   const ffmpeg = dependencyLock.bundledTools.ffmpeg;
@@ -116,7 +126,7 @@ async function main() {
     const preparedSevenZip = await findFile(sevenZipExtract, '7z.exe');
     await replaceFile(preparedSevenZip, 'tools/7zip/7z.exe');
     await replaceFile(await findFile(sevenZipExtract, '7z.dll'), 'tools/7zip/7z.dll');
-    await replaceFile(await findFile(sevenZipExtract, 'License.txt'), 'tools/7zip/License.txt');
+    await provideFileIfMissing(await findFile(sevenZipExtract, 'License.txt'), 'tools/7zip/License.txt');
 
     if (!sevenZipOnly) {
       const ffmpegSource = path.join(tempRoot, 'ffmpeg.7z');
@@ -124,8 +134,8 @@ async function main() {
       await downloadPinnedSource(dependencyLock.bundledTools.ffmpeg.source, ffmpegSource);
       await extractArchive(preparedSevenZip, ffmpegSource, ffmpegExtract);
       await replaceFile(await findFile(ffmpegExtract, 'ffmpeg.exe'), 'tools/ffmpeg/ffmpeg.exe');
-      await replaceFile(await findFile(ffmpegExtract, 'LICENSE'), 'tools/ffmpeg/LICENSE');
-      await replaceFile(await findFile(ffmpegExtract, 'README.txt'), 'tools/ffmpeg/README.txt');
+      await provideFileIfMissing(await findFile(ffmpegExtract, 'LICENSE'), 'tools/ffmpeg/LICENSE');
+      await provideFileIfMissing(await findFile(ffmpegExtract, 'README.txt'), 'tools/ffmpeg/README.txt');
     }
     await writeBuildInfo();
   } finally {

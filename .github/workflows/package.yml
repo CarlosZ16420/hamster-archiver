@@ -19,6 +19,8 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Install locked Electron runtime
+        run: node node_modules/electron/install.js
       - name: Prepare locked bundled tools
         shell: pwsh
         run: |
