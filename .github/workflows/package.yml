@@ -12,6 +12,8 @@ permissions:
 jobs:
   package:
     runs-on: windows-latest
+    env:
+      HAMSTER_LOCAL_ROOT: ${{ runner.temp }}\HamsterArchiver-Local
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -35,5 +37,5 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: HamsterArchiver-${{ github.ref_name }}-windows-x64
-          path: ../HamsterArchiver-Local/builds/packages/*
+          path: ${{ runner.temp }}\HamsterArchiver-Local\builds\packages\*
           if-no-files-found: error
