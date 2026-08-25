@@ -12,8 +12,6 @@ permissions:
 jobs:
   package:
     runs-on: windows-latest
-    env:
-      HAMSTER_LOCAL_ROOT: ${{ runner.temp }}\HamsterArchiver-Local
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -33,6 +31,8 @@ jobs:
           npm run tools:prepare
       - name: Build, verify and package
         run: npm run release:local
+        env:
+          HAMSTER_LOCAL_ROOT: ${{ runner.temp }}\HamsterArchiver-Local
       - name: Upload verified package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
