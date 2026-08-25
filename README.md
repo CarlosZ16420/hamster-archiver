@@ -1,133 +1,146 @@
 <div align="center">
 
-<img src="assets/app-icon.png" alt="Hamster Archiver 应用图标" width="96">
+[简体中文](README.md) · [English](README.en.md)
 
-</div>
+<img src="README.assets/iconC_cropped_1022x1022.png" alt="Hamster Archiver 像素仓鼠图标" width="112">
 
-![Hamster Archiver：把散乱目录变成可验证、可搜索的本地仓库](assets/readme/hero.svg)
+# 仓鼠症大结局 Hamster Archiver
 
-<div align="center">
+### 把散乱的大文件变成可校验的压缩包，也变成能搜索、能预览的本地仓库
 
-[![Version](https://img.shields.io/badge/version-4.5.6-e9653c?style=flat-square)](../../releases/latest)
-![Platform](https://img.shields.io/badge/platform-Windows%20x64-28241f?style=flat-square)
-![License](https://img.shields.io/badge/license-MIT-28745c?style=flat-square)
+Local-first batch archiver and searchable media vault for Windows.
+
+本地优先 · 批量归档 · 媒体预览 · 便携数据
+
+![Version](https://img.shields.io/badge/version-4.5.9-d45f3c?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
+![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
+![SQLite](https://img.shields.io/badge/SQLite-WAL-b17422?style=flat-square)
 [![CI](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml)
 
-**本地优先的批量归档器，也是能搜索、能预览的媒体仓库。**
-
-[下载 Windows 版](../../releases/latest) · [English](README.en.md) · [报告问题](../../issues) · [参与贡献](CONTRIBUTING.md)
+[下载发行版](../../releases) · [报告问题](../../issues) · [参与贡献](CONTRIBUTING.md)
 
 </div>
 
-## 给堆满硬盘的人
+---
 
-普通压缩工具只留下压缩包。Hamster Archiver 会为每个一级文件夹或视频建立独立任务，生成清单和媒体预览，完成压缩与完整性验证，再把标题、路径、标签、缩略图和文件指纹登记进本地 SQLite 仓库。
+##  这是一个什么样的工具
 
-- 文件多到像考古：按标题、标签、备注、路径和文件名搜索。
-- 害怕重复收存：入库前比较标题、视频名、大小与精确指纹，疑似关系交给你确认。
-- 不想交给云端扫描：仓库、缩略图、密码记录和运行日志都留在本机。
+如果你有以下困扰之一，那它就是为你做的：
 
-## 看见你的仓库，而不只是压缩包
+- 📁 下载文件夹里堆了几个 TB 的视频和图片，**找起来像考古**
+- 🔁 同一个资源**重复下载了 3 次才想起来**"好像已经存过了"
+- 🗂 想整理，但**一打开文件夹就放弃了**
+- 😰 备份到云盘，但**文件凌乱**，传上去就再也找不到
+- 🔒 不想把私人媒体交给**云相册的 AI 扫描**
 
-![归档工作台、任务队列、仓库概览与大缩略图仓库](docs/images/interface-overview.png)
+## 它做什么
 
-仓库保留完整目录结构，并把图片与视频抽帧变成可浏览的缩略图。项目可以设置封面、标签、星级、备注、备份位置和独立解压密码；大缩略图、纯文本列表、活跃度和随机漫步适合不同整理方式。
+把下载目录里堆成山的文件夹和视频，逐个压缩、校验、登记到一个可搜索的本地仓库。普通压缩工具只生成压缩包；Hamster Archiver 同时告诉你**里面是什么、放到了哪里、是否已经收过**。
 
-<details>
-<summary><strong>展开查看项目详情与视频分帧</strong></summary>
+- 快速将选中的文件夹变成可视化的仓库
 
-![项目详情、媒体预览和完整目录结构](docs/images/detail.png)
+  <p align="center">
+    <img src="assets/readme/product-overview.zh-CN.png" width="100%" alt="Hamster Archiver 中文归档工作台与仓库大缩略图界面">
+  </p>
 
-</details>
+- 忠实记录仓储情况
 
-## 一条可追溯的本地流水线
+  <p align="center">
+    <img src="assets/readme/warehouse-overview.zh-CN.png" width="100%" alt="Hamster Archiver 中文仓库概览与随机漫步界面">
+  </p>
 
-![扫描、清单、压缩、验证与入库流程](assets/readme/workflow.svg)
+  仓库不是一张压缩包清单。它提供封面浏览、活跃度统计和随机漫步。搜索覆盖标题、标签、备注、路径与文件名。
 
-1. 扫描主目录，或手动加入单个文件夹、视频。
-2. 生成目录清单、MD5、图片缩略图和视频均匀抽帧。
-3. 用随附的便携版 7-Zip 创建 7z/ZIP，可选密码、等级和 64 MiB—10 GiB 分卷。
-4. 运行完整性测试；体积异常、大任务和疑似重复会停下来等待确认。
-5. 成功入库后，才按设置保留、移动或回收原文件。
+- 准确记录文件信息
 
-## 核心能力
+  <p align="center">
+    <img src="assets/readme/project-detail.zh-CN.png" width="100%" alt="Hamster Archiver 中文项目整理、媒体预览与完整目录界面">
+  </p>
 
-| 安全归档 | 可搜索仓库 | 本地与便携 |
-|---|---|---|
-| 压缩前复核清单与磁盘空间 | SQLite WAL + FTS5 持久索引 | 媒体和仓库不主动上传 |
-| 成品完整性测试与异常体积确认 | 标题、标签、备注、路径、文件名搜索 | `userdata` 可随应用携带或切换 |
-| 多卷成品隔离、整组发布与回滚 | 封面、缩略图、目录树、随机漫步 | 应用目录移动后可重定位自有数据 |
-| 跨盘移动先复制、核验、再删除 | 精确重复与本地相似关系提示 | 中英文界面与五套完整主题 |
+  项目中不仅包含了视频、图片的缩略截图，还包含完整的目录结构。每张图片都是缩略图，保存信息的同时也控制自身体积。
 
-### 重复与相似关系
+- 项目设置可高度自定义。压缩参数、视频截取帧数、项目保存缩略图个数等参数均自由可调。
 
-- 精确文件使用大小与 MD5 共同核验；相似度按标题和视频证据分级计算。
-- 单个泛词、短标题和格式词不能独立把不同项目标成重复。
-- 仓库标签筛选可直接选择“可能重复”；关系可单项重算、全库重建或双向解除。
-- 相似度排除词表可维护常见厂牌和编号前缀；切换强度不会隐式重算全库。
+- 疑似重复、大任务和体积异常会停下来等待人工确认。
 
-### 队列与文件安全
+- 只有压缩、验证和入库完成后，才会按设置保留、移动或回收原文件，保证文件的绝对安全。
 
-- 支持暂停、完成当前项后暂停、定时运行和基于历史速度的剩余时间估算。
-- 无法读取的文件会跳过并记入日志；存在跳过项时保留源项目。
-- 当前任务移入 Windows 回收站后立即复核；无法确认时停止队列，不抽查历史项目。
-- 删除仓库记录可选择恢复已移动或已回收的原文件；恢复失败不会继续删除记录与压缩包。
+
+
+## 主要能力
+
+### 安全归档
+
+- 软件目录内置便携版 7-Zip，支持 7z/ZIP 格式、0—9 压缩等级与 `7z t` 完整性测试。
+- 压缩前清单和源文件复核；无法读取的文件跳过并写入日志。
+- 体积异常不自动入库，可确认保留或只删除异常成品。
+- 多卷成品采用暂存隔离后的原子删除流程，避免只处理一部分分卷。
+- 压缩前检查磁盘余量；跨盘移动采用复制、核验、再删除源文件。
+- 队列支持暂停、完成当前项后暂停、定时运行和基于历史速度的剩余时间估算。
+
+### 媒体与缩略图
+
+- 便携版 FFmpeg 完成视频探测与均匀抽帧，无需 FFprobe。
+- 视频帧数和单项目缩略图上限均可设置；竖屏画面完整保留。
+- 同一视频的多帧预览会成组显示。
+- 图片可放大、设为封面、删除，也可手动选择或粘贴补充图片。
+
+### 搜索、重复与相似关系
+
+- SQLite + FTS5 持久化索引，中文采用单字与 bigram 候选词，拉丁文字按词索引。
+- 精确指纹、标题和视频大小参与重复提示；相似判断完全在本地完成。
+- 相似关系可针对单个项目重新计算，也可手动解除；解除关系会双向保存。
+- 相似度排除词表可自行维护，项目详情中可一键将重复词加入白名单。
+
+### 原文件位置追踪
+
+- 每个项目保存独立的隐藏原始路径字段，旧记录缺少该字段时会安全补为空值。
+- 未移动的项目显示原路径；已移动或进入回收站的项目显示当前状态。
+- 详情页可打开原文件当前位置；回收站中的项目可确认复原到原位置，成功后自动打开对应目录。
+- 当前任务执行源文件处理后会立即复核本次操作；只有本次任务无法确认回收站保留时才会触发安全熔断。历史项目不会被后台抽查，避免把用户主动清理误报成任务事故。
+- 删除仓库记录时，可选择尝试把已移动或已回收的原文件复原到原始位置；复原失败不会继续删除记录和压缩包。
+
+### 仓库整理
+
+- 标题、标签、星级、备注、备份位置和项目级解压密码。
+- 密码默认遮盖，只在主动显示后可查看或复制。
+- 批量追加标签、批量修改备份位置、多选删除和最多十步撤回。
+- 手动新增无压缩包的库存记录，以及仓库导出、并入外部仓库。
+
+
 
 ## 快速开始
 
-1. 从 [Releases](../../releases/latest) 下载 Windows x64 ZIP。
-2. **完整解压**到一个文件夹，运行 `HamsterArchiver.exe`。
-3. 选择待收存主目录和压缩包存放点，扫描、确认队列并开始归档。
+### 直接使用发行版
 
-> 不要只复制 EXE。Electron、7-Zip、FFmpeg 和更新校验依赖完整发行目录。
+1. 在 [Releases](../../releases) 下载 Windows x64 压缩包。
+2. 完整解压后运行 `HamsterArchiver.exe`。
+3. 选择“需要备份的文件主目录”和“打包后文件存放点”，先扫描并确认任务，再开始压缩入库。
 
-### 更新
+请保留发行包的目录结构，不要只复制 EXE。Electron、7-Zip 与 FFmpeg 依赖完整发行目录；用户数据区默认是旁边的 `userdata`，也可以在“更多设置”中安全复制或切换到其他目录。
 
-点击“检查更新”会显示当前版本与最新版本：有新版时可自动更新；无论是否联网、是否已有新版，都可以选择“手动更新”并指定完整的 Windows x64 发行 ZIP。程序会验证版本、平台、发行清单和关键文件，替换时排除现有 `userdata`，失败则回滚。
+### 自动更新失败时手动更新
 
-<details>
-<summary><strong>从 4.2.0 手动迁移</strong></summary>
+点击应用左上角的“检查更新”，选择手动更新，导入最新版本的压缩包。当
 
-4.2.0 内置的旧更新脚本不能正确替换 `resources`，需要手动升级一次：
+1. 从 [Releases](../../releases) 下载最新 Windows x64 压缩包，无需解压。
+2. 在旧应用中，点击应用左上角的“检查更新”，选择手动更新，选择最新版本的压缩包。
+3. 确认版本号、仓库记录和缩略图正常，更新完成。
 
-1. 在旧版仓库中“导出仓库”，然后完全退出应用。
-2. 把最新 ZIP 完整解压到一个**新文件夹**，不要覆盖仍在运行的旧目录。
-3. 运行新版并选择“并入外部仓库”，导入上一步的仓库 ZIP。
-4. 核对版本、记录和缩略图；确认前保留旧程序目录。
+### 搬迁仓库
 
-</details>
+1. 使用“导出仓库”生成仓库压缩包。
+2. 运行新目录中的 `HamsterArchiver.exe`，在“仓库”中选择“并入外部仓库”，导入第 1 步生成的仓库压缩包。
 
-## 便携数据布局
 
-```text
-HamsterArchiver-v4.5.6-win-x64/
-├─ HamsterArchiver.exe
-├─ tools/                  # 7-Zip 与 FFmpeg
-├─ resources/              # Electron 应用代码
-└─ userdata/
-   ├─ config/              # 设置与相似度排除词表
-   ├─ warehouse/           # SQLite 仓库与缩略图
-   ├─ logs/                # 当前用户运行日志
-   ├─ processed/           # 默认的已处理原文件去向
-   └─ electron/            # 本地界面缓存
-```
 
-用户数据区可能包含密码、个人路径和媒体缩略图，因此被 Git 忽略且不会进入公开源码或 Release ZIP。你可以在“更多设置”中把数据复制到空目录，或切换到另一个已存在的数据区；旧目录会保留，两个仓库不会静默合并。
+### 从源码运行
 
-## 技术边界
+环境：Windows，以及 Node.js 22.12+（22.x）或 Node.js 24.x；配套使用 npm 10.x/11.x。`.nvmrc` 与 CI 跟随 Node.js 24.x，但只是开发建议，不是 Git 或构建门槛。直接 npm 依赖仍使用精确版本，首次安装请运行 `npm ci`。
 
-| 领域 | 实现 |
-|---|---|
-| 桌面端 | Electron 43、上下文隔离、sandbox、严格 CSP |
-| 数据 | Node 内置 SQLite、WAL、事务、FTS5 |
-| 压缩 | 便携版 7-Zip 26.02、7z/ZIP、完整性测试 |
-| 媒体 | 单个便携 FFmpeg 完成探测与均匀抽帧 |
-| 性能 | 仓库分页、目录虚拟化、持久化搜索与相似候选索引 |
-| 网络 | 仅检查更新或打开 GitHub 链接时访问 GitHub；不负责上传归档包 |
-
-## 从源码运行
-
-需要 Windows、Node.js 22.12+（22.x）或 24.x，以及 npm 10.x/11.x。
+`npm run release:local` 直接使用当前受支持的本机 Node.js，不下载第二套 Node，也不因补丁版本不同而阻止构建；发行清单会记录实际使用的 Node.js/npm 版本。
 
 ```powershell
 git clone https://github.com/CarlosZ16420/hamster-archiver.git
@@ -139,20 +152,71 @@ npm test
 npm start
 ```
 
-源码仓库不提交体积较大的 `ffmpeg.exe`。`dependency-lock.json` 固定 Electron、7-Zip、FFmpeg 的版本、来源与关键摘要；需要恢复工具时运行 `npm run tools:prepare`，正式构建前运行 `npm run verify:tools`。
+维护机的构建、用户数据和公开快照统一放在源码仓库同级的 `HamsterArchiver-Local/`，源码根目录不再保存或运行 EXE。开发模式使用独立的 `data/development`；运行当前维护版使用 `npm run preview:current`。目录与发布规则见 [开发指南](docs/DEVELOPMENT.md) 和 [发行流程](docs/RELEASE.md)。
 
-维护机的构建、用户数据和公开快照应放在源码仓库外。开发模式使用隔离数据；本地发行和版本规则见 [开发指南](docs/DEVELOPMENT.md) 与 [发行流程](docs/RELEASE.md)。
+源代码仓库不会提交体积较大的 `ffmpeg.exe`，但 `dependency-lock.json` 已锁定 Electron、7-Zip 26.02、FFmpeg 的版本、来源、来源包及关键二进制 SHA-256。许可证和来源说明必须存在，并会与关键程序一起写入发行包完整性清单。需要恢复内置工具时运行 `npm run tools:prepare`，它只接受清单中的固定下载地址和摘要；构建发行包前运行 `npm run verify:tools`。发行构建会再次执行版本检查、校验复制结果，并把关键文件 SHA-256 写入 `release-manifest.json`，供应用启动和自动更新解包时复核。
 
-## 贡献
+## 便携数据布局
 
-提交前请运行 `npm run verify:dependencies`、`npm run check`、`npm test` 和 `npm run publish:check`。不要提交用户数据、数据库、日志、压缩包、密码、真实媒体或个人绝对路径；详见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。
+```text
+HamsterArchiver-v4.5.9-win-x64/
+├─ HamsterArchiver.exe
+├─ tools/
+│  ├─ 7zip/
+│  └─ ffmpeg/
+├─ resources/
+└─ userdata/
+   ├─ config/       # 设置与相似度排除词表
+   ├─ warehouse/    # SQLite 仓库与缩略图
+   ├─ logs/         # 运行日志
+   ├─ processed/    # 默认的已备份原文件去向
+   └─ electron/     # 本地界面缓存
+```
 
-本项目采用 [MIT License](LICENSE)。7-Zip 和 FFmpeg 遵循发行包中随附的许可证。
+压缩暂存目录默认建立在“打包后文件存放点”旁，例如 `D:\packed-staging`，以减少跨盘移动。待备份主目录和成品存放点由用户选择，不属于源码或用户数据库。
+
+用户数据区可能包含密码、文件路径、缩略图和仓库索引。它被 Git 忽略，也不会进入公开快照；通过“更多设置”切换位置时，空目标会先复制数据且保留旧目录，已有数据目标不会与当前仓库自动合并。
+
+## 技术与边界
+
+| 领域 | 实现 |
+|---|---|
+| 桌面端 | Electron 43、上下文隔离、sandbox、严格 CSP |
+| 数据 | Node 内置 SQLite、WAL、事务、FTS5 |
+| 压缩 | 便携版 7-Zip、7z/ZIP、64 MiB—10 GiB 可配置分卷、可选密码、完整性测试 |
+| 媒体 | 单个 FFmpeg 程序完成探测与抽帧 |
+| 性能 | 仓库分页、目录虚拟化、持久化搜索与相似候选索引 |
+| 隐私 | 用户数据留在本机；不上传仓库、媒体或密码 |
+
+应用不会主动上传文件。只有在你点击“检查更新”或打开 GitHub 链接时，才会访问 GitHub；更新包会先下载到 userdata 的临时区，校验后由独立更新助手替换程序文件；压缩包上传仍由你的云盘客户端或手动操作完成。
+
+## 开发与贡献
+
+提交前请运行：
+
+```powershell
+npm run verify:dependencies
+npm run check
+npm test
+npm run publish:check
+```
+
+正式构建前另运行 `npm run verify:tools`；依赖或内置工具升级必须单独修改 `dependency-lock.json`，审核锁文件差异并完成真实归档与媒体抽帧测试。
+
+不要提交 `userdata/`、数据库、日志、归档包、密码、真实媒体或个人绝对路径。详见 [CONTRIBUTING.md](CONTRIBUTING.md) 与 [SECURITY.md](SECURITY.md)。
+
+本项目采用 [MIT License](LICENSE)。7-Zip 和 FFmpeg 分别遵循其随附许可证。
+
+---
 
 <div align="center">
 
-**把“我好像存过”变成可验证、可搜索的答案。**
+欢迎试用、提交 Issue 或 Pull Request。你的反馈会帮助这个小工具变得更稳、更顺手。
 
-[下载最新版](../../releases/latest) · [提交 Issue](../../issues) · [查看版本记录](CHANGELOG.public.md)
+[GitHub 仓库](https://github.com/CarlosZ16420/hamster-archiver) · [欢迎反馈](https://github.com/CarlosZ16420/hamster-archiver/issues)
 
 </div>
+
+## 致谢
+
+- LINUX DO

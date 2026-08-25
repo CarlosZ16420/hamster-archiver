@@ -1,6 +1,6 @@
 {
   "name": "hamster-archiver",
-  "version": "4.5.6",
+  "version": "4.5.9",
   "private": true,
   "license": "MIT",
   "description": "Hamster Archiver：本地优先的归档与备份管理工具",

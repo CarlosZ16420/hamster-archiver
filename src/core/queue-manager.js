@@ -396,6 +396,7 @@ class QueueManager extends EventEmitter {
       recordArchivePassword: true,
       suppressInventoryOnlyRisk: false,
       suppressCatalogCompressionRisk: false,
+      suppressSimilarityWhitelistHint: false,
       compressionHistory: [],
       ...normalizedConfig
     };
@@ -420,6 +421,7 @@ class QueueManager extends EventEmitter {
     this.schedulePaused = false;
     this.undoStack = [];
     this.similarityIgnoreTerms = [];
+    this.similarityIgnoreTermsWritePromise = Promise.resolve();
     this.similarityStrength = DEFAULT_SIMILARITY_STRENGTH;
     this.similarityRebuildPromise = null;
     this.similarityMaintenanceTask = null;
@@ -575,6 +577,50 @@ class QueueManager extends EventEmitter {
       await fs.writeFile(filePath, [...header, ...DEFAULT_SIMILARITY_IGNORE_TERMS, ''].join('\r\n'), 'utf8');
     }
     return filePath;
+  }
+
+  async addSimilarityIgnoreTerm(input) {
+    const rawTerm = String(input ?? '').normalize('NFKC');
+    if (/[\u0000-\u001f\u007f]/u.test(rawTerm)) {
+      throw new Error('要加入白名单的词语不能包含换行或控制字符。');
+    }
+
+    const term = rawTerm.trim();
+    if (!term) throw new Error('要加入白名单的词语不能为空。');
+    if (term.length > 200) throw new Error('要加入白名单的词语不能超过 200 个字符。');
+    if (!/[\p{L}\p{N}]/u.test(term)) {
+      throw new Error('要加入白名单的词语至少包含一个文字或数字。');
+    }
+
+    const operation = this.similarityIgnoreTermsWritePromise.then(async () => {
+      const ignoreTermsPath = await this.ensureSimilarityIgnoreTermsFile();
+      const content = await fs.readFile(ignoreTermsPath, 'utf8');
+      const terms = parseSimilarityIgnoreTerms(content);
+      const normalizedTerm = term.toLocaleLowerCase('zh-CN');
+      const alreadyExists = terms.some(
+        (item) => item.normalize('NFKC').toLocaleLowerCase('zh-CN') === normalizedTerm
+      );
+      if (alreadyExists) {
+        this.similarityIgnoreTerms = terms;
+        return { added: false, term, count: terms.length, path: ignoreTermsPath };
+      }
+
+      const lineEnding = content.includes('\r\n') ? '\r\n' : '\n';
+      const separator = content && !content.endsWith('\n') && !content.endsWith('\r') ? lineEnding : '';
+      const appended = `${separator}${term}${lineEnding}`;
+      await fs.appendFile(ignoreTermsPath, appended, 'utf8');
+      this.similarityIgnoreTerms = parseSimilarityIgnoreTerms(`${content}${appended}`);
+      this.markTermStatisticsDirty();
+      return {
+        added: true,
+        term,
+        count: this.similarityIgnoreTerms.length,
+        path: ignoreTermsPath
+      };
+    });
+
+    this.similarityIgnoreTermsWritePromise = operation.catch(() => undefined);
+    return operation;
   }
 
   async reloadSimilarityIgnoreTerms({ rebuild = true } = {}) {

@@ -145,3 +145,29 @@ test('catalog tag filter always includes the possible-duplicate virtual option',
   assert.match(app, /new Option\('可能重复', possibleDuplicateFilter\)/);
   assert.match(app, /possibleDuplicateFilter = '__possible_duplicate__'/);
 });
+
+test('name-similarity highlights expose a guarded one-click whitelist action', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+
+  assert.match(app, /match\.reason === '目录名相似' \|\| match\.reason === '文件名相似'/);
+  assert.match(app, /mark\.dataset\.whitelistTerm = mark\.textContent/);
+  assert.match(app, /window\.archiveApp\.addSimilarityIgnoreTerm\(term\)/);
+  assert.match(app, /event\.key !== 'Enter' && event\.key !== ' '/);
+  assert.match(main, /加入白名单的词语会在相似度计算中排除，您可以在相似度设置中手动编辑白名单/);
+  assert.match(main, /checkboxLabel: isEnglish \? 'Do not remind me again' : '下次不再提醒'/);
+  assert.match(styles, /\.similarity-whitelist-action\s*\{[^}]*position:\s*fixed;[^}]*z-index:\s*1000;/s);
+});
+
+test('warehouse browsing keeps compact controls, root folders, backup locations and keyboard paging visible', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+
+  assert.match(styles, /\.similarity-rebuild-setting > \.button\s*\{[^}]*white-space:\s*nowrap;/s);
+  assert.match(app, /record\.sourceType === 'directory' \? record\.displayName : ''/);
+  assert.match(app, /'标签', '备份位置', '入库时间'/);
+  assert.match(app, /backupCell\.textContent = record\.backupLocation \|\| '—'/);
+  assert.match(app, /\['ArrowLeft', 'ArrowRight'\]\.includes\(event\.key\)/);
+  assert.match(styles, /\.activity-cell\[data-level="0"\][^\{]*\{[^}]*background:\s*#fff;/s);
+});

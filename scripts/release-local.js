@@ -35,6 +35,47 @@ async function exists(targetPath) {
   }
 }
 
+function renameWithPowerShell(sourcePath, destinationPath) {
+  run('powershell.exe', [
+    '-NoProfile',
+    '-NonInteractive',
+    '-Command',
+    'Move-Item -LiteralPath $env:HAMSTER_RENAME_SOURCE -Destination $env:HAMSTER_RENAME_DESTINATION -ErrorAction Stop'
+  ], {
+    env: {
+      ...process.env,
+      HAMSTER_RENAME_SOURCE: sourcePath,
+      HAMSTER_RENAME_DESTINATION: destinationPath
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+}
+
+async function renameWithRetry(sourcePath, destinationPath, { attempts = 4, delayMs = 500 } = {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await fsp.rename(sourcePath, destinationPath);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code)) throw error;
+      if (attempt === attempts) {
+        if (process.platform !== 'win32') throw error;
+        try {
+          renameWithPowerShell(sourcePath, destinationPath);
+          return;
+        } catch (fallbackError) {
+          error.cause = fallbackError;
+          throw error;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
+
 function assertApplicationStopped() {
   const processes = run('tasklist.exe', [
     '/FI', 'IMAGENAME eq HamsterArchiver.exe', '/FO', 'CSV', '/NH'
@@ -51,14 +92,14 @@ async function promoteCurrent(suffix) {
   let previousCurrent = null;
   if (await exists(layout.currentBuild)) {
     previousCurrent = path.join(layout.historyRoot, `current-${suffix}`);
-    await fsp.rename(layout.currentBuild, previousCurrent);
+    await renameWithRetry(layout.currentBuild, previousCurrent);
   }
   try {
-    await fsp.rename(stagingBuild, layout.currentBuild);
+    await renameWithRetry(stagingBuild, layout.currentBuild);
     return previousCurrent;
   } catch (error) {
     if (previousCurrent && !(await exists(layout.currentBuild))) {
-      await fsp.rename(previousCurrent, layout.currentBuild);
+      await renameWithRetry(previousCurrent, layout.currentBuild);
     }
     throw error;
   }
@@ -75,27 +116,27 @@ async function replacePackage(digest, suffix) {
   await fsp.mkdir(packageHistory, { recursive: true });
   await fsp.rm(temporarySha, { force: true });
   if (await exists(finalZip)) {
-    await fsp.rename(finalZip, priorZip);
+    await renameWithRetry(finalZip, priorZip);
     savedZip = true;
   }
   if (await exists(finalSha)) {
-    await fsp.rename(finalSha, priorSha);
+    await renameWithRetry(finalSha, priorSha);
     savedSha = true;
   }
 
   try {
-    await fsp.rename(stagedZip, finalZip);
+    await renameWithRetry(stagedZip, finalZip);
     await fsp.writeFile(
       temporarySha,
       `${digest} *${path.basename(finalZip)}\r\n`,
       'ascii'
     );
-    await fsp.rename(temporarySha, finalSha);
+    await renameWithRetry(temporarySha, finalSha);
   } catch (error) {
     await fsp.rm(temporarySha, { force: true });
-    if (await exists(finalZip)) await fsp.rename(finalZip, stagedZip);
-    if (savedZip) await fsp.rename(priorZip, finalZip);
-    if (savedSha) await fsp.rename(priorSha, finalSha);
+    if (await exists(finalZip)) await renameWithRetry(finalZip, stagedZip);
+    if (savedZip) await renameWithRetry(priorZip, finalZip);
+    if (savedSha) await renameWithRetry(priorSha, finalSha);
     throw error;
   }
 }
@@ -203,9 +244,9 @@ async function main() {
     await replacePackage(digest, suffix);
   } catch (error) {
     if (await exists(layout.currentBuild)) {
-      await fsp.rename(layout.currentBuild, stagingBuild);
+      await renameWithRetry(layout.currentBuild, stagingBuild);
     }
-    if (previousCurrent) await fsp.rename(previousCurrent, layout.currentBuild);
+    if (previousCurrent) await renameWithRetry(previousCurrent, layout.currentBuild);
     throw error;
   }
 

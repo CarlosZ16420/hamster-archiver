@@ -189,6 +189,9 @@ let toastTimer;
 let updateCheckInFlight = false;
 let pendingManualImages = [];
 let similarityManageRecordId = null;
+let similarityWhitelistPopover = null;
+let similarityWhitelistAnchor = null;
+let similarityWhitelistWriteInFlight = false;
 const thumbnailCache = new Map();
 const thumbnailPending = new Map();
 const THUMBNAIL_CACHE_LIMIT = 300;
@@ -987,7 +990,7 @@ function renderCatalog(catalog) {
   const fragment = document.createDocumentFragment();
   if (catalogViewMode === 'list') {
     const header = make('div', 'catalog-text-header');
-    for (const label of ['', '名称', '类型', '文件', '大小 / 状态', '标签', '入库时间', '星级']) {
+    for (const label of ['', '名称', '类型', '文件', '大小 / 状态', '标签', '备份位置', '入库时间', '星级']) {
       header.append(make('span', '', label));
     }
     fragment.append(header);
@@ -1019,12 +1022,17 @@ function renderCatalog(catalog) {
         : record.archiveState === 'uncompressed'
           ? '未压缩'
           : `${formatBytes(record.archiveTotalBytes)}${volumeCount > 1 ? ` · ${volumeCount} 卷` : ''}`;
+      const backupCell = document.createElement('span');
+      backupCell.className = 'catalog-text-backup';
+      backupCell.textContent = record.backupLocation || '—';
+      if (record.backupLocation) backupCell.title = record.backupLocation;
       button.append(
         titleCell,
         make('span', 'catalog-text-type', type),
         make('span', 'catalog-text-number', record.recordType === 'manual' ? '—' : String(record.manifestCount || 0)),
         make('span', record.archiveState === 'uncompressed' ? 'catalog-text-status uncompressed' : 'catalog-text-status', archiveSummary),
         tagsCell,
+        backupCell,
         make('span', 'catalog-text-date', formatCatalogDate(record.inventoryDate || record.completedAt)),
         make('span', 'catalog-text-rating', starText(record.rating))
       );
@@ -1172,8 +1180,8 @@ function setCatalogView(mode) {
   requestAnimationFrame(applyCatalogGridLayout);
 }
 
-function createTree(directories, files) {
-  const root = { name: '', path: '', directories: new Map(), files: [] };
+function createTree(directories, files, rootName = '') {
+  const root = { name: String(rootName || ''), path: '', directories: new Map(), files: [] };
   const ensureDirectory = (directoryPath) => {
     let node = root;
     let currentPath = '';
@@ -1378,18 +1386,112 @@ function flattenDirectoryTree(root) {
     for (const child of [...node.directories.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))) visit(child, depth + 1, key);
     for (const file of [...node.files].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))) rows.push({ type: 'file', depth: depth + 1, file });
   };
-  for (const directory of [...root.directories.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))) visit(directory, 0, '');
-  for (const file of [...root.files].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))) rows.push({ type: 'file', depth: 0, file });
+  if (root.name) {
+    visit(root, 0, '');
+  } else {
+    for (const directory of [...root.directories.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))) visit(directory, 0, '');
+    for (const file of [...root.files].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))) rows.push({ type: 'file', depth: 0, file });
+  }
   return rows;
 }
 
-function appendHighlightedName(parent, text, ranges = []) {
+function hideSimilarityWhitelistAction() {
+  if (!similarityWhitelistPopover) return;
+  similarityWhitelistPopover.hidden = true;
+  similarityWhitelistPopover.disabled = false;
+  similarityWhitelistPopover.removeAttribute('data-term');
+  similarityWhitelistAnchor = null;
+}
+
+function positionSimilarityWhitelistAction(mark) {
+  if (!similarityWhitelistPopover || similarityWhitelistPopover.hidden || !mark?.isConnected) return;
+  requestAnimationFrame(() => {
+    if (!similarityWhitelistPopover || similarityWhitelistPopover.hidden || mark !== similarityWhitelistAnchor || !mark.isConnected) return;
+    const markRect = mark.getBoundingClientRect();
+    const buttonRect = similarityWhitelistPopover.getBoundingClientRect();
+    const gap = 6;
+    const edge = 10;
+    const left = Math.min(
+      Math.max(edge, window.innerWidth - buttonRect.width - edge),
+      Math.max(edge, markRect.left)
+    );
+    let top = markRect.bottom + gap;
+    if (top + buttonRect.height > window.innerHeight - edge) {
+      top = Math.max(edge, markRect.top - buttonRect.height - gap);
+    }
+    similarityWhitelistPopover.style.left = `${left}px`;
+    similarityWhitelistPopover.style.top = `${top}px`;
+  });
+}
+
+function ensureSimilarityWhitelistAction() {
+  if (similarityWhitelistPopover) return similarityWhitelistPopover;
+  const button = make('button', 'similarity-whitelist-action', '一键加入白名单');
+  button.type = 'button';
+  button.hidden = true;
+  button.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    if (similarityWhitelistWriteInFlight) return;
+    const term = button.dataset.term || '';
+    const recordId = activeCatalogId;
+    hideSimilarityWhitelistAction();
+    if (!term) return;
+    similarityWhitelistWriteInFlight = true;
+    try {
+      const result = await safely(() => window.archiveApp.addSimilarityIgnoreTerm(term));
+      if (!result || result.cancelled) return;
+      if (recordId && activeCatalogId === recordId) await loadCatalogDetails(recordId);
+      showToast(result.added
+        ? `“${result.term}”已加入相似度白名单；已有关系不会自动重算`
+        : `“${result.term}”已在相似度白名单中`);
+    } finally {
+      similarityWhitelistWriteInFlight = false;
+    }
+  });
+  document.body.append(button);
+  similarityWhitelistPopover = button;
+  return button;
+}
+
+function showSimilarityWhitelistAction(mark) {
+  const term = mark?.dataset.whitelistTerm || '';
+  if (!term) return;
+  const button = ensureSimilarityWhitelistAction();
+  similarityWhitelistAnchor = mark;
+  button.dataset.term = term;
+  button.hidden = false;
+  positionSimilarityWhitelistAction(mark);
+}
+
+function appendHighlightedName(parent, text, ranges = [], { whitelistable = false } = {}) {
   let cursor = 0;
   for (const [start, end] of ranges) {
     const safeStart = Math.max(cursor, Math.min(text.length, Number(start) || 0));
     const safeEnd = Math.max(safeStart, Math.min(text.length, Number(end) || 0));
     if (safeStart > cursor) parent.append(document.createTextNode(text.slice(cursor, safeStart)));
-    if (safeEnd > safeStart) parent.append(make('mark', 'similar-name-mark', text.slice(safeStart, safeEnd)));
+    if (safeEnd > safeStart) {
+      const mark = document.createElement('mark');
+      mark.className = 'similar-name-mark';
+      mark.textContent = text.slice(safeStart, safeEnd);
+      if (whitelistable) {
+        mark.classList.add('whitelistable');
+        mark.dataset.whitelistTerm = mark.textContent;
+        mark.tabIndex = 0;
+        mark.setAttribute('role', 'button');
+        mark.title = t('点击标记常用词');
+        mark.addEventListener('click', (event) => {
+          event.stopPropagation();
+          showSimilarityWhitelistAction(mark);
+        });
+        mark.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          event.stopPropagation();
+          showSimilarityWhitelistAction(mark);
+        });
+      }
+      parent.append(mark);
+    }
     cursor = safeEnd;
   }
   if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
@@ -1438,6 +1540,8 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
       const row = make('div', `virtual-tree-row ${item.type}${item.type === 'directory' && item.hasChildren ? ' collapsible' : ''}`);
       const relativePath = item.type === 'directory' ? item.relativePath : item.file.relativePath;
       const similarity = similarityMap.get(`${item.type}:${relativePath}`);
+      const whitelistable = Boolean(similarity?.matches?.some((match) =>
+        match.reason === '目录名相似' || match.reason === '文件名相似'));
       if (similarity) {
         row.classList.add('similar-entry');
         row.dataset.similarEntry = 'true';
@@ -1455,11 +1559,11 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
           row.append(make('span', 'virtual-tree-icon', '·'));
         }
         const name = make('strong', '');
-        appendHighlightedName(name, item.name, similarity?.ranges || []);
+        appendHighlightedName(name, item.name, similarity?.ranges || [], { whitelistable });
         row.append(name, make('small', '', `${item.count} 项`));
       } else {
         const name = make('span', 'virtual-tree-name');
-        appendHighlightedName(name, item.file.name, similarity?.ranges || []);
+        appendHighlightedName(name, item.file.name, similarity?.ranges || [], { whitelistable });
         row.append(
           make('span', 'virtual-tree-icon file', (item.file.extension || 'FILE').replace('.', '').slice(0, 4).toUpperCase()),
           name,
@@ -1470,8 +1574,12 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
     }
     canvas.replaceChildren(fragment);
   };
-  viewport.addEventListener('scroll', paint, { passive: true });
+  viewport.addEventListener('scroll', () => {
+    hideSimilarityWhitelistAction();
+    paint();
+  }, { passive: true });
   viewport.addEventListener('click', (event) => {
+    if (event.target.closest('.similar-name-mark.whitelistable')) return;
     const row = event.target.closest('.virtual-tree-row.collapsible');
     if (!row || !viewport.contains(row)) return;
     const key = row.dataset.treeKey;
@@ -1768,6 +1876,7 @@ function renderSimilarProjects(record) {
 
 function renderCatalogDetail(record) {
   if (!record || record.id !== activeCatalogId) return;
+  hideSimilarityWhitelistAction();
   elements.catalogDetail.replaceChildren();
   const heading = make('div', 'archive-heading');
   heading.append(make('h3', '', catalogTitle(record)));
@@ -1898,7 +2007,11 @@ function renderCatalogDetail(record) {
   if (record.recordType === 'manual') return;
   const directoryHeading = make('h3', 'directory-structure-heading', '完整目录结构');
   elements.catalogDetail.append(directoryHeading);
-  const root = createTree(record.directories || [], record.manifest || []);
+  const root = createTree(
+    record.directories || [],
+    record.manifest || [],
+    record.sourceType === 'directory' ? record.displayName : ''
+  );
   elements.catalogDetail.append(renderVirtualDirectoryTree(root, record.similarEntryMatches || []));
 }
 
@@ -2036,6 +2149,11 @@ document.querySelectorAll('.action-menu').forEach((menu) => {
 document.addEventListener('pointerdown', (event) => {
   for (const menu of document.querySelectorAll('.action-menu[open]')) {
     if (!menu.contains(event.target)) menu.removeAttribute('open');
+  }
+  if (similarityWhitelistPopover &&
+      !similarityWhitelistPopover.contains(event.target) &&
+      !event.target.closest('.similar-name-mark.whitelistable')) {
+    hideSimilarityWhitelistAction();
   }
 });
 
@@ -2470,6 +2588,7 @@ for (const filter of [elements.catalogTagFilter, elements.catalogBackupFilter, e
 elements.catalogListView.addEventListener('click', () => setCatalogView('list'));
 elements.catalogGridView.addEventListener('click', () => setCatalogView('grid'));
 window.addEventListener('resize', () => {
+  hideSimilarityWhitelistAction();
   if (catalogViewMode !== 'grid') return;
   clearTimeout(catalogResizeTimer);
   catalogResizeTimer = setTimeout(() => {
@@ -2617,6 +2736,16 @@ elements.catalogPageSelect.addEventListener('change', () => {
   catalogPage = Math.max(1, Number(elements.catalogPageSelect.value) || 1);
   renderCatalog(currentCatalogResults);
   elements.catalogList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+});
+document.addEventListener('keydown', (event) => {
+  if (!['ArrowLeft', 'ArrowRight'].includes(event.key) || event.defaultPrevented ||
+      event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+  if (document.querySelector('#library-page')?.hidden || document.querySelector('dialog[open]')) return;
+  if (event.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
+  const target = event.key === 'ArrowLeft' ? elements.catalogPagePrev : elements.catalogPageNext;
+  if (elements.catalogPagination.hidden || target.disabled) return;
+  event.preventDefault();
+  target.click();
 });
 
 document.addEventListener('click', (event) => {

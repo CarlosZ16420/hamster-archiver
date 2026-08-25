@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('archiveApp', {
   changeUserDataLocation: () => ipcRenderer.invoke('user-data:change-location'),
   openSimilarityIgnoreTerms: () => ipcRenderer.invoke('similarity:open-ignore-terms'),
   reloadSimilarityIgnoreTerms: () => ipcRenderer.invoke('similarity:reload-ignore-terms'),
+  addSimilarityIgnoreTerm: (term) => ipcRenderer.invoke('similarity:add-ignore-term', term),
   rebuildAllSimilarity: () => ipcRenderer.invoke('similarity:rebuild-all'),
   openExternal: (url) => ipcRenderer.invoke('system:open-external', url),
   copyText: (value) => ipcRenderer.invoke('system:copy-text', value),

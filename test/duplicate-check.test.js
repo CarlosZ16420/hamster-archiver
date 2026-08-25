@@ -145,6 +145,26 @@ test('similar directory entries report exact paths and highlight ranges', () => 
     entry.matches.some((match) => match.reason === '文件内容完全一致')));
 });
 
+test('original root folder names expose highlight ranges for the one-click whitelist action', () => {
+  const matches = findSimilarEntryMatches({
+    sourceType: 'directory',
+    displayName: '王佳乐北京旅行完整记录',
+    directories: [],
+    manifest: []
+  }, [{
+    id: 'other',
+    title: '另一项目',
+    sourceType: 'directory',
+    displayName: '王佳乐北京旅行备份记录',
+    directories: [],
+    manifest: []
+  }]);
+
+  const root = matches.find((entry) => entry.kind === 'directory' && entry.relativePath === '');
+  assert.ok(root?.ranges.length > 0);
+  assert.ok(root.matches.some((match) => match.reason === '目录名相似' && match.relativePath === ''));
+});
+
 test('a short title or one shared boilerplate term cannot mark unrelated projects as duplicates', () => {
   assert.equal(titleSimilarity(
     '呻吟',

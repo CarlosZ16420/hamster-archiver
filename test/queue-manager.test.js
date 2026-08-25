@@ -586,6 +586,41 @@ test('changing similarity strength keeps existing relations until an explicit re
   assert.deepEqual(manager.catalog[1].similarRecords, [{ id: 'a', score: 0.75 }]);
 });
 
+test('adding a similarity whitelist term is serialized, normalized and does not rebuild relations', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-similarity-whitelist-'));
+  const termsPath = path.join(root, 'similarity-ignore-terms.txt');
+  await fs.writeFile(termsPath, '# common terms\r\nExisting\r\n', 'utf8');
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library',
+    similarityIgnoreTermsPath: termsPath
+  });
+  manager.rebuildAllSimilarityRelations = async () => {
+    throw new Error('adding a term must not trigger a relation rebuild');
+  };
+
+  try {
+    const [first, duplicate] = await Promise.all([
+      manager.addSimilarityIgnoreTerm('  常用词  '),
+      manager.addSimilarityIgnoreTerm('常用词')
+    ]);
+
+    assert.equal(first.added, true);
+    assert.equal(first.term, '常用词');
+    assert.equal(duplicate.added, false);
+    assert.deepEqual(manager.similarityIgnoreTerms, ['existing', '常用词']);
+    assert.equal((await fs.readFile(termsPath, 'utf8')).match(/常用词/g)?.length, 1);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('adding a similarity whitelist term rejects unsafe or meaningless text', async () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  await assert.rejects(() => manager.addSimilarityIgnoreTerm('line\nbreak'), /不能包含换行或控制字符/);
+  await assert.rejects(() => manager.addSimilarityIgnoreTerm(' -- '), /至少包含一个文字或数字/);
+  await assert.rejects(() => manager.addSimilarityIgnoreTerm('A'.repeat(201)), /不能超过 200 个字符/);
+});
+
 test('similarity rebuild clears every stale possible-duplicate label without a current relation', async () => {
   const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
   manager.catalog = [

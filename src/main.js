@@ -384,7 +384,7 @@ function createWindow() {
           'getState', 'chooseDirectory', 'chooseProgram', 'changeWarehouseLocation', 'openWarehouse', 'exportWarehouse', 'importWarehouse', 'checkForUpdates', 'installUpdatePackage', 'changeUserDataLocation', 'openExternal', 'copyText', 'chooseSingle', 'saveConfig', 'scanSource',
           'addSingle', 'openTaskSource', 'getDroppedPath', 'confirmTask', 'confirmAnomaly', 'acknowledgeTrashSafety', 'cancelTask', 'retryTask', 'startQueue', 'startInventoryOnlyQueue',
           'discardAnomaly', 'pauseQueue', 'resumeQueue', 'removeJobs', 'clearCompletedJobs', 'clearCancelledJobs', 'clearQueue', 'clearPotentialDuplicates', 'clearExactDuplicates', 'confirmAllDuplicates', 'finishNextAndPause', 'searchCatalog',
-          'getCatalogSuggestions', 'openSimilarityIgnoreTerms', 'reloadSimilarityIgnoreTerms', 'rebuildAllSimilarity', 'onSimilarityRebuildProgress',
+          'getCatalogSuggestions', 'openSimilarityIgnoreTerms', 'reloadSimilarityIgnoreTerms', 'addSimilarityIgnoreTerm', 'rebuildAllSimilarity', 'onSimilarityRebuildProgress',
           'getWarehouseInsights', 'getRandomCatalogRecord',
           'getCatalogDetails', 'openCatalogSource', 'restoreCatalogSource', 'updateCatalogMetadata', 'recalculateCatalogSimilarity', 'removeCatalogSimilarity', 'addManualCatalogRecord', 'addCatalogImage',
           'setCatalogCover', 'addTagsToCatalogRecords', 'updateBackupLocationForCatalogRecords', 'queueCatalogRecordsForCompression', 'undoCatalogAction', 'deleteCatalogRecords', 'getThumbnail',
@@ -984,6 +984,31 @@ function registerIpc() {
   ipcMain.handle('similarity:reload-ignore-terms', async (event) => {
     assertTrustedSender(event);
     return queueManager.reloadSimilarityIgnoreTerms();
+  });
+
+  ipcMain.handle('similarity:add-ignore-term', async (event, term) => {
+    assertTrustedSender(event);
+    if (!queueManager.config.suppressSimilarityWhitelistHint) {
+      const isEnglish = queueManager.config.language === 'en-US';
+      const response = await dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: isEnglish ? 'Similarity whitelist' : '相似度白名单',
+        message: isEnglish
+          ? 'Whitelisted terms are excluded from similarity calculations. You can edit the whitelist manually in Similarity Settings.'
+          : '加入白名单的词语会在相似度计算中排除，您可以在相似度设置中手动编辑白名单',
+        buttons: isEnglish ? ['Add to whitelist', 'Cancel'] : ['加入白名单', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+        checkboxLabel: isEnglish ? 'Do not remind me again' : '下次不再提醒',
+        noLink: true
+      });
+      if (response.response !== 0) return { cancelled: true };
+      if (response.checkboxChecked) {
+        queueManager.config.suppressSimilarityWhitelistHint = true;
+        await appStore.saveSettings(queueManager.config);
+      }
+    }
+    return queueManager.addSimilarityIgnoreTerm(term);
   });
 
   ipcMain.handle('similarity:rebuild-all', async (event) => {

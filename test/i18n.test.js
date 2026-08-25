@@ -53,6 +53,11 @@ if (!rendererDir) {
   test('exact, pattern and recursive-capture translations', () => {
     i18n.setLocale('en-US');
     assert.equal(i18n.translate('保存设置'), 'Save settings');
+    assert.equal(i18n.translate('一键加入白名单'), 'Add to whitelist');
+    assert.equal(
+      i18n.translate('“PRESTIGE”已加入相似度白名单；已有关系不会自动重算'),
+      '“PRESTIGE” added to the similarity whitelist; existing relations were not recalculated'
+    );
     assert.equal(i18n.translate('第 2 / 7 页'), 'Page 2 / 7');
     // Captured groups are translated recursively (拖放 is an exact entry).
     assert.equal(i18n.translate('已通过拖放加入 3 个任务'), 'Added 3 tasks via Drop');

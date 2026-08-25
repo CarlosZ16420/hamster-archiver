@@ -581,6 +581,13 @@ function findSimilarEntryMatches(subject, candidates, ignoreTerms = []) {
   const subjectDirectories = (subject.directories || []).map((relativePath) => ({
     kind: 'directory', relativePath: normalizeEntryPath(relativePath), name: entryName(relativePath)
   }));
+  if (subject.sourceType === 'directory' && String(subject.displayName || '').trim()) {
+    subjectDirectories.unshift({
+      kind: 'directory',
+      relativePath: '',
+      name: String(subject.displayName).trim()
+    });
+  }
   const subjectFiles = (subject.manifest || []).map((file) => ({
     kind: 'file', relativePath: normalizeEntryPath(file.relativePath), name: file.name || entryName(file.relativePath), file
   }));
@@ -595,6 +602,10 @@ function findSimilarEntryMatches(subject, candidates, ignoreTerms = []) {
   };
   for (const candidate of candidates || []) {
     const common = { recordId: candidate.id, title: candidate.title || candidate.displayName || '' };
+    if (candidate.sourceType === 'directory' && String(candidate.displayName || '').trim()) {
+      const entry = { ...common, kind: 'directory', relativePath: '', name: String(candidate.displayName).trim() };
+      for (const key of similarityCandidateKeys({ title: entry.name }, ignoreTerms)) addIndex(textIndex, `directory:${key}`, entry);
+    }
     for (const relativePath of candidate.directories || []) {
       const entry = { ...common, kind: 'directory', relativePath: normalizeEntryPath(relativePath), name: entryName(relativePath) };
       for (const key of similarityCandidateKeys({ title: entry.name }, ignoreTerms)) addIndex(textIndex, `directory:${key}`, entry);
