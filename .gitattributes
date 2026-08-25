@@ -44,3 +44,11 @@ logs/ export-ignore
 .env.* export-ignore
 HamsterArchive.exe export-ignore
 HamsterArchiver.exe export-ignore
+# 完整性锁定的元数据必须跨平台保持逐字节一致
+tools/7zip/BUILD-INFO.txt text eol=lf
+tools/ffmpeg/BUILD-INFO.txt text eol=lf
+
+# 项目代理规则和原型资料只服务私有开发仓库
+.agents/ export-ignore
+.workbuddy/ export-ignore
+docs/prototypes/ export-ignore

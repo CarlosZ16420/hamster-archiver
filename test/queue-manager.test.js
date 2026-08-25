@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
@@ -500,13 +501,13 @@ test('catalog search does not create a second in-memory posting index', () => {
   assert.equal(manager.searchCatalog({ query: '独角兽收藏' })[0].id, 'needle');
 });
 
-test('similar project links are stored symmetrically', () => {
+test('similar project links are stored symmetrically', async () => {
   const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
   manager.catalog = [
-    { id: 'a', title: '王佳乐在北京上学', displayName: '项目A', tags: [], manifest: [], directories: [] },
-    { id: 'b', title: '北京王佳乐的学习生活', displayName: '项目B', tags: [], manifest: [], directories: [] }
+    { id: 'a', title: '王佳乐北京旅行记录', displayName: '项目A', tags: [], manifest: [], directories: [] },
+    { id: 'b', title: '北京王佳乐旅行纪录', displayName: '项目B', tags: [], manifest: [], directories: [] }
   ];
-  manager.rebuildAllSimilarityRelations();
+  await manager.rebuildAllSimilarityRelations();
   assert.equal(manager.catalog[0].similarRecords[0].id, 'b');
   assert.equal(manager.catalog[1].similarRecords[0].id, 'a');
   assert.equal(manager.catalog[0].possibleDuplicate, true);
@@ -515,10 +516,10 @@ test('similar project links are stored symmetrically', () => {
 test('similar project links can be recalculated and dismissed symmetrically', async () => {
   const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
   manager.catalog = [
-    { id: 'a', title: '王佳乐在北京上学', displayName: '项目A', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] },
-    { id: 'b', title: '北京王佳乐的学习生活', displayName: '项目B', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] }
+    { id: 'a', title: '王佳乐北京旅行记录', displayName: '项目A', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] },
+    { id: 'b', title: '北京王佳乐旅行纪录', displayName: '项目B', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] }
   ];
-  manager.rebuildAllSimilarityRelations();
+  await manager.rebuildAllSimilarityRelations();
   await manager.recalculateCatalogSimilarity('a');
   assert.equal(manager.catalog[1].similarRecords.some((item) => item.id === 'a'), true);
 
@@ -528,13 +529,114 @@ test('similar project links can be recalculated and dismissed symmetrically', as
   assert.deepEqual(manager.catalog[0].dismissedSimilarRecordIds, ['b']);
   assert.deepEqual(manager.catalog[1].dismissedSimilarRecordIds, ['a']);
 
-  manager.rebuildAllSimilarityRelations();
+  await manager.rebuildAllSimilarityRelations();
   assert.deepEqual(manager.catalog[0].similarRecords, []);
   assert.deepEqual(manager.catalog[1].similarRecords, []);
 });
 
-test('similarity version upgrade removes stale domain-only FC2 relations', async () => {
-  class SimilarityUpgradeStore extends FakeStore {
+test('disabling similarity keeps old relations but skips new computations', async () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.catalog = [
+    { id: 'a', title: '王佳乐北京旅行记录', displayName: '项目A', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] },
+    { id: 'b', title: '北京王佳乐旅行纪录', displayName: '项目B', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] }
+  ];
+  await manager.rebuildAllSimilarityRelations();
+  assert.equal(manager.catalog[0].similarRecords.length, 1);
+
+  await manager.updateConfig({ similarityEnabled: false });
+  assert.equal(manager.isSimilarityEnabled(), false);
+  assert.equal(manager.catalog[0].similarRecords.length, 1);
+  assert.equal(manager.catalog[1].similarRecords.length, 1);
+
+  manager.catalog.push({
+    id: 'c', title: '王佳乐北京旅行记录续篇', displayName: '项目C',
+    tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: []
+  });
+  manager.refreshSimilarityForRecord(manager.catalog[2]);
+  assert.deepEqual(manager.catalog[2].similarRecords, []);
+  assert.equal(manager.catalog[0].similarRecords.length, 1);
+
+  // 全局重算是显式操作，不受自动开关限制，并汇报进度事件。
+  const events = [];
+  manager.on('similarity-progress', (progress) => events.push(progress));
+  await manager.recalculateAllSimilarity();
+  const relatedIds = manager.catalog[0].similarRecords.map((item) => item.id);
+  assert.ok(relatedIds.includes('b'));
+  assert.ok(relatedIds.includes('c'));
+  assert.ok(events.length >= 2);
+  assert.equal(events[0].active, true);
+  assert.equal(events.at(-1).active, false);
+  assert.equal(events.at(-1).total, manager.catalog.length);
+});
+
+test('changing similarity strength keeps existing relations until an explicit rebuild', async () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.catalog = [
+    { id: 'a', title: '项目A', displayName: '项目A', similarRecords: [{ id: 'b', score: 0.75 }] },
+    { id: 'b', title: '项目B', displayName: '项目B', similarRecords: [{ id: 'a', score: 0.75 }] }
+  ];
+  manager.rebuildAndPersistSimilarityRelations = async () => {
+    throw new Error('strength changes must not trigger a rebuild');
+  };
+
+  await manager.updateConfig({ similarityStrength: 'strict' });
+
+  assert.equal(manager.similarityStrength, 'strict');
+  assert.deepEqual(manager.catalog[0].similarRecords, [{ id: 'b', score: 0.75 }]);
+  assert.deepEqual(manager.catalog[1].similarRecords, [{ id: 'a', score: 0.75 }]);
+});
+
+test('similarity rebuild clears every stale possible-duplicate label without a current relation', async () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.catalog = [
+    {
+      id: 'stale', title: '阿尔法独有档案', displayName: '甲', tags: [], manifest: [], directories: [],
+      duplicateEvidence: true, duplicateReasons: ['标题相似'], possibleDuplicate: true,
+      similarRecords: [{ id: 'missing', score: 0.7 }], dismissedSimilarRecordIds: []
+    },
+    {
+      id: 'exact', title: '银河深处冬眠', displayName: '乙', tags: [], manifest: [], directories: [],
+      duplicateEvidence: true, duplicateReasons: ['存在精确重复文件'], possibleDuplicate: true,
+      similarRecords: [], dismissedSimilarRecordIds: []
+    }
+  ];
+
+  await manager.rebuildAllSimilarityRelations();
+
+  assert.deepEqual(manager.catalog[0].similarRecords, []);
+  assert.equal(manager.catalog[0].possibleDuplicate, false);
+  assert.equal(manager.catalog[1].possibleDuplicate, false);
+});
+
+test('manifest similarity confirmation uses the configured strength', () => {
+  const source = fsSync.readFileSync(path.join(__dirname, '..', 'src', 'core', 'queue-manager.js'), 'utf8');
+  assert.match(source, /onManifestReady:[\s\S]*?findSimilarProjects\([\s\S]*?this\.similarityIgnoreTerms,\s*this\.similarityStrength\s*\)/);
+});
+
+test('new jobs skip similarity confirmation while detection is disabled', async () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.catalog = [
+    { id: 'a', title: '王佳乐北京旅行记录 第一卷', displayName: '项目A', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] }
+  ];
+  const task = {
+    sourcePath: 'E:\\source\\wjl',
+    sourceType: 'directory',
+    displayName: '王佳乐北京旅行记录 第二卷',
+    fileCount: 1,
+    totalBytes: 1
+  };
+  await manager.updateConfig({ similarityEnabled: false });
+  const disabledJob = manager.createJob(task);
+  assert.deepEqual(disabledJob.similarMatches, []);
+  assert.equal(disabledJob.confirmationReasons.includes('similar_title'), false);
+
+  await manager.updateConfig({ similarityEnabled: true });
+  const enabledJob = manager.createJob(task);
+  assert.ok(enabledJob.similarMatches.length > 0);
+  assert.equal(enabledJob.confirmationReasons.includes('similar_title'), true);
+});
+
+test('similarity version upgrade removes stale domain-only FC2 relations', async () => {  class SimilarityUpgradeStore extends FakeStore {
     async loadCatalog() {
       return [
         {
@@ -558,8 +660,9 @@ test('similarity version upgrade removes stale domain-only FC2 relations', async
   const store = new SimilarityUpgradeStore();
   const manager = new QueueManager(store, { repositoryDirectory: 'E:\\library' });
   await manager.initialize();
+  await manager.similarityMaintenanceTask;
   assert.deepEqual(manager.catalog.map((record) => record.similarRecords), [[], []]);
-  assert.deepEqual(manager.catalog.map((record) => record.similarityVersion), [3, 3]);
+  assert.deepEqual(manager.catalog.map((record) => record.similarityVersion), ['6:standard', '6:standard']);
   assert.deepEqual(manager.catalog.map((record) => record.possibleDuplicate), [false, false]);
   assert.deepEqual(store.catalog.map((record) => record.similarRecords), [[], []]);
 });
@@ -654,6 +757,52 @@ test('abnormal compression ratio waits for explicit inventory confirmation', asy
   await manager.confirmAnomaly('odd');
   assert.equal(manager.jobs[0].status, 'completed');
   assert.equal(manager.catalog.length, 1);
+});
+
+test('confirming an anomalous archive still activates the recycle-bin safety halt', async () => {
+  const store = new FakeStore();
+  const manager = new QueueManager(store, {
+    repositoryDirectory: 'E:\\library',
+    autoTrashCompleted: true
+  }, {
+    validateSourceBeforeDisposition: async () => {},
+    trashItem: async () => {},
+    isTrashItemPresent: async () => { throw new Error('recycle bin unavailable'); }
+  });
+  manager.jobs = [{
+    ...queuedJob('odd-trash'),
+    status: 'awaiting_anomaly_confirmation',
+    pendingCatalogRecord: {
+      id: 'odd-trash-record', jobId: 'odd-trash', title: '异常项目', displayName: '异常项目',
+      recordType: 'archive', manifest: [], directories: [], archiveFiles: [{ name: 'odd.7z', size: 1 }],
+      completionAction: 'trash', sourceDisposition: 'trash_pending', completedAt: new Date().toISOString()
+    }
+  }];
+
+  await manager.confirmAnomaly('odd-trash');
+
+  assert.equal(manager.config.autoTrashCompleted, false);
+  assert.equal(manager.jobs[0].status, 'awaiting_trash_safety_confirmation');
+  assert.equal(manager.safetyHalt?.type, 'trash_retention');
+  assert.equal(manager.stopRequested, true);
+});
+
+test('normalization retains the most recent 200 dismissed similarity ids', async () => {
+  class DismissalStore extends FakeStore {
+    async loadCatalog() {
+      return [{
+        id: 'record', title: '记录', displayName: '记录', manifest: [], directories: [],
+        similarityVersion: '5:standard', dismissedSimilarRecordIds: Array.from({ length: 205 }, (_, index) => `id-${index}`)
+      }];
+    }
+  }
+  const manager = new QueueManager(new DismissalStore(), {
+    repositoryDirectory: 'E:\\library', similarityEnabled: false
+  });
+  await manager.initialize();
+  assert.equal(manager.catalog[0].dismissedSimilarRecordIds.length, 200);
+  assert.equal(manager.catalog[0].dismissedSimilarRecordIds[0], 'id-5');
+  assert.equal(manager.catalog[0].dismissedSimilarRecordIds.at(-1), 'id-204');
 });
 
 test('BUG1 regression: a 0.789 percent archive ratio is held for review and discard preserves source', async (t) => {
@@ -903,6 +1052,9 @@ test('catalog metadata supports defaults, editing, cover thumbnails and filters'
   assert.equal(summary[0].coverRelativePath, 'cover.jpg');
   assert.equal(summary[0].backupLocation, '家庭备份盘 A');
   assert.equal(manager.searchCatalog({ tag: '不存在' }).length, 0);
+  manager.catalog[0].similarRecords = [{ id: 'record-two', score: 0.8 }];
+  manager.catalog[0].possibleDuplicate = true;
+  assert.deepEqual(manager.searchCatalog({ tag: '__possible_duplicate__' }).map((record) => record.id), ['record-one']);
   assert.equal(manager.searchCatalog({ backupLocation: '不存在' }).length, 0);
   await assert.rejects(manager.setCatalogCover('record-one', 'notes.txt'), /不能设为封面/);
   await assert.rejects(
@@ -965,6 +1117,7 @@ test('manual inventory accepts optional locations and can receive stored images'
   assert.equal(updated.sourcePath, 'https://example.com/item');
   assert.equal(updated.backupLocation, '移动硬盘 A');
   assert.equal(updated.manualImages.length, 1);
+  assert.equal(updated.manualImages[0].thumbnailPath, `manual-${record.id}/image-one.png`);
   assert.equal(updated.coverThumbnailRef, 'manual-image:image-one');
   assert.equal(manager.summarizeCatalogRecord(updated).thumbnailCount, 1);
 });
@@ -1295,6 +1448,72 @@ test('warehouse insights calculate inventory, unique tags and GB activity', () =
   assert.equal(insights.activity.find((entry) => entry.date === '2026-08-15').originalBytes, 2_000_000_000);
 });
 
+test('startup upgrades stale absolute thumbnail paths after the warehouse was moved manually', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-thumbnail-reconnect-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const warehouse = path.join(root, 'warehouse-current');
+  const currentThumbnail = path.join(warehouse, 'thumbnails', 'job-one', 'cover.png');
+  await fs.mkdir(path.dirname(currentThumbnail), { recursive: true });
+  await fs.writeFile(currentThumbnail, 'image');
+  const staleThumbnail = path.join(root, 'warehouse-before-move', 'thumbnails', 'job-one', 'cover.png');
+  const store = new AppStore(path.join(root, 'user-data'));
+  await store.saveCatalog(warehouse, [{
+    id: 'record-one', title: '已移动仓库', displayName: '已移动仓库', recordType: 'archive',
+    tags: [], manifest: [{
+      relativePath: 'cover.jpg', ref: 'cover.jpg', thumbnailPath: staleThumbnail
+    }], directories: []
+  }]);
+  await store.saveJobs(warehouse, []);
+
+  const manager = new QueueManager(store, {
+    repositoryDirectory: warehouse,
+    archiveOutputDirectory: path.join(root, 'archives'),
+    similarityEnabled: false
+  });
+  await manager.initialize();
+
+  assert.equal(manager.catalog[0].manifest[0].thumbnailPath, 'job-one/cover.png');
+  assert.equal(manager.getThumbnailPath('record-one', 'cover.jpg'), currentThumbnail);
+  const persisted = await store.loadCatalog(warehouse);
+  assert.equal(persisted[0].manifest[0].thumbnailPath, 'job-one/cover.png');
+  store.closeAll();
+});
+
+test('deleting and undoing a thumbnail still works after automatic path upgrade', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-thumbnail-delete-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const warehouse = path.join(root, 'warehouse-current');
+  const currentThumbnail = path.join(warehouse, 'thumbnails', 'job-one', 'cover.png');
+  await fs.mkdir(path.dirname(currentThumbnail), { recursive: true });
+  await fs.writeFile(currentThumbnail, 'image');
+  const store = new AppStore(path.join(root, 'user-data'));
+  await store.saveCatalog(warehouse, [{
+    id: 'record-one', title: '删除测试', displayName: '删除测试', recordType: 'archive',
+    tags: [], manifest: [{
+      relativePath: 'cover.jpg', ref: 'cover.jpg',
+      thumbnailPath: path.join(root, 'old', 'thumbnails', 'job-one', 'cover.png'),
+      thumbnails: [{
+        ref: 'cover.jpg', relativePath: 'cover.jpg',
+        thumbnailPath: path.join(root, 'old', 'thumbnails', 'job-one', 'cover.png')
+      }]
+    }], directories: []
+  }]);
+  await store.saveJobs(warehouse, []);
+  const manager = new QueueManager(store, {
+    repositoryDirectory: warehouse,
+    archiveOutputDirectory: path.join(root, 'archives'),
+    similarityEnabled: false
+  });
+  await manager.initialize();
+
+  await manager.deleteCatalogThumbnail('record-one', 'cover.jpg::frame:0');
+  await assert.rejects(fs.access(currentThumbnail), (error) => error.code === 'ENOENT');
+  await manager.undoCatalogAction();
+  await fs.access(currentThumbnail);
+  assert.equal(manager.catalog[0].manifest[0].thumbnailPath, 'job-one/cover.png');
+  store.closeAll();
+});
+
 test('warehouse location change copies metadata and rewrites owned thumbnail paths without deleting the old warehouse', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-warehouse-move-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -1322,7 +1541,11 @@ test('warehouse location change copies metadata and rewrites owned thumbnail pat
   const result = await manager.changeWarehouseDirectory(newWarehouse);
   assert.equal(result.copied, true);
   assert.equal(manager.config.repositoryDirectory, newWarehouse);
-  assert.equal(manager.catalog[0].manualImages[0].thumbnailPath, path.join(newWarehouse, 'thumbnails', 'manual-record', 'image.png'));
+  assert.equal(manager.catalog[0].manualImages[0].thumbnailPath, 'manual-record/image.png');
+  assert.equal(
+    manager.getThumbnailPath('record', 'manual-image:image'),
+    path.join(newWarehouse, 'thumbnails', 'manual-record', 'image.png')
+  );
   await fs.access(path.join(newWarehouse, 'thumbnails', 'manual-record', 'image.png'));
   await fs.access(thumbnailPath);
   store.closeAll();

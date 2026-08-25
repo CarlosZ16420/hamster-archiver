@@ -14,6 +14,26 @@ async function pathExists(targetPath) {
   }
 }
 
+async function inspectTree(targetPath) {
+  const stats = await fs.lstat(targetPath);
+  if (!stats.isDirectory()) return { files: 1, directories: 0, bytes: stats.size };
+  const result = { files: 0, directories: 1, bytes: 0 };
+  for (const entry of await fs.readdir(targetPath)) {
+    const child = await inspectTree(path.join(targetPath, entry));
+    result.files += child.files;
+    result.directories += child.directories;
+    result.bytes += child.bytes;
+  }
+  return result;
+}
+
+async function verifyCopiedPath(sourcePath, targetPath) {
+  const [source, target] = await Promise.all([inspectTree(sourcePath), inspectTree(targetPath)]);
+  if (source.files !== target.files || source.directories !== target.directories || source.bytes !== target.bytes) {
+    throw new Error(`数据迁移复核失败：${path.basename(sourcePath)}`);
+  }
+}
+
 async function prepareUserDataTarget(currentRoot, targetRoot) {
   const current = path.resolve(String(currentRoot || ''));
   const target = path.resolve(String(targetRoot || ''));
@@ -47,6 +67,7 @@ async function prepareUserDataTarget(currentRoot, targetRoot) {
       force: false,
       errorOnExist: true
     });
+    await verifyCopiedPath(path.join(current, entry.name), path.join(target, entry.name));
   }
   return { mode: 'copied', target };
 }
@@ -55,6 +76,7 @@ async function copyPathIfMissing(sourcePath, targetPath) {
   if (!(await pathExists(sourcePath)) || await pathExists(targetPath)) return false;
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
   await fs.cp(sourcePath, targetPath, { recursive: true, force: false, errorOnExist: true });
+  await verifyCopiedPath(sourcePath, targetPath);
   return true;
 }
 
@@ -66,6 +88,7 @@ async function movePathIfMissing(sourcePath, targetPath) {
   } catch (error) {
     if (error.code !== 'EXDEV') throw error;
     await fs.cp(sourcePath, targetPath, { recursive: true, force: false, errorOnExist: true });
+    await verifyCopiedPath(sourcePath, targetPath);
   }
   return true;
 }

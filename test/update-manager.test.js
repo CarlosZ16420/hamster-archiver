@@ -14,12 +14,14 @@ const {
   UPDATE_LAUNCHER_SCRIPT,
   consumeUpdateFailure,
   hashFile,
+  validateUpdatePackage,
   launchUpdate,
   manualUpdateInstructions,
   normalizeDigest,
   normalizeVersion,
   resolvePowerShellExecutable
 } = require('../src/core/update-manager');
+const { createFileIntegrityEntries } = require('../src/core/tool-integrity');
 
 const execFileAsync = promisify(execFile);
 
@@ -43,6 +45,33 @@ test('update package hashing produces a stable SHA256 value', async (t) => {
   const filePath = path.join(root, 'package.zip');
   await fs.writeFile(filePath, 'hamster archive update');
   assert.equal(await hashFile(filePath), '4422e5fb2510e3d5c57321f0db705bc9dde2ecb2d1daff34162668109612ed1a');
+});
+
+
+test('local update package accepts only a newer verified Windows x64 release', async function (t) {
+  const packageRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-local-update-package-'));
+  t.after(() => fs.rm(packageRoot, { recursive: true, force: true }));
+  const executablePath = path.join(packageRoot, 'HamsterArchiver.exe');
+  await fs.writeFile(executablePath, 'verified executable');
+  const integrityFiles = await createFileIntegrityEntries(packageRoot, ['HamsterArchiver.exe']);
+  const writeManifest = (overrides = {}) => fs.writeFile(
+    path.join(packageRoot, 'release-manifest.json'),
+    JSON.stringify({
+      schemaVersion: 2,
+      version: '4.5.3',
+      platform: 'win32-x64',
+      integrity: { files: integrityFiles },
+      ...overrides
+    })
+  );
+  await writeManifest();
+  assert.equal((await validateUpdatePackage(packageRoot, '4.5.2')).version, '4.5.3');
+  await assert.rejects(() => validateUpdatePackage(packageRoot, '4.5.3'), /不高于当前版本/);
+  await writeManifest({ platform: 'linux-x64' });
+  await assert.rejects(() => validateUpdatePackage(packageRoot, '4.5.2'), /Windows x64/);
+  await writeManifest();
+  await fs.writeFile(executablePath, 'tampered executable');
+  await assert.rejects(() => validateUpdatePackage(packageRoot, '4.5.2'), /关键文件(?:大小不一致| SHA-256 校验失败)/);
 });
 
 test('update script requires the current portable executable name', () => {

@@ -186,6 +186,7 @@ test('4.1.1 dist: import exported ZIP into a fresh warehouse preserves all recor
 
   assert.equal(byId['rec-archive-002'].title, '归档记录 - 视频合集');
   assert.equal(byId['rec-archive-002'].archivePassword, 'secret-pass-123');
+  assert.equal(byId['rec-archive-002'].importedFrom, exportZip);
   assert.equal(byId['rec-archive-002'].manifest.length, 2);
   assert.equal(byId['rec-archive-002'].manifest[0].path, 'video-001.mp4');
   assert.equal(byId['rec-archive-002'].manifest[0].size, 104857600);
@@ -217,6 +218,12 @@ test('4.1.1 dist: imported thumbnails are copied to the target warehouse', async
 
   const thumb1 = path.join(warehouseB, 'thumbnails', 'rec-manual-001', 'thumb-001.png');
   const thumb2 = path.join(warehouseB, 'thumbnails', 'rec-manual-001', 'thumb-002.png');
+  const importedRecord = managerB.catalog.find((record) => record.id === 'rec-manual-001');
+  assert.equal(importedRecord.manualImages[0].thumbnailPath, 'rec-manual-001/thumb-001.png');
+  assert.equal(
+    managerB.getThumbnailPath('rec-manual-001', 'manual-rec-manual-001:thumb-001'),
+    thumb1
+  );
   await fs.access(thumb1);
   await fs.access(thumb2);
   const buf1 = await fs.readFile(thumb1);

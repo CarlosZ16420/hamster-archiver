@@ -29,7 +29,7 @@
     </nav>
     <div class="hero-actions app-bar-actions">
       <div id="source-safety-chip" class="safety-chip" data-state="keep"><span></span><strong id="source-safety-label">归档后不移动原文件</strong></div>
-      <label class="theme-picker" for="theme-mode"><span>主题</span><select id="theme-mode" aria-label="选择界面主题"><option value="classic">经典</option><option value="day" selected>白昼</option><option value="night">黑夜</option></select></label>
+      <label class="theme-picker" for="theme-mode"><span>主题</span><select id="theme-mode" aria-label="选择界面主题"><option value="classic">经典</option><option value="day" selected>白昼</option><option value="night">黑夜</option><option value="celadon">青瓷</option><option value="plum">暮紫</option></select></label>
       <button id="language-toggle" class="language-toggle" type="button" aria-label="切换到 English"><span class="language-toggle-icon" aria-hidden="true">⇄</span><span id="language-toggle-label">EN</span></button>
     </div>
   </header>
@@ -71,8 +71,7 @@
                     </span>
                   </label>
                   <label id="processed-source-directory-field" class="path-field embedded-path-field">
-                    <span>将已备份文件移动到</span>
-                    <div><input id="processed-source-directory" type="text"><button data-pick="processed-source-directory">选择</button></div>
+                    <div><input id="processed-source-directory" type="text" aria-label="归档后移动位置"><button data-pick="processed-source-directory">选择</button></div>
                   </label>
                 </div>
                 <label class="post-option-card post-option-heading danger-option">
@@ -88,8 +87,7 @@
                     <span><strong>记录备份位置</strong><small>把云盘、移动硬盘或其他备份去向写入仓库词条</small></span>
                   </label>
                   <label id="backup-location-field" class="backup-location-field embedded-text-field">
-                    <span>备份位置词条</span>
-                    <input id="backup-location" type="text" maxlength="200" placeholder="例如：百度网盘 / 家庭备份盘 A">
+                    <input id="backup-location" type="text" maxlength="200" aria-label="备份位置" placeholder="例如：百度网盘 / 家庭备份盘 A">
                   </label>
                 </div>
               </div>
@@ -167,6 +165,39 @@
                 <label class="compact-number-setting"><span><strong>单个项目缩略图上限</strong><small>包括图片缩略图与视频抽帧，避免超大项目生成过多预览。</small></span><input id="thumbnail-limit" type="number" min="1" max="500" step="1" value="30" aria-label="单个项目缩略图上限"><em>张</em></label>
               </div>
             </details>
+            <details class="settings-group similarity-settings-group">
+              <summary class="group-head">
+                <span class="group-title">相似度计算</span>
+                <span class="group-digest">默认开启 · 标准</span>
+                <span class="group-chevron" aria-hidden="true">⌄</span>
+              </summary>
+              <div class="group-body">
+                  <label class="similarity-toggle">
+                    <input id="similarity-enabled" type="checkbox" checked>
+                    <span><strong>启用相似度计算</strong></span>
+                  </label>
+                  <div class="similarity-strength-setting">
+                    <div class="similarity-strength-head">
+                      <span>相似度强度</span>
+                      <small>越高越不容易误判；切换后不会自动重算已有相似关系。</small>
+                    </div>
+                    <input id="similarity-strength" type="range" min="1" max="3" step="1" value="2" aria-label="相似度强度">
+                    <div class="similarity-strength-scale" aria-hidden="true"><span>宽松</span><span>标准</span><span>严格</span></div>
+                  </div>
+                  <div class="similarity-terms-setting">
+                    <div><strong>相似度排除词表</strong><small>相似判断的“白名单”。每行一个词；不影响仓库搜索、MD5 或文件大小重复检查。</small></div>
+                    <div class="ignore-terms-actions"><button id="open-similarity-ignore-terms" class="button ghost" type="button">打开词表</button><button id="reload-similarity-ignore-terms" class="button ghost" type="button">重新载入</button></div>
+                  </div>
+                  <div class="similarity-rebuild-setting">
+                    <div><strong>全局重算</strong><small>按当前强度重算整个仓库的相似关系，每个项目都会重新计算。</small></div>
+                    <button id="rebuild-similarity" class="button ghost" type="button">全局重算</button>
+                  </div>
+                  <div id="similarity-rebuild-progress" class="similarity-rebuild-progress" hidden>
+                    <div class="similarity-progress-track"><div id="similarity-progress-fill" class="similarity-progress-fill"></div></div>
+                    <small id="similarity-progress-status">正在重算 0%</small>
+                  </div>
+              </div>
+            </details>
             <details class="settings-group">
               <summary class="group-head">
                 <span class="group-title">更多设置</span>
@@ -181,9 +212,8 @@
                     <label class="field"><span>结束</span><input id="schedule-end" type="time" aria-label="定时结束时间"></label>
                   </div>
                 </div>
-                <div class="ignore-terms-setting advanced-option-setting"><div><strong>相似度排除词表</strong><small>也就是相似判断的“白名单”。每行一个词；不影响仓库搜索、MD5 或文件大小重复检查。</small></div><div class="ignore-terms-actions"><button id="open-similarity-ignore-terms" class="button ghost" type="button">打开词表</button><button id="reload-similarity-ignore-terms" class="button ghost" type="button">重新载入</button></div></div>
                 <div class="advanced-paths">
-                  <label class="path-field advanced-path-field"><span>用户数据区</span><div><input id="user-data-path" type="text" readonly><button id="select-user-data" type="button">选择</button></div><small>集中保存设置、仓库数据库、缩略图、已处理文件和当前用户的一份运行日志；切换时保留旧目录</small></label>
+                  <label class="path-field advanced-path-field"><span>用户数据区</span><div><input id="user-data-path" type="text" readonly><button id="select-user-data" type="button">选择</button></div><small>切换时保留旧目录</small></label>
                   <label class="path-field advanced-path-field"><span>压缩暂存目录</span><div><input id="archive-staging-directory" type="text"><button data-pick="archive-staging-directory" type="button">选择</button></div><small>默认在打包存放点同目录下新建 staging 文件夹，也可选择其他安全位置</small></label>
                 </div>
                 <div class="settings-utility-actions">
@@ -216,7 +246,7 @@
               <article><span>任务</span><strong id="summary-total">0</strong></article><article><span>等待确认</span><strong id="summary-confirm">0</strong></article><article><span>等待压缩</span><strong id="summary-queued">0</strong></article><article><span>已完成</span><strong id="summary-completed">0</strong></article><article><span>原始总量</span><strong id="summary-bytes">0 B</strong></article>
             </div>
             <div class="queue-toolbar">
-              <span id="queue-selection-hint" class="toolbar-hint">点击任务行的复选框可进行批量操作</span>
+              <span id="queue-selection-hint" class="toolbar-hint">多选可进行批量操作</span>
               <div id="queue-selection-actions" class="context-actions" hidden><span id="selection-count" class="selection-count">未选择任务</span><button id="remove-selected" class="button ghost" disabled>移除所选</button></div>
               <div class="queue-maintenance">
                 <details class="action-menu"><summary class="button ghost">重复项处理</summary><div class="action-menu-popover"><button id="clear-duplicates" class="menu-button">清除可能重复</button><button id="clear-exact-duplicates" class="menu-button">清除精确重复</button><button id="confirm-all-duplicates" class="menu-button">同意全部重复</button></div></details>

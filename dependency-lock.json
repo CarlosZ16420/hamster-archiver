@@ -1,28 +1,47 @@
 {
-  "schemaVersion": 1,
-  "node": "22.23.2",
-  "npm": "10.9.8",
+  "schemaVersion": 3,
+  "development": {
+    "node": "^22.12.0 || ^24.0.0",
+    "npm": "^10.0.0 || ^11.0.0"
+  },
   "packages": {
     "electron": "43.4.0",
     "resedit": "3.0.2"
   },
+  "packageArtifacts": {
+    "electron": {
+      "path": "node_modules/electron/dist/electron.exe",
+      "bytes": 225533440,
+      "sha256": "bab31519ee1bc5b490caf7844e2b1dbcd4f7bb49a13039103952ab381c02ade4"
+    }
+  },
   "bundledTools": {
     "sevenZip": {
       "displayName": "7-Zip",
-      "version": "23.01",
+      "version": "26.02",
       "architecture": "x64",
       "executable": "tools/7zip/7z.exe",
       "versionArgs": ["i"],
-      "versionText": "7-Zip 23.01 (x64)",
+      "versionText": "7-Zip 26.02 (x64)",
       "files": [
         "tools/7zip/7z.exe",
         "tools/7zip/7z.dll",
         "tools/7zip/License.txt",
         "tools/7zip/BUILD-INFO.txt"
       ],
+      "fileIntegrity": {
+        "tools/7zip/7z.exe": {
+          "bytes": 576000,
+          "sha256": "83967f1b02b43c4efeda302795722c809e0e81b8307de73558d10484d5676a7d"
+        },
+        "tools/7zip/7z.dll": {
+          "bytes": 1906688,
+          "sha256": "69fd4df057985c40e510e2fac182881c7f85e90aa13ec703f763a8fdb2ce61f8"
+        }
+      },
       "source": {
-        "url": "https://www.7-zip.org/a/7z2301-x64.exe",
-        "sha256": "26cb6e9f56333682122fafe79dbcdfd51e9f47cc7217dccd29ac6fc33b5598cd"
+        "url": "https://github.com/ip7z/7zip/releases/download/26.02/7z2602-x64.exe",
+        "sha256": "6745fa76dc2ea031596d8678f6f6b99c3c1b435b4164a63485adbbc7b8d82ef0"
       }
     },
     "ffmpeg": {
@@ -38,6 +57,12 @@
         "tools/ffmpeg/LICENSE",
         "tools/ffmpeg/README.txt"
       ],
+      "fileIntegrity": {
+        "tools/ffmpeg/ffmpeg.exe": {
+          "bytes": 102856192,
+          "sha256": "72a489eccd008c2ec2c0a5856c5c75bc3d8bbfa90166c4566865c246445e6aa3"
+        }
+      },
       "source": {
         "url": "https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-essentials_build.7z",
         "sha256": "49a73bdf0850092a252ac4641d922f3048d63ed113e196cc65ce1e4f7fb33e85"

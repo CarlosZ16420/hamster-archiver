@@ -27,6 +27,7 @@ const { extractVideoFrames } = require('./core/media-service');
 const { checkForUpdates } = require('./core/update-checker');
 const {
   prepareUpdate,
+  prepareLocalUpdate,
   launchUpdate,
   cleanupSuccessfulUpdateRuns,
   consumeUpdateFailure,
@@ -34,6 +35,7 @@ const {
 } = require('./core/update-manager');
 const { findTrashItems, isTrashItemPresent, restoreTrashItem } = require('./core/recycle-bin');
 const { readAndVerifyReleaseManifest } = require('./core/tool-integrity');
+const { resolveDevelopmentUserDataRoot } = require('./core/development-paths');
 
 const appIconPath = path.join(__dirname, '..', 'assets', 'app-icon.png');
 const releasesUrl = 'https://github.com/CarlosZ16420/hamster-archiver/releases';
@@ -43,6 +45,7 @@ let queueManager;
 let appStore;
 let allowWindowClose = false;
 let closePromptOpen = false;
+let shutdownInProgress = false;
 let scheduleTimer = null;
 let lastCatalogPushSignature = '';
 const isSmokeTest = process.env.HAMSTER_SMOKE_TEST === '1';
@@ -55,10 +58,15 @@ if (isSmokeTest) {
     });
   }
 }
+const projectRoot = path.resolve(__dirname, '..');
 const applicationRoot = isSmokeTest && process.env.HAMSTER_SMOKE_USER_DATA_DIR
   ? path.join(path.resolve(process.env.HAMSTER_SMOKE_USER_DATA_DIR), 'portable-root')
-  : app.isPackaged ? path.dirname(app.getPath('exe')) : path.resolve(__dirname, '..');
-const configuredUserDataRoot = resolveUserDataRoot(applicationRoot);
+  : app.isPackaged ? path.dirname(app.getPath('exe')) : projectRoot;
+const configuredUserDataRoot = isSmokeTest
+  ? resolveUserDataRoot(applicationRoot)
+  : app.isPackaged
+    ? resolveUserDataRoot(applicationRoot)
+    : resolveDevelopmentUserDataRoot(projectRoot);
 const electronRuntimeDirectory = isSmokeTest && process.env.HAMSTER_SMOKE_USER_DATA_DIR
   ? path.resolve(process.env.HAMSTER_SMOKE_USER_DATA_DIR)
   : path.join(configuredUserDataRoot, 'electron');
@@ -240,6 +248,76 @@ async function showUpdateFailureDialog({ error, releaseUrl = releasesUrl, runRoo
   }
 }
 
+
+async function promptAndLaunchPreparedUpdate({
+  prepared,
+  version,
+  releaseUrl = releasesUrl
+}) {
+  const english = queueManager?.config?.language === 'en-US';
+  const restart = await dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: english ? 'Update package ready' : '更新包已准备好',
+    message: english
+      ? `Hamster Archiver ${version} has been verified.`
+      : `Hamster Archiver ${version} 已校验完成。`,
+    detail: english
+      ? 'Restart now to replace the program files and launch the new version. userdata, the warehouse, and archive packages will not be overwritten.'
+      : '点击“立即重启”后，程序会退出、替换程序文件并自动启动新版本。userdata、仓库和压缩包不会被覆盖。',
+    buttons: [english ? 'Restart now' : '立即重启', english ? 'Later' : '稍后'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true
+  });
+  if (restart.response !== 0) return { staged: true };
+  try {
+    await launchUpdate({ prepared, targetPid: process.pid });
+  } catch (error) {
+    console.error(`UPDATE_LAUNCH_FAILED ${error.stack || error.message}`);
+    await showUpdateFailureDialog({ error: error.message, releaseUrl, runRoot: prepared.runRoot });
+    return { staged: true, launchFailed: true, error: error.message };
+  }
+  allowWindowClose = true;
+  app.quit();
+  return { restarting: true };
+}
+
+async function runLocalPackageUpdate() {
+  const english = queueManager?.config?.language === 'en-US';
+  if (!app.isPackaged || isSmokeTest) {
+    throw new Error(english
+      ? 'Only the packaged Windows portable app can update from a ZIP file.'
+      : '只有打包后的 Windows 便携版可以从压缩包更新。');
+  }
+  if (queueManager.running) {
+    throw new Error(english
+      ? 'Updates are unavailable while the archive queue is running. Pause or finish the current task first.'
+      : '归档任务运行期间不能更新，请先暂停或完成当前任务。');
+  }
+  const selection = await dialog.showOpenDialog(mainWindow, {
+    title: english ? 'Choose a new Hamster Archiver release ZIP' : '选择新版 Hamster Archiver 压缩包',
+    defaultPath: applicationRoot,
+    properties: ['openFile'],
+    filters: [{
+      name: english ? 'Hamster Archiver release ZIP' : 'Hamster Archiver 发行压缩包',
+      extensions: ['zip']
+    }]
+  });
+  if (selection.canceled || selection.filePaths.length === 0) return { cancelled: true, action: 'manual' };
+  const prepared = await prepareLocalUpdate({
+    applicationRoot,
+    userDataDirectory: queueManager.config.userDataDirectory,
+    sevenZipPath: resolveApplicationPath(applicationRoot, queueManager.config.sevenZipPath),
+    currentVersion: app.getVersion(),
+    packagePath: selection.filePaths[0],
+    onProgress: (progress) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:progress', progress);
+    }
+  });
+  const updateState = await promptAndLaunchPreparedUpdate({ prepared, version: prepared.version });
+  return { currentVersion: app.getVersion(), version: prepared.version, action: 'manual', ...updateState };
+}
+
 function assertTrustedSender(event) {
   const senderUrl = event.senderFrame?.url || '';
   if (!senderUrl.startsWith('file://')) {
@@ -303,10 +381,10 @@ function createWindow() {
     mainWindow.webContents.once('did-finish-load', async () => {
       const bridgeStatus = await mainWindow.webContents.executeJavaScript(`(() => {
         const required = [
-          'getState', 'chooseDirectory', 'chooseProgram', 'changeWarehouseLocation', 'openWarehouse', 'exportWarehouse', 'importWarehouse', 'checkForUpdates', 'changeUserDataLocation', 'openExternal', 'copyText', 'chooseSingle', 'saveConfig', 'scanSource',
+          'getState', 'chooseDirectory', 'chooseProgram', 'changeWarehouseLocation', 'openWarehouse', 'exportWarehouse', 'importWarehouse', 'checkForUpdates', 'installUpdatePackage', 'changeUserDataLocation', 'openExternal', 'copyText', 'chooseSingle', 'saveConfig', 'scanSource',
           'addSingle', 'openTaskSource', 'getDroppedPath', 'confirmTask', 'confirmAnomaly', 'acknowledgeTrashSafety', 'cancelTask', 'retryTask', 'startQueue', 'startInventoryOnlyQueue',
-    'discardAnomaly', 'pauseQueue', 'resumeQueue', 'removeJobs', 'clearCompletedJobs', 'clearCancelledJobs', 'clearQueue', 'clearPotentialDuplicates', 'clearExactDuplicates', 'confirmAllDuplicates', 'finishNextAndPause', 'searchCatalog',
-          'getCatalogSuggestions', 'openSimilarityIgnoreTerms', 'reloadSimilarityIgnoreTerms',
+          'discardAnomaly', 'pauseQueue', 'resumeQueue', 'removeJobs', 'clearCompletedJobs', 'clearCancelledJobs', 'clearQueue', 'clearPotentialDuplicates', 'clearExactDuplicates', 'confirmAllDuplicates', 'finishNextAndPause', 'searchCatalog',
+          'getCatalogSuggestions', 'openSimilarityIgnoreTerms', 'reloadSimilarityIgnoreTerms', 'rebuildAllSimilarity', 'onSimilarityRebuildProgress',
           'getWarehouseInsights', 'getRandomCatalogRecord',
           'getCatalogDetails', 'openCatalogSource', 'restoreCatalogSource', 'updateCatalogMetadata', 'recalculateCatalogSimilarity', 'removeCatalogSimilarity', 'addManualCatalogRecord', 'addCatalogImage',
           'setCatalogCover', 'addTagsToCatalogRecords', 'updateBackupLocationForCatalogRecords', 'queueCatalogRecordsForCompression', 'undoCatalogAction', 'deleteCatalogRecords', 'getThumbnail',
@@ -721,52 +799,92 @@ function registerIpc() {
 
   ipcMain.handle('app:check-for-updates', async (event, options = {}) => {
     assertTrustedSender(event);
-    const result = await checkForUpdates({
-      currentVersion: app.getVersion(),
-      fetchImpl: net.fetch,
-      timeoutMs: options?.silent === true ? 6_000 : 8_000
-    });
+    const english = queueManager?.config?.language === 'en-US';
+    let result;
+    try {
+      result = await checkForUpdates({
+        currentVersion: app.getVersion(),
+        fetchImpl: net.fetch,
+        timeoutMs: options?.silent === true ? 6_000 : 8_000
+      });
+    } catch (error) {
+      if (options?.silent === true) throw error;
+      const response = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: english ? 'Check for updates' : '检查更新',
+        message: english ? 'The latest version could not be retrieved.' : '暂时无法获取最新版本。',
+        detail: english
+          ? `Current version: ${app.getVersion()}\nLatest version: unavailable\n\nYou can still select a release ZIP manually.\n${error.message || error}`
+          : `当前版本：${app.getVersion()}\n最新版本：暂时无法获取\n\n仍可手动选择发行压缩包。\n${error.message || error}`,
+        buttons: english ? ['Manual update', 'Close'] : ['手动更新', '关闭'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true
+      });
+      if (response.response === 0) {
+        return { currentVersion: app.getVersion(), latestVersion: null, updateAvailable: false, checkFailed: true, ...(await runLocalPackageUpdate()) };
+      }
+      return { currentVersion: app.getVersion(), latestVersion: null, updateAvailable: false, checkFailed: true };
+    }
     if (options?.silent === true) return result;
     if (!result.updateAvailable) {
-      await dialog.showMessageBox(mainWindow, {
+      const response = await dialog.showMessageBox(mainWindow, {
         type: 'info',
-        title: '检查更新',
-        message: `当前已是最新版本（${result.currentVersion}）`,
-        detail: result.latestVersion ? `GitHub 最新版本：${result.latestVersion}` : 'GitHub 暂无正式发行版。',
-        buttons: ['知道了']
+        title: english ? 'Check for updates' : '检查更新',
+        message: english ? 'You are using the latest version.' : '当前已是最新版本。',
+        detail: english
+          ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion || 'no published release'}\n\nYou can select a release ZIP manually at any time.`
+          : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion || '暂无正式发行版'}\n\n你可以随时手动选择发行压缩包。`,
+        buttons: english ? ['Manual update', 'Close'] : ['手动更新', '关闭'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true
       });
+      if (response.response === 0) return { ...result, ...(await runLocalPackageUpdate()) };
       return result;
     }
     if (!result.installable) {
       const response = await dialog.showMessageBox(mainWindow, {
         type: 'info',
-        title: '发现新版本',
-        message: `可以更新到 ${result.latestVersion}`,
-        detail: '当前 Release 没有可识别的 Windows 便携包，将打开 GitHub 页面供你手动下载。',
-        buttons: ['打开发布页', '稍后'],
+        title: english ? 'New version available' : '发现新版本',
+        message: english ? `Version ${result.latestVersion} is available.` : `可以更新到 ${result.latestVersion}。`,
+        detail: english
+          ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion}\n\nNo recognized Windows portable package is attached to this release.`
+          : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion}\n\n当前 Release 没有可识别的 Windows 便携包。`,
+        buttons: english ? ['Manual update', 'Open release page', 'Later'] : ['手动更新', '打开发布页', '稍后'],
         defaultId: 0,
-        cancelId: 1,
+        cancelId: 2,
         noLink: true
       });
-      if (response.response === 0) await shell.openExternal(result.releaseUrl);
+      if (response.response === 0) return { ...result, ...(await runLocalPackageUpdate()) };
+      if (response.response === 1) await shell.openExternal(result.releaseUrl);
       return result;
     }
-    if (queueManager.running) throw new Error('归档任务运行期间不能更新，请先暂停或完成当前任务。');
     const response = await dialog.showMessageBox(mainWindow, {
       type: 'info',
-      title: '发现新版本',
-      message: `可以更新到 ${result.latestVersion}`,
-      detail: `当前版本：${result.currentVersion}\n更新包大小：${Math.max(1, Math.round((result.asset.size || 0) / (1024 * 1024)))} MB\n程序会自动下载、校验并重启；userdata 不会被覆盖。`,
-      buttons: ['下载并重启更新', '打开发布页', '稍后'],
+      title: english ? 'New version available' : '发现新版本',
+      message: english ? `Version ${result.latestVersion} is available.` : `可以更新到 ${result.latestVersion}。`,
+      detail: english
+        ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion}\nPackage size: ${Math.max(1, Math.round((result.asset.size || 0) / (1024 * 1024)))} MB\n\nAutomatic update downloads, verifies and restarts the app. User data is not overwritten.`
+        : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion}\n更新包大小：${Math.max(1, Math.round((result.asset.size || 0) / (1024 * 1024)))} MB\n\n自动更新会下载、校验并重启；用户数据不会被覆盖。`,
+      buttons: english
+        ? ['Automatic update', 'Manual update', 'Open release page', 'Later']
+        : ['自动更新', '手动更新', '打开发布页', '稍后'],
       defaultId: 0,
-      cancelId: 2,
+      cancelId: 3,
       noLink: true
     });
-    if (response.response === 1) {
+    if (response.response === 1) return { ...result, ...(await runLocalPackageUpdate()) };
+    if (response.response === 2) {
       await shell.openExternal(result.releaseUrl);
       return result;
     }
     if (response.response !== 0) return result;
+    if (queueManager.running) {
+      throw new Error(english
+        ? 'Updates are unavailable while the archive queue is running. Pause or finish the current task first.'
+        : '归档任务运行期间不能更新，请先暂停或完成当前任务。');
+    }
     const prepared = await prepareUpdate({
       applicationRoot,
       userDataDirectory: queueManager.config.userDataDirectory,
@@ -778,35 +896,31 @@ function registerIpc() {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:progress', progress);
       }
     });
-    const restart = await dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      title: '更新包已准备好',
-      message: `Hamster Archiver ${result.latestVersion} 已下载并校验完成。`,
-      detail: '点击“立即重启”后，程序会退出、替换程序文件并自动启动新版本。userdata、仓库和压缩包不会被覆盖。',
-      buttons: ['立即重启', '稍后'],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true
+    const updateState = await promptAndLaunchPreparedUpdate({
+      prepared,
+      version: result.latestVersion,
+      releaseUrl: result.releaseUrl
     });
-    if (restart.response !== 0) return { ...result, staged: true };
-    try {
-      await launchUpdate({ prepared, targetPid: process.pid });
-    } catch (error) {
-      console.error(`UPDATE_LAUNCH_FAILED ${error.stack || error.message}`);
-      await showUpdateFailureDialog({ error: error.message, releaseUrl: result.releaseUrl, runRoot: prepared.runRoot });
-      return { ...result, staged: true, launchFailed: true, error: error.message };
-    }
-    allowWindowClose = true;
-    app.quit();
-    return result;
+    return { ...result, ...updateState };
+  });
+
+
+  ipcMain.handle('app:update-from-package', async (event) => {
+    assertTrustedSender(event);
+    return runLocalPackageUpdate();
   });
 
   ipcMain.handle('user-data:change-location', async (event) => {
     assertTrustedSender(event);
-    if (queueManager.running) throw new Error('队列运行期间不能修改用户数据区。');
+    const english = queueManager?.config?.language === 'en-US';
+    if (queueManager.running) {
+      throw new Error(english
+        ? 'The user data area cannot be changed while the queue is running.'
+        : '队列运行期间不能修改用户数据区。');
+    }
     const currentRoot = path.resolve(queueManager.config.userDataDirectory);
     const selected = await dialog.showOpenDialog(mainWindow, {
-      title: '选择用户数据区',
+      title: english ? 'Choose user data area' : '选择用户数据区',
       defaultPath: currentRoot,
       properties: ['openDirectory', 'createDirectory']
     });
@@ -818,16 +932,26 @@ function registerIpc() {
 
     const confirmation = await dialog.showMessageBox(mainWindow, {
       type: 'warning',
-      title: '切换用户数据区',
-      message: '应用需要重启后才能切换用户数据区。',
-      detail: [
-        `当前位置：${currentRoot}`,
-        `新位置：${targetRoot}`,
-        '',
-        '如果新位置是空目录，设置、仓库数据库、缩略图、日志和已处理文件会复制过去；旧目录不会删除。',
-        '如果新位置已经包含 Hamster Archiver 用户数据，将直接使用其中的数据，不会与当前仓库合并。'
-      ].join('\n'),
-      buttons: ['复制或切换并重启', '取消'],
+      title: english ? 'Change user data area' : '切换用户数据区',
+      message: english
+        ? 'The app must restart to use the new user data area.'
+        : '应用需要重启后才能切换用户数据区。',
+      detail: english
+        ? [
+            `Current location: ${currentRoot}`,
+            `New location: ${targetRoot}`,
+            '',
+            'If the new location is empty, settings, the warehouse database, thumbnails, logs and processed files are copied there. The old directory is retained.',
+            'If the new location already contains Hamster Archiver user data, that data is used as-is and is not merged with the current warehouse.'
+          ].join('\n')
+        : [
+            `当前位置：${currentRoot}`,
+            `新位置：${targetRoot}`,
+            '',
+            '如果新位置是空目录，设置、仓库数据库、缩略图、日志和已处理文件会复制过去；旧目录不会删除。',
+            '如果新位置已经包含 Hamster Archiver 用户数据，将直接使用其中的数据，不会与当前仓库合并。'
+          ].join('\n'),
+      buttons: english ? ['Copy or switch and restart', 'Cancel'] : ['复制或切换并重启', '取消'],
       defaultId: 1,
       cancelId: 1,
       noLink: true
@@ -860,6 +984,11 @@ function registerIpc() {
   ipcMain.handle('similarity:reload-ignore-terms', async (event) => {
     assertTrustedSender(event);
     return queueManager.reloadSimilarityIgnoreTerms();
+  });
+
+  ipcMain.handle('similarity:rebuild-all', async (event) => {
+    assertTrustedSender(event);
+    return queueManager.recalculateAllSimilarity();
   });
 
   ipcMain.handle('system:open-external', async (event, value) => {
@@ -1382,6 +1511,11 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       mainWindow.webContents.send('scan:progress', progress);
     }
   });
+  queueManager.on('similarity-progress', (progress) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('similarity:rebuild-progress', progress);
+    }
+  });
 
   if (process.env.HAMSTER_UPDATE_VALIDATION_FILE) {
     await fs.writeFile(process.env.HAMSTER_UPDATE_VALIDATION_FILE, JSON.stringify({
@@ -1403,7 +1537,20 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   if (scheduleTimer) clearInterval(scheduleTimer);
+  if (queueManager?.running && !allowWindowClose) {
+    event.preventDefault();
+    if (shutdownInProgress) return;
+    shutdownInProgress = true;
+    void queueManager.stopForShutdown()
+      .catch((error) => console.error(`QUEUE_SHUTDOWN_FAILED ${error.stack || error.message}`))
+      .finally(() => {
+        appStore?.closeAll();
+        allowWindowClose = true;
+        app.quit();
+      });
+    return;
+  }
   appStore?.closeAll();
 });

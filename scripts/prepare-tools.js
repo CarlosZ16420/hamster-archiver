@@ -104,6 +104,7 @@ async function writeBuildInfo() {
 
 async function main() {
   if (process.platform !== 'win32') throw new Error('内置工具准备流程目前只支持 Windows x64。');
+  const sevenZipOnly = process.argv.includes('--seven-zip-only');
   const bootstrapSevenZip = path.join(projectRoot, dependencyLock.bundledTools.sevenZip.executable);
   await fsp.access(bootstrapSevenZip);
   const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'hamster-toolchain-'));
@@ -117,19 +118,23 @@ async function main() {
     await replaceFile(await findFile(sevenZipExtract, '7z.dll'), 'tools/7zip/7z.dll');
     await replaceFile(await findFile(sevenZipExtract, 'License.txt'), 'tools/7zip/License.txt');
 
-    const ffmpegSource = path.join(tempRoot, 'ffmpeg.7z');
-    const ffmpegExtract = path.join(tempRoot, 'ffmpeg');
-    await downloadPinnedSource(dependencyLock.bundledTools.ffmpeg.source, ffmpegSource);
-    await extractArchive(preparedSevenZip, ffmpegSource, ffmpegExtract);
-    await replaceFile(await findFile(ffmpegExtract, 'ffmpeg.exe'), 'tools/ffmpeg/ffmpeg.exe');
-    await replaceFile(await findFile(ffmpegExtract, 'LICENSE'), 'tools/ffmpeg/LICENSE');
-    await replaceFile(await findFile(ffmpegExtract, 'README.txt'), 'tools/ffmpeg/README.txt');
+    if (!sevenZipOnly) {
+      const ffmpegSource = path.join(tempRoot, 'ffmpeg.7z');
+      const ffmpegExtract = path.join(tempRoot, 'ffmpeg');
+      await downloadPinnedSource(dependencyLock.bundledTools.ffmpeg.source, ffmpegSource);
+      await extractArchive(preparedSevenZip, ffmpegSource, ffmpegExtract);
+      await replaceFile(await findFile(ffmpegExtract, 'ffmpeg.exe'), 'tools/ffmpeg/ffmpeg.exe');
+      await replaceFile(await findFile(ffmpegExtract, 'LICENSE'), 'tools/ffmpeg/LICENSE');
+      await replaceFile(await findFile(ffmpegExtract, 'README.txt'), 'tools/ffmpeg/README.txt');
+    }
     await writeBuildInfo();
   } finally {
     await fsp.rm(tempRoot, { recursive: true, force: true });
   }
-  await verifyToolchain({ strictNode: true, requireInstalledPackages: false, requireTools: true });
-  console.log('7-Zip 与 FFmpeg 已从锁定来源恢复并通过版本检查。');
+  await verifyToolchain({ requireInstalledPackages: false, requireTools: true });
+  console.log(sevenZipOnly
+    ? '7-Zip 已从锁定来源恢复，全部内置工具通过版本检查。'
+    : '7-Zip 与 FFmpeg 已从锁定来源恢复并通过版本检查。');
 }
 
 if (require.main === module) {

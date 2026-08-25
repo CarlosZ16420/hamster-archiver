@@ -5,9 +5,14 @@ if (!window.archiveApp) {
   throw new Error('桌面桥接未加载：请运行 HamsterArchiver.exe，不要直接打开网页文件。');
 }
 
+// 界面翻译：中文为源语言，英文环境在运行时替换词条；用户数据永不翻译。
 const i18n = window.hamsterI18n;
 const uiState = window.hamsterUiState;
 const t = (value) => i18n?.translate(value) ?? value;
+i18n?.setLocale(String(navigator.language || 'zh-CN').toLowerCase().startsWith('en') ? 'en-US' : 'zh-CN');
+
+const SIMILARITY_STRENGTH_ORDER = ['loose', 'standard', 'strict'];
+const SIMILARITY_STRENGTH_LABELS = { loose: '宽松', standard: '标准', strict: '严格' };
 
 const elements = {
   intakeDirectory: document.querySelector('#intake-directory'),
@@ -38,6 +43,12 @@ const elements = {
   scheduleEnabled: document.querySelector('#schedule-enabled'),
   scheduleStart: document.querySelector('#schedule-start'),
   scheduleEnd: document.querySelector('#schedule-end'),
+  similarityEnabled: document.querySelector('#similarity-enabled'),
+  similarityStrength: document.querySelector('#similarity-strength'),
+  rebuildSimilarity: document.querySelector('#rebuild-similarity'),
+  similarityRebuildProgress: document.querySelector('#similarity-rebuild-progress'),
+  similarityProgressFill: document.querySelector('#similarity-progress-fill'),
+  similarityProgressStatus: document.querySelector('#similarity-progress-status'),
   safetyChip: document.querySelector('#source-safety-chip'),
   safetyChipLabel: document.querySelector('#source-safety-label'),
   updateStatusChip: document.querySelector('#check-for-updates'),
@@ -150,6 +161,7 @@ function statusLabel(status) {
 
 let currentState = null;
 let activeCatalogId = null;
+let catalogDetailRequest = 0;
 let currentCatalogResults = [];
 let currentCatalogPageRecords = [];
 let catalogViewMode = localStorage.getItem('hamster-catalog-view-v2') === 'list' ? 'list' : 'grid';
@@ -184,7 +196,7 @@ const selectedJobIds = new Set();
 const selectedCatalogIds = new Set();
 
 const themeMode = document.querySelector('#theme-mode');
-const THEME_VALUES = ['classic', 'day', 'night'];
+const THEME_VALUES = ['classic', 'day', 'night', 'celadon', 'plum'];
 function applyTheme(theme) {
   const nextTheme = THEME_VALUES.includes(theme) ? theme : 'day';
   document.body.dataset.theme = nextTheme;
@@ -281,8 +293,8 @@ function queueEstimateText(activeJob, percentage = activeJob.progress || 0) {
 
 function taskProgressText(job, percentage = job.progress || 0) {
   const base = job.stageText
-    ? (i18n?.translateStage?.(job.stageText) || t(job.stageText))
-    : `${t(statusLabel(job.status))} · ${Math.round(percentage)}%`;
+    ? job.stageText
+    : `${statusLabel(job.status)} · ${Math.round(percentage)}%`;
   const estimate = queueEstimateText(job, percentage);
   return estimate ? `${base} · ${estimate}` : base;
 }
@@ -335,10 +347,15 @@ function setUpdateStatus(state, label = '检查更新') {
   if (elements.updateStatusLabel) elements.updateStatusLabel.textContent = t(label);
 }
 
+
+function setUpdateControlsDisabled(disabled) {
+  if (elements.updateStatusChip) elements.updateStatusChip.disabled = disabled;
+}
+
 async function runUpdateCheck({ automatic = false } = {}) {
   if (updateCheckInFlight || !elements.updateStatusChip) return null;
   updateCheckInFlight = true;
-  elements.updateStatusChip.disabled = true;
+  setUpdateControlsDisabled(true);
   setUpdateStatus('checking', automatic ? '正在检查…' : '正在检查…');
   try {
     const result = await window.archiveApp.checkForUpdates({ silent: automatic });
@@ -351,9 +368,10 @@ async function runUpdateCheck({ automatic = false } = {}) {
     return null;
   } finally {
     updateCheckInFlight = false;
-    elements.updateStatusChip.disabled = false;
+    setUpdateControlsDisabled(false);
   }
 }
+
 
 function make(tag, className, text) {
   const node = document.createElement(tag);
@@ -365,6 +383,22 @@ function make(tag, className, text) {
     i18n?.translateDom(node);
   }
   return node;
+}
+
+function makeStage(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  node.dataset.i18nStage = 'true';
+  node.textContent = text;
+  i18n?.translateDom(node);
+  return node;
+}
+
+function setStageText(node, text) {
+  if (!node) return;
+  node.dataset.i18nStage = 'true';
+  node.textContent = text;
+  i18n?.translateDom(node);
 }
 
 function catalogTitle(record) {
@@ -557,6 +591,8 @@ function readConfig() {
     scheduleEnabled: elements.scheduleEnabled.checked,
     scheduleStart: elements.scheduleStart.value,
     scheduleEnd: elements.scheduleEnd.value,
+    similarityEnabled: elements.similarityEnabled.checked,
+    similarityStrength: SIMILARITY_STRENGTH_ORDER[Number(elements.similarityStrength.value) - 1] || 'standard',
     autoTrashCompleted: elements.autoTrash.checked,
     recordBackupLocation: elements.recordBackupLocation.checked,
     backupLocation: elements.backupLocation.value.trim()
@@ -702,6 +738,9 @@ function renderConfig(config) {
   elements.scheduleEnabled.checked = Boolean(config.scheduleEnabled);
   elements.scheduleStart.value = config.scheduleStart || '';
   elements.scheduleEnd.value = config.scheduleEnd || '';
+  elements.similarityEnabled.checked = config.similarityEnabled !== false;
+  const strengthIndex = SIMILARITY_STRENGTH_ORDER.indexOf(config.similarityStrength || 'standard');
+  elements.similarityStrength.value = String(strengthIndex >= 0 ? strengthIndex + 1 : 2);
   elements.autoTrash.checked = Boolean(config.autoTrashCompleted);
   elements.recordBackupLocation.checked = Boolean(config.recordBackupLocation);
   elements.backupLocation.value = config.backupLocation || '';
@@ -790,7 +829,7 @@ function renderJobs(jobs) {
     const fill = make('span');
     fill.style.width = `${Math.max(0, Math.min(100, job.progress || 0))}%`;
     progress.append(fill);
-    progressCell.append(progress, make('span', 'progress-text', taskProgressText(job)));
+    progressCell.append(progress, makeStage('span', 'progress-text', taskProgressText(job)));
     row.append(progressCell);
 
     const actionCell = make('td', 'row-actions');
@@ -850,7 +889,7 @@ function renderLogs(logs) {
     row.append(
       make('time', '', time.toLocaleTimeString('zh-CN', { hour12: false })),
       make('span', '', entry.level.toUpperCase()),
-      make('p', '', entry.message)
+      makeStage('p', '', entry.message)
     );
     elements.logList.append(row);
   }
@@ -1058,11 +1097,13 @@ function renderCatalog(catalog) {
 
 function updateTagFilterOptions(catalog) {
   const selected = elements.catalogTagFilter.value;
+  const possibleDuplicateFilter = '__possible_duplicate__';
   const tags = [...new Set(catalog.flatMap((record) => record.tags || []))]
     .sort((a, b) => a.localeCompare(b, 'zh-CN'));
   elements.catalogTagFilter.replaceChildren(new Option('全部标签', ''));
+  elements.catalogTagFilter.append(new Option('可能重复', possibleDuplicateFilter));
   for (const tag of tags) elements.catalogTagFilter.append(new Option(tag, tag));
-  elements.catalogTagFilter.value = tags.includes(selected) ? selected : '';
+  elements.catalogTagFilter.value = selected === possibleDuplicateFilter || tags.includes(selected) ? selected : '';
 }
 
 function updateBackupLocationFilterOptions(catalog) {
@@ -1136,7 +1177,7 @@ function createTree(directories, files) {
   const ensureDirectory = (directoryPath) => {
     let node = root;
     let currentPath = '';
-    for (const part of directoryPath.split('/').filter(Boolean)) {
+    for (const part of String(directoryPath || '').replace(/\\/g, '/').split('/').filter(Boolean)) {
       currentPath = currentPath ? `${currentPath}/${part}` : part;
       if (!node.directories.has(part)) {
         node.directories.set(part, { name: part, path: currentPath, directories: new Map(), files: [] });
@@ -1146,13 +1187,13 @@ function createTree(directories, files) {
     return node;
   };
 
-  for (const directoryPath of Array.isArray(directories) ? directories : []) ensureDirectory(String(directoryPath || ''));
+  for (const directoryPath of Array.isArray(directories) ? directories : []) ensureDirectory(directoryPath);
   for (const file of Array.isArray(files) ? files.filter(Boolean) : []) {
-    const relativePath = String(file.relativePath || file.name || '未命名文件');
+    const relativePath = String(file.relativePath || file.name || '未命名文件').replace(/\\/g, '/');
     const parts = relativePath.split('/');
     const fileName = parts.pop();
     const directory = ensureDirectory(parts.join('/'));
-    directory.files.push({ ...file, name: fileName || file.name });
+    directory.files.push({ ...file, relativePath, name: fileName || file.name });
   }
   return root;
 }
@@ -1358,7 +1399,10 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
   const allRows = flattenDirectoryTree(root);
   if (allRows.length === 0) return make('p', 'muted', '这个归档中没有文件。');
   const collapsed = new Set();
-  const similarityMap = new Map((similarEntryMatches || []).map((entry) => [`${entry.kind}:${entry.relativePath}`, entry]));
+  const similarityMap = new Map((similarEntryMatches || []).map((entry) => [
+    `${entry.kind}:${String(entry.relativePath || '').replace(/\\/g, '/')}`,
+    entry
+  ]));
   for (const row of allRows) {
     if (row.type === 'directory' && row.hasChildren && row.depth >= 2) collapsed.add(row.key);
   }
@@ -1723,6 +1767,7 @@ function renderSimilarProjects(record) {
 }
 
 function renderCatalogDetail(record) {
+  if (!record || record.id !== activeCatalogId) return;
   elements.catalogDetail.replaceChildren();
   const heading = make('div', 'archive-heading');
   heading.append(make('h3', '', catalogTitle(record)));
@@ -1858,11 +1903,12 @@ function renderCatalogDetail(record) {
 }
 
 async function loadCatalogDetails(recordId) {
+  const requestId = ++catalogDetailRequest;
   activeCatalogId = recordId;
   renderCatalog(currentCatalogResults);
   elements.catalogDetail.replaceChildren(make('p', 'muted', '正在读取完整目录和缩略图…'));
   const record = await safely(() => window.archiveApp.getCatalogDetails(recordId));
-  if (record) renderCatalogDetail(record);
+  if (record && requestId === catalogDetailRequest && activeCatalogId === recordId) renderCatalogDetail(record);
 }
 
 function renderSummary(state) {
@@ -2026,7 +2072,8 @@ document.querySelector('#save-settings').addEventListener('click', saveConfig);
 window.archiveApp.onUpdateProgress((progress) => {
   if (!elements.updateStatusChip || progress?.stage === 'prepared') return;
   elements.updateStatusChip.dataset.state = 'checking';
-  if (progress.stage === 'verifying') elements.updateStatusLabel.textContent = t('正在校验更新…');
+  if (progress.stage === 'copying') elements.updateStatusLabel.textContent = t('正在读取更新包…');
+  else if (progress.stage === 'verifying') elements.updateStatusLabel.textContent = t('正在校验更新…');
   else if (progress.stage === 'downloading') {
     elements.updateStatusLabel.textContent = t(progress.totalBytes
       ? `下载更新 ${progress.percentage}%`
@@ -2036,6 +2083,9 @@ window.archiveApp.onUpdateProgress((progress) => {
 elements.updateStatusChip?.addEventListener('click', async () => {
   const result = await runUpdateCheck();
   if (result?.launchFailed) showToast(t('自动更新未能启动，程序仍停留在当前版本'));
+  else if (result?.staged) showToast('更新包已校验，等待重新启动');
+  else if (result?.checkFailed && result.action !== 'manual') showToast('暂时无法获取最新版本', true);
+  else if (result?.action === 'manual' && result.cancelled) return;
   else if (result) showToast(result.updateAvailable ? `发现新版本 ${result.latestVersion}` : '当前已是最新版本');
 });
 const usageGuideDialog = document.querySelector('#usage-guide-dialog');
@@ -2454,6 +2504,7 @@ document.querySelector('#set-warehouse-location').addEventListener('click', asyn
   if (!result) return;
   selectedCatalogIds.clear();
   activeCatalogId = null;
+  catalogDetailRequest += 1;
   catalogStateSignature = '';
   render(result.state, true);
   await refreshCatalog();
@@ -2482,12 +2533,74 @@ document.querySelector('#open-similarity-ignore-terms').addEventListener('click'
   const result = await safely(() => window.archiveApp.openSimilarityIgnoreTerms());
   if (result) showToast(`已打开相似度排除词表（当前 ${result.count} 个词）`);
 });
+function updateSimilarityProgress(progress) {
+  if (!progress) return;
+  const presentation = uiState.similarityProgressPresentation(progress);
+  elements.similarityProgressFill.style.width = `${presentation.percent}%`;
+  elements.similarityProgressStatus.textContent = t(presentation.label);
+  return presentation;
+}
+
 document.querySelector('#reload-similarity-ignore-terms').addEventListener('click', async () => {
   const result = await safely(() => window.archiveApp.reloadSimilarityIgnoreTerms());
   if (!result) return;
   if (result.state) render(result.state, true);
   await refreshCatalog();
   showToast(`已重新载入 ${result.count} 个排除词，并更新相似项目关系`);
+});
+elements.similarityEnabled.addEventListener('change', async () => {
+  const enabling = elements.similarityEnabled.checked;
+  const message = enabling
+    ? '开启相似度计算后，新入库项目会自动与老入库项目对比计算相似度。'
+    : '关闭相似度计算，不会清空旧有相似度关系，新入库项目不再计算相似度。';
+  if (!window.confirm(t(message))) {
+    elements.similarityEnabled.checked = !enabling;
+    return;
+  }
+  const state = await safely(() => window.archiveApp.saveConfig(readConfig()));
+  if (!state) {
+    elements.similarityEnabled.checked = !enabling;
+    return;
+  }
+  render(state, true);
+  showToast(t(enabling ? '相似度计算已开启' : '相似度计算已关闭'));
+});
+elements.similarityStrength.addEventListener('change', async () => {
+  const state = await safely(() => window.archiveApp.saveConfig(readConfig()));
+  if (!state) return;
+  render(state, true);
+  const strength = SIMILARITY_STRENGTH_ORDER[Number(elements.similarityStrength.value) - 1] || 'standard';
+  showToast(t(`相似度强度已切换为“${SIMILARITY_STRENGTH_LABELS[strength] || strength}”；已有关系不会自动重算`));
+});
+elements.rebuildSimilarity.addEventListener('click', async () => {
+  if (!window.confirm(t('计算量较大，可能出现卡顿。确定要重算整个仓库的相似关系吗？'))) return;
+  elements.rebuildSimilarity.disabled = true;
+  elements.similarityRebuildProgress.hidden = false;
+  updateSimilarityProgress({ active: true, completed: 0, total: 0, elapsedMs: 0 });
+  const state = await safely(() => window.archiveApp.rebuildAllSimilarity());
+  elements.rebuildSimilarity.disabled = false;
+  if (!state) {
+    elements.similarityRebuildProgress.hidden = true;
+    return;
+  }
+  render(state, true);
+  await refreshCatalog();
+  showToast(t('相似关系已全部重算'));
+});
+let similarityProgressHideTimer = null;
+window.archiveApp.onSimilarityRebuildProgress((progress) => {
+  if (similarityProgressHideTimer) {
+    clearTimeout(similarityProgressHideTimer);
+    similarityProgressHideTimer = null;
+  }
+  elements.similarityRebuildProgress.hidden = false;
+  const presentation = updateSimilarityProgress(progress);
+  if (presentation?.complete) {
+    similarityProgressHideTimer = setTimeout(() => {
+      elements.similarityRebuildProgress.hidden = true;
+      similarityProgressHideTimer = null;
+    }, 2500);
+  }
 });
 elements.catalogPagePrev.addEventListener('click', () => {
   if (catalogPage <= 1) return;
@@ -2812,6 +2925,7 @@ elements.deleteCatalogForm.addEventListener('submit', async (event) => {
   for (const id of result.deletedIds) selectedCatalogIds.delete(id);
   if (activeCatalogId && result.deletedIds.includes(activeCatalogId)) {
     activeCatalogId = null;
+    catalogDetailRequest += 1;
     elements.catalogDetail.replaceChildren(make('div', 'empty-library', '所选仓库内容已删除。'));
   }
   render(result.state);
@@ -2960,7 +3074,7 @@ window.archiveApp.onTaskProgress((progress) => {
       status.textContent = t(statusLabels[progress.stage] || progress.stage);
     }
     if (fill) fill.style.width = `${Math.max(0, Math.min(100, progress.percentage))}%`;
-    if (progressText) progressText.textContent = taskProgressText(job, progress.percentage);
+    if (progressText) setStageText(progressText, taskProgressText(job, progress.percentage));
   }
 });
 window.archiveApp.onCatalogChanged((catalog) => {

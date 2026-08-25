@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="250" viewBox="0 0 1200 250" role="img" aria-labelledby="title desc">
+  <title id="title">Hamster Archiver verified workflow</title>
+  <desc id="desc">Scan, inventory, compress, verify and catalogue, all on the local computer.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fffaf1"/>
+      <stop offset="1" stop-color="#f2e6d5"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="250" rx="28" fill="url(#bg)"/>
+  <text x="50" y="48" fill="#2c2822" font-family="Segoe UI, Microsoft YaHei, sans-serif" font-size="18" font-weight="800">从散乱目录到可检索仓库</text>
+  <text x="1150" y="48" text-anchor="end" fill="#9a8874" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="1.4">ONE LOCAL, VERIFIED PIPELINE</text>
+  <path d="M146 133H1050" stroke="#d8c9b4" stroke-width="4" stroke-linecap="round"/>
+  <g font-family="Segoe UI, Microsoft YaHei, sans-serif" text-anchor="middle">
+    <g transform="translate(130 132)">
+      <circle r="40" fill="#2c2822"/>
+      <path d="M-18-10H1l6 7h17v22h-42z" fill="#ffb24a"/>
+      <text y="72" fill="#2c2822" font-size="15" font-weight="800">扫描</text>
+      <text y="93" fill="#8c7c69" font-size="12">SCAN</text>
+    </g>
+    <g transform="translate(365 132)">
+      <circle r="40" fill="#fffaf1" stroke="#d7c4aa" stroke-width="3"/>
+      <rect x="-18" y="-23" width="36" height="46" rx="5" fill="none" stroke="#d75d39" stroke-width="4"/>
+      <path d="M-10-10H9M-10 0H9M-10 10H3" stroke="#d75d39" stroke-width="3" stroke-linecap="round"/>
+      <text y="72" fill="#2c2822" font-size="15" font-weight="800">清单与预览</text>
+      <text y="93" fill="#8c7c69" font-size="12">MANIFEST</text>
+    </g>
+    <g transform="translate(600 132)">
+      <circle r="40" fill="#e9653c"/>
+      <rect x="-22" y="-16" width="44" height="34" rx="6" fill="#fff5e7"/>
+      <text y="7" fill="#7f2f20" font-family="Segoe UI, Arial, sans-serif" font-size="18" font-weight="900">7Z</text>
+      <text y="72" fill="#2c2822" font-size="15" font-weight="800">压缩</text>
+      <text y="93" fill="#8c7c69" font-size="12">ARCHIVE</text>
+    </g>
+    <g transform="translate(835 132)">
+      <circle r="40" fill="#fffaf1" stroke="#d7c4aa" stroke-width="3"/>
+      <path d="m-20 1 13 13 28-32" fill="none" stroke="#318166" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+      <text y="72" fill="#2c2822" font-size="15" font-weight="800">完整性验证</text>
+      <text y="93" fill="#8c7c69" font-size="12">VERIFY</text>
+    </g>
+    <g transform="translate(1070 132)">
+      <circle r="40" fill="#225c4b"/>
+      <ellipse cy="-15" rx="22" ry="9" fill="#bdebd7"/>
+      <path d="M-22-15v28c0 5 10 9 22 9s22-4 22-9v-28" fill="none" stroke="#bdebd7" stroke-width="5"/>
+      <path d="M-22-1c0 5 10 9 22 9s22-4 22-9" fill="none" stroke="#bdebd7" stroke-width="3"/>
+      <text y="72" fill="#2c2822" font-size="15" font-weight="800">入库检索</text>
+      <text y="93" fill="#8c7c69" font-size="12">CATALOGUE</text>
+    </g>
+  </g>
+</svg>

@@ -87,12 +87,21 @@ test('saved user data location becomes the root for every durable data path', ()
   const selectedRoot = path.resolve('D:\\HamsterData');
   const resolved = resolveUserDataRoot(applicationRoot, () => JSON.stringify({
     userDataDirectory: selectedRoot
-  }));
+  }), () => true);
   const layout = makeUserDataLayout(applicationRoot, null, resolved);
 
   assert.equal(resolved, selectedRoot);
   assert.equal(layout.root, selectedRoot);
   assert.equal(layout.settingsPath, path.join(selectedRoot, 'config', 'settings.json'));
   assert.equal(layout.repositoryDirectory, path.join(selectedRoot, 'warehouse'));
-  assert.equal(resolveUserDataRoot(applicationRoot, () => '{bad json'), path.join(applicationRoot, 'userdata'));
+  assert.throws(
+    () => resolveUserDataRoot(applicationRoot, () => '{bad json'),
+    (error) => error.code === 'USER_DATA_LOCATION_INVALID'
+  );
+  assert.throws(
+    () => resolveUserDataRoot(applicationRoot, () => JSON.stringify({
+      userDataDirectory: 'D:\\missing-user-data'
+    }), () => false),
+    (error) => error.code === 'USER_DATA_LOCATION_MISSING' && /不会自动创建空仓库/.test(error.message)
+  );
 });

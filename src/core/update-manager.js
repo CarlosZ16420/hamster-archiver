@@ -7,6 +7,7 @@ const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const { verifyFileIntegrityEntries } = require('./tool-integrity');
+const { compareVersions } = require('./update-checker');
 
 const execFileAsync = promisify(execFile);
 const UPDATE_LAUNCH_TIMEOUT_MS = 8_000;
@@ -236,6 +237,30 @@ async function exists(targetPath) {
   }
 }
 
+
+async function validateUpdatePackage(packageRoot, currentVersion, expectedVersion = '') {
+  let manifest;
+  try {
+    manifest = JSON.parse(await fsp.readFile(path.join(packageRoot, 'release-manifest.json'), 'utf8'));
+  } catch (error) {
+    throw new Error(`更新包发行清单无效：${error.message}`);
+  }
+  if (manifest.schemaVersion !== 2) throw new Error('更新包发行清单版本不受支持。');
+  if (manifest.platform !== 'win32-x64') throw new Error('所选更新包不是 Windows x64 便携版。');
+  const version = normalizeVersion(manifest.version);
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error('更新包发行清单中的版本号无效。');
+  }
+  if (expectedVersion && version !== normalizeVersion(expectedVersion)) {
+    throw new Error('更新包版本与 Release 标签不一致。');
+  }
+  if (currentVersion && compareVersions(version, normalizeVersion(currentVersion)) <= 0) {
+    throw new Error(`所选更新包版本 ${version} 不高于当前版本 ${normalizeVersion(currentVersion)}。`);
+  }
+  await verifyFileIntegrityEntries(packageRoot, manifest.integrity?.files);
+  return { manifest, version };
+}
+
 async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath, currentVersion, release, fetchImpl, onProgress = () => {} }) {
   if (process.platform !== 'win32') throw new Error('自动更新目前仅支持 Windows 便携版。');
   if (!release?.asset?.downloadUrl) throw new Error('这个 Release 没有可用的 Windows 更新包。');
@@ -254,14 +279,60 @@ async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath,
     if (actualDigest !== expectedDigest) throw new Error('更新包 SHA256 校验失败，文件可能已损坏。');
     await extractArchive(sevenZipPath, archivePath, extractRoot);
     const packageRoot = await locatePackageRoot(extractRoot);
-    const manifest = JSON.parse(await fsp.readFile(path.join(packageRoot, 'release-manifest.json'), 'utf8'));
-    if (normalizeVersion(manifest.version) !== normalizeVersion(release.latestVersion)) {
-      throw new Error('更新包版本与 Release 标签不一致。');
-    }
-    if (manifest.schemaVersion !== 2) throw new Error('更新包发行清单版本不受支持。');
-    await verifyFileIntegrityEntries(packageRoot, manifest.integrity?.files);
+    await validateUpdatePackage(packageRoot, currentVersion, release.latestVersion);
     onProgress({ stage: 'prepared', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
     return { runRoot, packageRoot, archivePath, version: release.latestVersion, currentVersion, applicationRoot: path.resolve(applicationRoot) };
+  } catch (error) {
+    await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+
+async function prepareLocalUpdate({
+  applicationRoot,
+  userDataDirectory,
+  sevenZipPath,
+  currentVersion,
+  packagePath,
+  onProgress = () => {}
+}) {
+  if (process.platform !== 'win32') throw new Error('从压缩包更新目前仅支持 Windows 便携版。');
+  const sourcePath = path.resolve(String(packagePath || '').trim());
+  if (!/\.zip$/i.test(sourcePath)) throw new Error('请选择 .zip 格式的新版本压缩包。');
+  let sourceStats;
+  try {
+    sourceStats = await fsp.stat(sourcePath);
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new Error('所选更新包已经不存在。');
+    throw error;
+  }
+  if (!sourceStats.isFile()) throw new Error('所选更新包不是文件。');
+  const runRoot = path.join(
+    path.resolve(userDataDirectory),
+    'updates',
+    `local-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
+  );
+  const archivePath = path.join(runRoot, 'package.zip');
+  const extractRoot = path.join(runRoot, 'extracted');
+  try {
+    await fsp.mkdir(runRoot, { recursive: true });
+    onProgress({ stage: 'copying', downloadedBytes: 0, totalBytes: sourceStats.size, percentage: 0 });
+    await fsp.copyFile(sourcePath, archivePath);
+    onProgress({ stage: 'copying', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
+    await extractArchive(sevenZipPath, archivePath, extractRoot);
+    const packageRoot = await locatePackageRoot(extractRoot);
+    onProgress({ stage: 'verifying', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
+    const { version } = await validateUpdatePackage(packageRoot, currentVersion);
+    onProgress({ stage: 'prepared', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
+    return {
+      runRoot,
+      packageRoot,
+      archivePath,
+      version,
+      currentVersion,
+      applicationRoot: path.resolve(applicationRoot)
+    };
   } catch (error) {
     await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
     throw error;
@@ -447,6 +518,8 @@ module.exports = {
   normalizeVersion,
   hashFile,
   prepareUpdate,
+  prepareLocalUpdate,
+  validateUpdatePackage,
   launchUpdate,
   cleanupSuccessfulUpdateRuns,
   consumeUpdateFailure,

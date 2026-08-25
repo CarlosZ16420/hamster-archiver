@@ -48,3 +48,20 @@ hy测试目录/*/
 HamsterArchive.exe
 HamsterArchiver.exe
 tools/ffmpeg/*.exe
+# 本地 AI 交接导出可能包含工作区绝对路径，不进入源码与发布检查
+docs/zcode-handoff-*/
+
+# Agent 临时记忆、仓库根运行时和旧式便携副本不进入源码
+/.workbuddy/
+/locales/
+/resources/
+/release-manifest.json
+/chrome_*_percent.pak
+/*.dll
+/*.pak
+/*.dat
+/snapshot_blob.bin
+/v8_context_snapshot.bin
+/version
+/vk_swiftshader_icd.json
+/LICENSES.chromium.html

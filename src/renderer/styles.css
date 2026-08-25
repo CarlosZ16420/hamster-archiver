@@ -3,6 +3,8 @@
    classic : 经典 —— 原版暖纸色（保留原有观感）
    day     : 白昼 —— 全新简约高级的中性浅色
    night   : 黑夜 —— 重做的简约高级深色
+   celadon : 青瓷 —— 温润克制的东方浅色
+   plum    : 暮紫 —— 深梅紫与香槟金的夜色
    所有颜色均通过语义变量下发，主题块只改变量，不改结构。
 --------------------------------------------------------------------------- */
 
@@ -55,11 +57,11 @@
   --shadow-lg: 0 24px 70px rgba(40, 30, 20, .24);
   --page-bg: radial-gradient(circle at 90% 0%, rgba(212, 95, 60, .12), transparent 30rem), var(--paper);
   --dialog-backdrop: rgba(31, 27, 22, .42);
-  --activity-0: #eee9e1;
-  --activity-1: #f2d8cd;
-  --activity-2: #e9b29e;
-  --activity-3: #dd8164;
-  --activity-4: #c55738;
+  --activity-0: #e9ece7;
+  --activity-1: #d8e7dc;
+  --activity-2: #acd0b8;
+  --activity-3: #73ad88;
+  --activity-4: #3f7f5b;
 }
 
 /* 白昼 —— 全新简约高级浅色主题 */
@@ -109,11 +111,11 @@ body[data-theme="day"] {
   --shadow-lg: 0 24px 64px rgba(24, 24, 27, .16);
   --page-bg: var(--paper);
   --dialog-backdrop: rgba(24, 24, 27, .38);
-  --activity-0: #ededf0;
-  --activity-1: #f4d9cd;
-  --activity-2: #eab09b;
-  --activity-3: #d97e5a;
-  --activity-4: #c25532;
+  --activity-0: #ecefec;
+  --activity-1: #d9eadf;
+  --activity-2: #abd3ba;
+  --activity-3: #6dac85;
+  --activity-4: #347a56;
 }
 
 /* 黑夜 —— 重做的简约高级深色主题 */
@@ -163,11 +165,63 @@ body[data-theme="night"] {
   --shadow-lg: 0 24px 64px rgba(0, 0, 0, .55);
   --page-bg: var(--paper);
   --dialog-backdrop: rgba(5, 5, 8, .6);
-  --activity-0: #242429;
-  --activity-1: #4a342c;
-  --activity-2: #7a4c3c;
-  --activity-3: #b2644a;
-  --activity-4: #e5714a;
+  --activity-0: #24282a;
+  --activity-1: #203a2e;
+  --activity-2: #2d5c44;
+  --activity-3: #43805e;
+  --activity-4: #69ad80;
+}
+
+/* 青瓷 —— 玉石感的低饱和浅色主题 */
+body[data-theme="celadon"] {
+  color-scheme: light;
+  --ink: #20312d; --muted: #667a73; --paper: #edf4f0; --panel: #fbfdfb;
+  --panel-soft: #f7faf8; --panel-nested: #eef5f1; --panel-inset: #f5f9f7; --panel-tint: #e9f2ed;
+  --field: #f7fbf9; --field-btn: #e1ece7; --readonly: #e7efeb;
+  --line: #cfddd6; --line-soft: #dce7e1; --line-strong: #aac1b6;
+  --thead: #eef5f1; --segment: #e5efea; --track: #dce8e2; --selected: #e3f1ea;
+  --accent: #3f806f; --accent-dark: #285f52; --accent-soft: #dff0e9;
+  --accent-alpha: rgba(63, 128, 111, .14); --focus-ring: rgba(63, 128, 111, .24);
+  --green: #28745b; --amber: #9a702a; --red: #a84a43; --blue: #3d7180;
+  --ok-fg: #286852; --ok-bg: #e2f1ea; --ok-line: #bdd9cc;
+  --warn-fg: #73551f; --warn-bg: #f6efd9; --warn-line: #dfc98e;
+  --danger-fg: #934139; --danger-bg: #f7e8e5; --danger-line: #dfbdb6;
+  --info-fg: #356976; --info-bg: #e2eff2; --info-line: #c1d9de;
+  --neutral-fg: #60736c; --neutral-bg: #e4ece8;
+  --cover-from: #dce9e3; --cover-to: #c9dbd2; --cover-fg: #688279;
+  --star: #ad7b27; --star-empty: #bdc9c2; --icon-bg: #dcece5; --row-dir: #edf6f2;
+  --nav-bg: rgba(251, 253, 251, .72); --toast-bg: #20312d; --toast-fg: #fbfdfb;
+  --shadow-sm: 0 2px 8px rgba(31, 68, 57, .07); --shadow-md: 0 14px 34px rgba(31, 68, 57, .08);
+  --shadow-lg: 0 28px 70px rgba(24, 52, 44, .22);
+  --page-bg: radial-gradient(circle at 86% 0%, rgba(89, 151, 131, .17), transparent 31rem), var(--paper);
+  --dialog-backdrop: rgba(25, 50, 43, .42);
+  --activity-0: #dfe9e4; --activity-1: #c9e1d5; --activity-2: #98c8b1; --activity-3: #61a586; --activity-4: #337a61;
+}
+
+/* 暮紫 —— 深梅紫配香槟金的高级夜色主题 */
+body[data-theme="plum"] {
+  color-scheme: dark;
+  --ink: #f0e8ef; --muted: #b0a0ad; --paper: #171117; --panel: #211821;
+  --panel-soft: #211821; --panel-nested: #2a1f2a; --panel-inset: #261c26; --panel-tint: #2d212c;
+  --field: #302431; --field-btn: #3c2d3c; --readonly: #342735;
+  --line: #443445; --line-soft: #382a39; --line-strong: #5f4960;
+  --thead: #2a1f2a; --segment: #302431; --track: #382a38; --selected: #433343;
+  --accent: #d4a75d; --accent-dark: #edc77e; --accent-soft: #3b3024;
+  --accent-alpha: rgba(212, 167, 93, .16); --focus-ring: rgba(212, 167, 93, .27);
+  --green: #83c4a0; --amber: #e2b96e; --red: #ef908d; --blue: #9ebbd8;
+  --ok-fg: #91d0aa; --ok-bg: #203128; --ok-line: #36513f;
+  --warn-fg: #e6c17d; --warn-bg: #352b1d; --warn-line: #5c4929;
+  --danger-fg: #f2a09d; --danger-bg: #3a2327; --danger-line: #62383d;
+  --info-fg: #a8c7e2; --info-bg: #202c3a; --info-line: #394d61;
+  --neutral-fg: #b3a5b1; --neutral-bg: #382b38;
+  --cover-from: #352936; --cover-to: #463548; --cover-fg: #9a8498;
+  --star: #e2b96e; --star-empty: #5c495c; --icon-bg: #3d302c; --row-dir: #30232e;
+  --nav-bg: rgba(34, 25, 34, .76); --toast-bg: #f0e8ef; --toast-fg: #211821;
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, .35); --shadow-md: 0 16px 38px rgba(0, 0, 0, .38);
+  --shadow-lg: 0 28px 72px rgba(0, 0, 0, .6);
+  --page-bg: radial-gradient(circle at 88% 0%, rgba(112, 63, 105, .28), transparent 34rem), var(--paper);
+  --dialog-backdrop: rgba(9, 5, 10, .68);
+  --activity-0: #332b34; --activity-1: #294238; --activity-2: #365f4d; --activity-3: #508568; --activity-4: #78b28a;
 }
 
 * { box-sizing: border-box; }
@@ -648,6 +702,26 @@ tr.selected td { background: var(--selected); }
 .ignore-terms-setting strong, .ignore-terms-setting small { display: block; }
 .ignore-terms-setting small { margin-top: 4px; color: var(--muted); line-height: 1.45; }
 .ignore-terms-actions { display: flex; flex: 0 0 auto; gap: 7px; }
+.ignore-terms-actions select { padding: 8px 30px 8px 10px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink); background: #fbf9f3; }
+.similarity-toggle { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 4px; cursor: pointer; }
+.similarity-toggle input { width: 17px; height: 17px; margin-top: 2px; accent-color: var(--accent); }
+.similarity-toggle strong { display: block; }
+.similarity-toggle small { display: block; margin-top: 2px; color: var(--muted); }
+.similarity-strength-setting { margin: 14px 0 2px; }
+.similarity-strength-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.similarity-strength-head small { color: var(--muted); }
+#similarity-strength { width: 100%; margin: 10px 0 2px; accent-color: var(--accent); }
+.similarity-strength-scale { display: flex; justify-content: space-between; margin-top: 2px; color: var(--muted); font-size: 12px; }
+.similarity-terms-setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 14px 0; padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--panel-nested); }
+.similarity-terms-setting strong, .similarity-terms-setting small { display: block; }
+.similarity-terms-setting small { margin-top: 4px; color: var(--muted); line-height: 1.45; }
+.similarity-rebuild-setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 14px 0 4px; padding: 12px 13px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--panel-nested); }
+.similarity-rebuild-setting strong, .similarity-rebuild-setting small { display: block; }
+.similarity-rebuild-setting small { margin-top: 4px; color: var(--muted); line-height: 1.45; }
+.similarity-rebuild-progress { margin: 12px 0 2px; }
+.similarity-progress-track { height: 8px; border-radius: 999px; background: #ece4d6; overflow: hidden; }
+.similarity-progress-fill { width: 0%; height: 100%; border-radius: 999px; background: var(--accent); transition: width .2s ease; }
+.similarity-rebuild-progress small { display: block; margin-top: 6px; color: var(--muted); }
 .manual-dialog { max-height: calc(100vh - 36px); overflow-y: auto; }
 .usage-guide-dialog { width: min(720px, calc(100vw - 32px)); padding: 26px; border: 1px solid var(--line); border-radius: 18px; background: var(--panel); box-shadow: var(--shadow-lg); }
 .usage-guide-dialog::backdrop { background: var(--dialog-backdrop); backdrop-filter: blur(5px); }
@@ -706,6 +780,8 @@ tr.selected td { background: var(--selected); }
   .thumbnail-group-head { display: block; }
   .library-filter-row, .library-tool-row { grid-template-columns: 1fr; }
   .ignore-terms-setting { align-items: stretch; flex-direction: column; }
+  .similarity-terms-setting, .similarity-rebuild-setting { align-items: stretch; flex-direction: column; }
+  .similarity-strength-head { align-items: stretch; flex-direction: column; }
   .usage-guide-copy { grid-template-columns: 1fr; }
   .lightbox-footer { align-items: stretch; flex-direction: column; }
 }

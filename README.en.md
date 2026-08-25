@@ -1,161 +1,158 @@
 <div align="center">
 
-<img src="README.assets/iconC_cropped_1022x1022.png" alt="Hamster Archiver pixel hamster icon" width="112">
-
-# Hamster Archiver
-
-### Turn scattered large files into verified archives and a searchable local warehouse
-
-Local-first batch archiver and searchable media vault for Windows.
-
-Local-first · Batch archiving · Media previews · Portable user data
-
-![Version](https://img.shields.io/badge/version-4.5.0-d45f3c?style=flat-square)
-![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
-![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
-![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
-![SQLite](https://img.shields.io/badge/SQLite-WAL-b17422?style=flat-square)
-[![CI](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml)
-
-[中文 README](README.md) · [Download releases](../../releases) · [Report an issue](../../issues) · [Contributing](CONTRIBUTING.md)
+<img src="assets/app-icon.png" alt="Hamster Archiver app icon" width="96">
 
 </div>
 
----
+![Hamster Archiver turns scattered folders into a verified, searchable local vault](assets/readme/hero.svg)
 
-## What is it?
+<div align="center">
 
-Hamster Archiver is for people who have large piles of local media and need a reliable, searchable backup record:
+[![Version](https://img.shields.io/badge/version-4.5.6-e9653c?style=flat-square)](../../releases/latest)
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-28241f?style=flat-square)
+![License](https://img.shields.io/badge/license-MIT-28745c?style=flat-square)
+[![CI](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml)
 
-- folders full of videos and images that are difficult to browse;
-- resources downloaded more than once without realizing it;
-- cloud-drive backups that become impossible to search later;
-- private media that should remain on local storage instead of being scanned by a photo service.
+**A local-first batch archiver and searchable media warehouse for Windows.**
 
-The application scans one source directory, creates one task for every direct child folder or video, produces a manifest and media previews, compresses each task, verifies the result, and records everything in a local SQLite warehouse.
+[Download for Windows](../../releases/latest) · [中文](README.md) · [Report an issue](../../issues) · [Contributing](CONTRIBUTING.md)
 
-```text
-Scan → manifest and duplicate checks → 7-Zip compression → integrity verification → warehouse record → optional source handling
-```
+</div>
 
-Volume size is configurable from 64 MiB to 10 GiB, with the existing 10 GiB behavior as the default. Turning optional splitting off cannot bypass confirmation and safety volumes for tasks over 10 GiB. Passwords, backup destinations, tags, ratings and notes can be stored per project. Possible duplicates, large tasks and abnormal archive sizes wait for explicit confirmation.
+## Built for overflowing drives
 
-## Warehouse
+Ordinary compression tools leave you with archives. Hamster Archiver turns every direct child folder or video into a traceable task, creates a manifest and media previews, compresses and verifies it, then stores titles, paths, tags, thumbnails and fingerprints in a local SQLite warehouse.
 
-The warehouse is more than a list of archives. It provides cover browsing, activity statistics, random discovery, fuzzy search, filtering, pagination and a virtualized directory tree.
+- Search titles, tags, notes, paths and filenames instead of excavating folders.
+- Compare exact fingerprints, titles, video names and sizes before accepting another copy.
+- Keep the warehouse, previews, saved passwords and logs on your own machine.
 
-It stores complete directory information, image thumbnails and evenly spaced video frames. Frames from the same video remain grouped together. Thumbnails can be enlarged, selected as a project cover, deleted or supplemented with manually chosen and pasted images.
+## See the warehouse, not just the ZIPs
 
-The application includes Daylight and Night themes plus a “⇄ EN / ⇄ 中文” language toggle. The language preference is stored in the portable `userdata` directory.
+![Archive workbench, real task queue, warehouse overview and cover grid](docs/images/interface-overview.png)
 
-## Safety and archiving
+The warehouse preserves the complete directory tree and turns images and evenly sampled video frames into browsable previews. Each project can have a cover, tags, rating, notes, backup location and its own extraction password.
 
-- Portable 7-Zip is bundled and supports 7z/ZIP, compression levels 0–9 and integrity testing.
-- Unreadable or locked files are skipped and recorded instead of aborting the whole scan.
-- Abnormal archive sizes are held for review; the source remains protected if an abnormal product is discarded.
-- Multi-volume products use an isolated, atomic deletion workflow.
-- Disk space is checked before compression; cross-disk moves copy, verify and then remove the source.
-- The queue supports pause, finish-current-item-and-pause, scheduled operation and history-based time estimates.
-- When moving a source to the Windows Recycle Bin, the current task is checked immediately. Only an unverified result from the current task can halt the queue; historical projects are not periodically sampled.
+<details>
+<summary><strong>Open a project detail and frame preview</strong></summary>
 
-## Media and search
+![Project details, media previews and complete directory structure](docs/images/detail.png)
 
-- One portable FFmpeg binary probes videos and extracts evenly spaced frames; FFprobe is not required.
-- SQLite WAL and FTS5 provide persistent search indexes.
-- Exact fingerprints, titles and video sizes participate in duplicate checks.
-- Similarity calculations are local and use a maintainable ignore-term whitelist.
-- Similar links can be recalculated or dismissed symmetrically for a project pair.
+</details>
+
+## One local, verifiable pipeline
+
+![Scan, manifest, archive, verify and catalogue workflow](assets/readme/workflow.svg)
+
+1. Scan a source directory or add one folder or video.
+2. Build a directory manifest, MD5 fingerprints, image thumbnails and evenly sampled video frames.
+3. Create 7z/ZIP archives with portable 7-Zip, optional passwords, levels and 64 MiB–10 GiB volumes.
+4. Test archive integrity. Large tasks, abnormal ratios and possible duplicates wait for confirmation.
+5. Only after a successful warehouse commit does the app keep, move or recycle the source as configured.
+
+## What it gives you
+
+| Safe archiving | Searchable warehouse | Local and portable |
+|---|---|---|
+| Source and free-space checks | Persistent SQLite WAL + FTS5 indexes | No automatic media or warehouse upload |
+| Integrity tests and ratio review | Search titles, tags, notes, paths and names | Switchable portable `userdata` |
+| Isolated multi-volume publish/rollback | Covers, previews, directory trees, discovery | Relocatable app-owned data |
+| Copy, verify, then delete across drives | Exact and similarity-based review | Chinese/English UI and five themes |
+
+### Duplicate and similarity review
+
+- Exact files require both size and MD5 evidence; title and video evidence are scored separately.
+- A short title, one generic term or release-format boilerplate cannot mark unrelated projects by itself.
+- Choose “Possible duplicate” directly from the tag filter, rebuild one project or the whole warehouse, or dismiss a relation symmetrically.
+- Changing similarity strength does not silently trigger an expensive full rebuild.
+
+### Queue and source safety
+
+- Pause, finish the current item and pause, schedule a run, and estimate remaining time from real history.
+- Unreadable files are skipped and logged; the source remains when a task contains skipped items.
+- Recycle Bin handling is checked immediately for the current task. Unverified handling stops the queue; historical projects are not sampled.
+- Restoring a moved or recycled source can be attempted before deleting a warehouse record. A failed restore preserves the record and archives.
 
 ## Quick start
 
-### Use a release build
+1. Download the Windows x64 ZIP from [Releases](../../releases/latest).
+2. Extract the **complete directory** and run `HamsterArchiver.exe`.
+3. Choose the source and archive-output directories, scan, review the queue and start archiving.
 
-1. Download the Windows x64 ZIP from [Releases](../../releases).
-2. Extract the complete directory and run `HamsterArchiver.exe`.
-3. Choose the source directory and archive output directory, scan and confirm the queue, then start archiving.
+> Do not copy only the EXE. Electron, 7-Zip, FFmpeg and update verification depend on the complete release directory.
 
-Keep the release directory structure intact. Electron, 7-Zip and FFmpeg depend on the complete release directory. The user data area defaults to the adjacent `userdata` directory and can be safely copied or switched under More settings.
+### Updating
 
-### Manual update when automatic update fails
+Check for updates always shows the current and latest versions. When a release is available, automatic update is offered; manual update remains available at any time and accepts a complete Windows x64 release ZIP. The package version, platform, manifest and critical files are verified, existing `userdata` is excluded from replacement, and failed replacement rolls back.
 
-If the application reports that automatic update did not finish, the old version remains intact and usable. Copying the portable data directory preserves more information than re-importing the warehouse:
+<details>
+<summary><strong>One-time migration from 4.2.0</strong></summary>
 
-Update checks use the public release channel, while source code and development commits are kept in a private repository. Version 4.2.0 can discover and verify a newer Release, but its built-in updater copies the new `resources` directory into a nested path. Startup validation therefore still reads version 4.2.0 and rolls back. Upgrading from 4.2.0 requires the manual steps below. After that one manual upgrade, the fixed updater replaces backed-up program directories before startup validation and always excludes the existing `userdata` directory.
+The updater bundled with 4.2.0 cannot replace `resources` correctly, so that version needs one manual migration:
 
-1. Use Export warehouse in the old version to create a warehouse ZIP, then exit the application completely.
-2. Download the latest Windows x64 ZIP from [Releases](../../releases) and extract it into a **new directory**. Do not replace only the EXE or overwrite a directory that is still running.
-3. Run `HamsterArchiver.exe` from the new directory, choose Import external warehouse, and select the ZIP exported in step 1.
-4. Verify the version, warehouse records and thumbnails. Keep the old program directory until the imported warehouse has been checked.
+1. Export the warehouse from the old app and exit it completely.
+2. Extract the latest ZIP into a **new directory**; do not overwrite a running installation.
+3. Run the new app and use Import external warehouse with the exported ZIP.
+4. Verify the version, records and thumbnails before removing the old directory.
 
-The main application now exits only after the independent updater confirms that it has started. A launch failure keeps the current version open and displays these manual steps. A replacement or startup-validation failure rolls the program files back and reports the reason and diagnostics directory when the old version reopens.
-
-### Run from source
-
-Requirements: Windows, Node.js 22+ and npm.
-
-```powershell
-git clone https://github.com/CarlosZ16420/hamster-archiver.git
-cd hamster-archiver
-npm install
-npm run check
-npm test
-npm start
-```
-
-The source repository does not contain the large `ffmpeg.exe` binary. Put FFmpeg in `tools/ffmpeg/` before building a release; portable 7-Zip is included with the source.
+</details>
 
 ## Portable data layout
 
 ```text
-HamsterArchiver-v4.5.0-win-x64/
+HamsterArchiver-v4.5.6-win-x64/
 ├─ HamsterArchiver.exe
-├─ tools/
-│  ├─ 7zip/
-│  └─ ffmpeg/
-├─ resources/
+├─ tools/                  # 7-Zip and FFmpeg
+├─ resources/              # Electron application
 └─ userdata/
-   ├─ config/       # settings and the similarity ignore list
-   ├─ warehouse/    # SQLite warehouse and thumbnails
-   ├─ logs/         # one user log
-   ├─ processed/    # default destination for processed sources
-   └─ electron/     # local UI cache
+   ├─ config/              # settings and similarity ignore terms
+   ├─ warehouse/           # SQLite warehouse and thumbnails
+   ├─ logs/                # current-user log
+   ├─ processed/           # default processed-source destination
+   └─ electron/            # local UI cache
 ```
 
-The staging directory is created beside the selected output directory, for example `D:\packed-staging`, to reduce cross-disk transfers. Source and output directories are user choices and are not part of the source repository.
-
-The user data area may contain passwords, file paths, thumbnails and warehouse indexes. It is ignored by Git and never included in a public snapshot. Choosing an empty new location copies durable data while retaining the old directory; choosing recognized existing data switches to it without merging warehouses.
+The user data area can contain passwords, personal paths and media thumbnails. Git ignores it and it never enters the public source snapshot or release ZIP. More settings can copy data to an empty directory or switch to another recognized data area while retaining the old directory; two warehouses are never merged silently.
 
 ## Technology and boundaries
 
 | Area | Implementation |
 |---|---|
-| Desktop | Electron 43, context isolation, sandbox and strict CSP |
-| Data | Node built-in SQLite, WAL, transactions and FTS5 |
-| Compression | Portable 7-Zip, 7z/ZIP, configurable 64 MiB–10 GiB volumes, optional passwords and integrity tests |
+| Desktop | Electron 43, context isolation, sandbox, strict CSP |
+| Data | Node built-in SQLite, WAL, transactions, FTS5 |
+| Compression | Portable 7-Zip 26.02, 7z/ZIP, integrity tests |
 | Media | One portable FFmpeg binary for probing and frame extraction |
-| Performance | Warehouse pagination, virtualized directories and persistent search/similarity candidates |
-| Privacy | User data stays local; media, warehouse data and passwords are not uploaded |
+| Performance | Pagination, virtualized trees, persistent search and similarity candidates |
+| Network | GitHub is contacted only for update checks or links; archive upload is outside the app |
 
-The application only contacts GitHub when you click Check for updates or open a GitHub link. Update packages are downloaded to a temporary userdata directory, verified, and applied by a separate updater. Archive uploads remain under your cloud-drive client or manual control.
+## Run from source
 
-## Development
-
-Before submitting changes, run:
+Requires Windows, Node.js 22.12+ on the 22.x line or Node.js 24.x, and npm 10.x/11.x.
 
 ```powershell
+git clone https://github.com/CarlosZ16420/hamster-archiver.git
+cd hamster-archiver
+npm ci
+npm run verify:dependencies
 npm run check
 npm test
-npm run publish:check
+npm start
 ```
 
-Do not commit `userdata/`, databases, logs, archives, passwords, real media or personal absolute paths. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+The repository does not commit the large `ffmpeg.exe`. `dependency-lock.json` pins Electron, 7-Zip and FFmpeg versions, sources and critical hashes. Use `npm run tools:prepare` to restore bundled tools and `npm run verify:tools` before a release build.
 
-This project is released under the [MIT License](LICENSE). 7-Zip and FFmpeg remain under their bundled licenses.
+Keep maintainer builds, user data and public snapshots outside the source tree. Development uses isolated data; see [development](docs/DEVELOPMENT.md) and [release](docs/RELEASE.md).
+
+## Contributing
+
+Before submitting changes, run `npm run verify:dependencies`, `npm run check`, `npm test` and `npm run publish:check`. Never commit user data, databases, logs, archives, passwords, real media or personal absolute paths. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+
+Released under the [MIT License](LICENSE). Bundled 7-Zip and FFmpeg retain their accompanying licenses.
 
 <div align="center">
 
-Feedback and pull requests are welcome.
+**Turn “I think I saved this before” into a verified, searchable answer.**
 
-[GitHub repository](https://github.com/CarlosZ16420/hamster-archiver) · [Report a problem](https://github.com/CarlosZ16420/hamster-archiver/issues)
+[Download the latest release](../../releases/latest) · [Open an issue](../../issues) · [Changelog](CHANGELOG.public.md)
 
 </div>

@@ -7,11 +7,14 @@ const packageJson = require('../package.json');
 const { embedWindowsIcon } = require('./embed-windows-icon');
 const { createFileIntegrityEntries, hashFile } = require('../src/core/tool-integrity');
 const { dependencyLock, verifyToolchain } = require('./verify-toolchain');
+const { assertPathInsideLocalRoot, makeLocalLayout } = require('../src/core/local-paths');
 
 const projectRoot = path.resolve(__dirname, '..');
 const electronDist = path.join(projectRoot, 'node_modules', 'electron', 'dist');
 const releaseName = `HamsterArchiver-v${packageJson.version}-win-x64`;
-const outputRoot = path.join(projectRoot, 'dist', releaseName);
+const localLayout = makeLocalLayout(projectRoot);
+const outputRoot = path.join(localLayout.stagingRoot, releaseName);
+assertPathInsideLocalRoot(outputRoot, localLayout.root, '发行构建目录');
 
 async function exists(targetPath) {
   try { await fs.access(targetPath); return true; } catch (error) {
@@ -34,13 +37,15 @@ async function copyVerifiedFile(relativePath, destinationRoot) {
 
 async function main() {
   if (process.platform !== 'win32' || process.arch !== 'x64') {
-    throw new Error('Windows x64 发行包只能在锁定的 Windows x64 工具链中构建。');
+    throw new Error('Windows x64 发行包只能在受支持的 Windows x64 环境中构建。');
   }
   const toolchain = await verifyToolchain({
-    strictNode: true,
     requireInstalledPackages: true,
     requireTools: true
   });
+  if (toolchain.dependencies.npm === 'unknown') {
+    throw new Error('无法记录实际 npm 版本；请通过 npm run build:release 或 npm run release:local 构建。');
+  }
   if (!(await exists(path.join(electronDist, 'electron.exe')))) {
     throw new Error('缺少 Electron 运行时，请先执行 npm ci。');
   }

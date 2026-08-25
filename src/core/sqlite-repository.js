@@ -8,6 +8,10 @@ const { normalizeName, similarityCandidateKeys } = require('./duplicate-check');
 
 const SCHEMA_VERSION = 2;
 
+// 候选键算法版本：saveCatalog 只在记录内容变化时重写键，
+// 算法升级后靠这个版本号把存量记录的键整体重建一次。
+const SIMILARITY_KEYS_VERSION = '2';
+
 function searchGrams(value) {
   const compact = String(value || '').normalize('NFKC').toLocaleLowerCase('zh-CN')
     .replace(/[^\p{L}\p{N}]+/gu, '');
@@ -127,7 +131,32 @@ function openRepository(repositoryDirectory, options = {}) {
   const databasePath = options.databasePath || path.join(repositoryDirectory, 'warehouse.sqlite');
   const database = new DatabaseSync(databasePath);
   initializeSchema(database);
+  ensureSimilarityKeyVersion(database);
   return { database, databasePath };
+}
+
+function ensureSimilarityKeyVersion(database) {
+  const row = database.prepare("SELECT value FROM metadata WHERE key = 'similarity_keys_version'").get();
+  if (row?.value === SIMILARITY_KEYS_VERSION) return;
+  withTransaction(database, () => {
+    database.exec('DELETE FROM catalog_similarity_keys');
+    const insertKey = database.prepare(
+      'INSERT OR IGNORE INTO catalog_similarity_keys(record_id, candidate_key) VALUES (?, ?)'
+    );
+    for (const record of database.prepare('SELECT id, record_json FROM catalog_records').all()) {
+      let parsed;
+      try {
+        parsed = JSON.parse(record.record_json);
+      } catch {
+        continue;
+      }
+      for (const key of similarityCandidateKeys(parsed, [])) insertKey.run(record.id, key);
+    }
+    database.prepare(`
+      INSERT INTO metadata(key, value) VALUES ('similarity_keys_version', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(SIMILARITY_KEYS_VERSION);
+  });
 }
 
 function withTransaction(database, operation) {

@@ -57,6 +57,9 @@ test('source selection can be queued before an output directory is configured', 
   assert.throws(() => validateSourceSelection({
     archiveOutputDirectory: 'E:\\incoming\\tiny-folder\\packed'
   }, 'E:\\incoming\\tiny-folder'), /打包后文件存放点/);
+  assert.throws(() => validateSourceSelection({
+    repositoryDirectory: 'E:\\portable-app\\userdata\\warehouse'
+  }, 'E:\\portable-app\\userdata\\warehouse\\accidental-source'), /仓库位置/);
 });
 
 test('configured archive naming supports original and validated custom names', () => {
@@ -119,10 +122,14 @@ test('portable tools remain relative and owned user-data paths rebase after movi
     processedSourceDirectory: 'D:\\old-app\\userdata\\processed',
     similarityIgnoreTermsPath: 'D:\\old-app\\userdata\\config\\similarity-ignore-terms.txt',
     archiveStagingDirectory: 'D:\\old-app\\userdata\\staging',
-    intakeDirectory: 'F:\\my-input'
+    intakeDirectory: 'F:\\my-input',
+    archiveOutputDirectory: 'F:\\my-archives',
+    sevenZipPath: 'G:\\custom-tools\\7z.exe'
   }, { root: 'E:\\new-app\\userdata' });
   assert.equal(config.repositoryDirectory, path.resolve('E:\\new-app\\userdata', 'warehouse'));
   assert.equal(config.archiveStagingDirectory, path.resolve('E:\\new-app\\userdata', 'staging'));
   assert.equal(config.migratedRepositoryFrom, 'D:\\old-app\\userdata\\warehouse');
   assert.equal(config.intakeDirectory, 'F:\\my-input');
+  assert.equal(config.archiveOutputDirectory, 'F:\\my-archives');
+  assert.equal(config.sevenZipPath, 'G:\\custom-tools\\7z.exe');
 });

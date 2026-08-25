@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="540" viewBox="0 0 1200 540" role="img" aria-labelledby="title desc">
+  <title id="title">Hamster Archiver</title>
+  <desc id="desc">A warm dark hero showing a local-first path from folders to verified archives and a searchable vault.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#171614"/>
+      <stop offset="0.62" stop-color="#211d18"/>
+      <stop offset="1" stop-color="#2d2118"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffb24a"/>
+      <stop offset="1" stop-color="#e95d36"/>
+    </linearGradient>
+    <linearGradient id="mint" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#bdebd7"/>
+      <stop offset="1" stop-color="#57b895"/>
+    </linearGradient>
+    <pattern id="grid" width="36" height="36" patternUnits="userSpaceOnUse">
+      <path d="M36 0H0V36" fill="none" stroke="#fff7e8" stroke-opacity=".045"/>
+    </pattern>
+  </defs>
+
+  <rect width="1200" height="540" rx="32" fill="url(#bg)"/>
+  <rect width="1200" height="540" rx="32" fill="url(#grid)"/>
+  <circle cx="1080" cy="70" r="220" fill="#e95d36" opacity=".07"/>
+  <circle cx="890" cy="530" r="260" fill="#57b895" opacity=".055"/>
+
+  <g transform="translate(62 58)">
+    <rect width="248" height="34" rx="17" fill="#fff7e8" fill-opacity=".08" stroke="#fff7e8" stroke-opacity=".14"/>
+    <circle cx="18" cy="17" r="5" fill="#75c6a7"/>
+    <text x="32" y="22" fill="#f5e8d2" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="2">LOCAL-FIRST · WINDOWS</text>
+
+    <text x="0" y="112" fill="#fff8ec" font-family="Segoe UI, Arial, sans-serif" font-size="64" font-weight="800" letter-spacing="-2">HAMSTER</text>
+    <text x="0" y="174" fill="url(#orange)" font-family="Segoe UI, Arial, sans-serif" font-size="64" font-weight="800" letter-spacing="-2">ARCHIVER</text>
+    <text x="2" y="217" fill="#f5e8d2" font-family="Microsoft YaHei, Segoe UI, sans-serif" font-size="22" font-weight="700">仓鼠症大结局</text>
+    <text x="2" y="256" fill="#bfb3a4" font-family="Microsoft YaHei, Segoe UI, sans-serif" font-size="18">把散乱的大文件，变成可验证、可搜索的本地仓库</text>
+
+    <g transform="translate(0 294)" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" letter-spacing="1.2">
+      <rect width="112" height="38" rx="19" fill="#fff7e8" fill-opacity=".08" stroke="#fff7e8" stroke-opacity=".15"/>
+      <text x="27" y="24" fill="#f5e8d2">SCAN</text>
+      <rect x="124" width="112" height="38" rx="19" fill="#fff7e8" fill-opacity=".08" stroke="#fff7e8" stroke-opacity=".15"/>
+      <text x="145" y="24" fill="#f5e8d2">VERIFY</text>
+      <rect x="248" width="112" height="38" rx="19" fill="#75c6a7" fill-opacity=".14" stroke="#75c6a7" stroke-opacity=".35"/>
+      <text x="274" y="24" fill="#bdebd7">VAULT</text>
+    </g>
+
+    <g transform="translate(0 378)" font-family="Segoe UI, Arial, sans-serif">
+      <rect width="414" height="54" rx="16" fill="#0f0f0e" fill-opacity=".65" stroke="#fff7e8" stroke-opacity=".1"/>
+      <circle cx="25" cy="27" r="6" fill="#75c6a7"/>
+      <text x="43" y="24" fill="#e8dac7" font-size="12" font-weight="700">VERIFIED PIPELINE</text>
+      <text x="43" y="40" fill="#8f877d" font-size="11">7-Zip · SHA-256 · SQLite FTS5 · portable userdata</text>
+    </g>
+  </g>
+
+  <g transform="translate(628 54)">
+    <rect x="0" y="34" width="500" height="404" rx="28" fill="#f6edde" stroke="#fff7e8" stroke-opacity=".22"/>
+    <rect x="18" y="52" width="464" height="64" rx="18" fill="#fffaf2"/>
+    <circle cx="48" cy="84" r="8" fill="#e95d36"/>
+    <text x="68" y="80" fill="#29251f" font-family="Segoe UI, Arial, sans-serif" font-size="13" font-weight="800" letter-spacing="1">ARCHIVE WORKBENCH</text>
+    <text x="68" y="99" fill="#8c7f70" font-family="Microsoft YaHei, Segoe UI, sans-serif" font-size="12">本地处理 · 每一步都可追溯</text>
+    <rect x="395" y="71" width="66" height="26" rx="13" fill="#dff2e9"/>
+    <text x="412" y="88" fill="#247559" font-family="Segoe UI, Arial, sans-serif" font-size="11" font-weight="800">READY</text>
+
+    <g transform="translate(30 140)" font-family="Segoe UI, Arial, sans-serif">
+      <rect width="205" height="108" rx="18" fill="#fffaf2"/>
+      <path d="M24 38h36l9 10h55v37H24z" fill="#f0a846"/>
+      <path d="M24 49h100v36H24z" fill="#ffc761"/>
+      <text x="142" y="44" fill="#302a23" font-size="12" font-weight="800">SOURCE</text>
+      <text x="142" y="65" fill="#8c7f70" font-size="11">folders + media</text>
+      <text x="142" y="84" fill="#8c7f70" font-size="11">local only</text>
+
+      <rect x="225" width="205" height="108" rx="18" fill="#fffaf2"/>
+      <rect x="247" y="28" width="68" height="58" rx="10" fill="#2c2924"/>
+      <rect x="257" y="39" width="48" height="6" rx="3" fill="#75c6a7"/>
+      <rect x="257" y="52" width="36" height="6" rx="3" fill="#e95d36"/>
+      <rect x="257" y="65" width="44" height="6" rx="3" fill="#f0a846"/>
+      <text x="333" y="44" fill="#302a23" font-size="12" font-weight="800">MANIFEST</text>
+      <text x="333" y="65" fill="#8c7f70" font-size="11">names · hashes</text>
+      <text x="333" y="84" fill="#8c7f70" font-size="11">previews</text>
+
+      <rect y="126" width="205" height="108" rx="18" fill="#fffaf2"/>
+      <rect x="24" y="151" width="82" height="58" rx="12" fill="#2c2924"/>
+      <text x="44" y="187" fill="#fff7e8" font-size="22" font-weight="900">7Z</text>
+      <path d="M117 180h28" stroke="#e95d36" stroke-width="4" stroke-linecap="round"/>
+      <path d="m137 171 10 9-10 9" fill="none" stroke="#e95d36" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="117" y="158" fill="#302a23" font-size="12" font-weight="800">PACK</text>
+      <text x="117" y="207" fill="#8c7f70" font-size="11">test before move</text>
+
+      <rect x="225" y="126" width="205" height="108" rx="18" fill="#15251f"/>
+      <path d="M251 161h52v44h-52z" fill="none" stroke="#75c6a7" stroke-width="3"/>
+      <path d="M260 161v-11h34v11" fill="none" stroke="#75c6a7" stroke-width="3"/>
+      <path d="m264 183 9 9 18-21" fill="none" stroke="#bdebd7" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="321" y="166" fill="#e9fff5" font-size="12" font-weight="800">LOCAL VAULT</text>
+      <text x="321" y="187" fill="#94c8b3" font-size="11">verified archives</text>
+      <text x="321" y="206" fill="#94c8b3" font-size="11">searchable records</text>
+    </g>
+
+  </g>
+</svg>

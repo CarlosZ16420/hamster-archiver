@@ -117,6 +117,8 @@ function makeDefaultConfig(workspaceRoot, userDataLayout = {}) {
     sevenZipPath: PORTABLE_SEVEN_ZIP_PATH,
     ffmpegPath: PORTABLE_FFMPEG_PATH,
     similarityIgnoreTermsPath: userDataLayout.similarityIgnoreTermsPath || path.join(userDataRoot, 'config', 'similarity-ignore-terms.txt'),
+    similarityStrength: 'standard',
+    similarityEnabled: true,
     archivePassword: ARCHIVE_PASSWORD,
     archiveNamingMode: 'timestamp_random',
     customArchiveName: '',
@@ -146,13 +148,15 @@ function makeDefaultConfig(workspaceRoot, userDataLayout = {}) {
 function validateSourceSelection(config, sourcePath = config.intakeDirectory) {
   if (!sourcePath) throw new Error('请选择需要备份的文件主目录、文件夹或视频。');
   const checks = [
-    ['archiveStagingDirectory', '暂存目录不能位于所选主目录内部。'],
-    ['archiveOutputDirectory', '打包后文件存放点不能位于所选主目录内部。'],
-    ['repositoryDirectory', '仓库位置不能位于所选主目录内部。']
+    ['archiveStagingDirectory', '暂存目录不能与所选源项目互相包含。'],
+    ['archiveOutputDirectory', '打包后文件存放点不能与所选源项目互相包含。'],
+    ['repositoryDirectory', '仓库位置不能与所选源项目互相包含。']
   ];
   for (const [key, message] of checks) {
     const target = String(config[key] || '').trim();
-    if (target && isPathInside(sourcePath, target)) throw new Error(message);
+    if (target && (isPathInside(sourcePath, target) || isPathInside(target, sourcePath))) {
+      throw new Error(message);
+    }
   }
   if (config.moveCompleted && config.processedSourceDirectory) {
     const processedDirectory = config.processedSourceDirectory;

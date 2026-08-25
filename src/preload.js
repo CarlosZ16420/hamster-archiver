@@ -11,9 +11,11 @@ contextBridge.exposeInMainWorld('archiveApp', {
   exportWarehouse: () => ipcRenderer.invoke('warehouse:export'),
   importWarehouse: () => ipcRenderer.invoke('warehouse:import'),
   checkForUpdates: (options = {}) => ipcRenderer.invoke('app:check-for-updates', options),
+  installUpdatePackage: () => ipcRenderer.invoke('app:update-from-package'),
   changeUserDataLocation: () => ipcRenderer.invoke('user-data:change-location'),
   openSimilarityIgnoreTerms: () => ipcRenderer.invoke('similarity:open-ignore-terms'),
   reloadSimilarityIgnoreTerms: () => ipcRenderer.invoke('similarity:reload-ignore-terms'),
+  rebuildAllSimilarity: () => ipcRenderer.invoke('similarity:rebuild-all'),
   openExternal: (url) => ipcRenderer.invoke('system:open-external', url),
   copyText: (value) => ipcRenderer.invoke('system:copy-text', value),
   chooseSingle: (kind) => ipcRenderer.invoke('dialog:choose-single', kind),
@@ -74,5 +76,8 @@ contextBridge.exposeInMainWorld('archiveApp', {
   },
   onUpdateProgress: (callback) => {
     ipcRenderer.on('update:progress', (_event, progress) => callback(progress));
+  },
+  onSimilarityRebuildProgress: (callback) => {
+    ipcRenderer.on('similarity:rebuild-progress', (_event, progress) => callback(progress));
   }
 });

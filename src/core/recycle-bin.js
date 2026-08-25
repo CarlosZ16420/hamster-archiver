@@ -37,7 +37,6 @@ if ($Action -ne 'restore') { Write-Output 'INVALID_ACTION'; exit 2 }
 if (Test-Path -LiteralPath $TargetPath) { Write-Output 'TARGET_EXISTS'; exit 4 }
 $verbs = @($match.Verbs())
 $restoreVerb = $verbs | Where-Object { ([string]$_.Name -replace '&', '') -match 'restore|还原|恢复' } | Select-Object -First 1
-if ($null -eq $restoreVerb -and $verbs.Count -gt 0) { $restoreVerb = $verbs[0] }
 if ($null -eq $restoreVerb) { Write-Output 'RESTORE_VERB_MISSING'; exit 7 }
 $restoreVerb.DoIt()
 for ($index = 0; $index -lt 150; $index += 1) {
