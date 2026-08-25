@@ -45,6 +45,10 @@ test('Windows process control stops waiting after its timeout', async () => {
 
 test('Windows native pause suspends and resumes a real child process', {
   skip: process.platform !== 'win32'
+    ? 'Windows-only native integration test.'
+    : process.env.CI === 'true'
+      ? 'Hosted Windows runners do not provide deterministic native process suspension.'
+      : false
 }, async (t) => {
   const child = spawn(process.execPath, ['-e', 'setInterval(() => console.log(Date.now()), 20)'], {
     windowsHide: true,
