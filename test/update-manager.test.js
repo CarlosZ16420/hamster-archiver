@@ -19,6 +19,7 @@ const {
   manualUpdateInstructions,
   normalizeDigest,
   normalizeVersion,
+  readUpdateSuccessNotice,
   resolvePowerShellExecutable
 } = require('../src/core/update-manager');
 const { createFileIntegrityEntries } = require('../src/core/tool-integrity');
@@ -61,11 +62,17 @@ test('local update package accepts only a newer verified Windows x64 release', a
       version: '4.5.3',
       platform: 'win32-x64',
       integrity: { files: integrityFiles },
+      releaseNotes: {
+        'zh-CN': ['新增压缩包更新说明。'],
+        'en-US': ['Added ZIP update notes.']
+      },
       ...overrides
     })
   );
   await writeManifest();
-  assert.equal((await validateUpdatePackage(packageRoot, '4.5.2')).version, '4.5.3');
+  const validated = await validateUpdatePackage(packageRoot, '4.5.2');
+  assert.equal(validated.version, '4.5.3');
+  assert.deepEqual(validated.releaseNotes['zh-CN'], ['新增压缩包更新说明。']);
   await assert.rejects(() => validateUpdatePackage(packageRoot, '4.5.3'), /不高于当前版本/);
   await writeManifest({ platform: 'linux-x64' });
   await assert.rejects(() => validateUpdatePackage(packageRoot, '4.5.2'), /Windows x64/);
@@ -139,13 +146,23 @@ test('update launch waits for updater handshake before returning', async (t) => 
   child.pid = 1234;
   child.exitCode = null;
   let detached = false;
+  let launchOptions;
   child.unref = () => { detached = true; };
   child.kill = () => {};
   const launchPromise = launchUpdate({
-    prepared: { runRoot, applicationRoot: runRoot, packageRoot: runRoot, version: '4.1.2' },
+    prepared: {
+      runRoot,
+      applicationRoot: runRoot,
+      packageRoot: runRoot,
+      currentVersion: '4.1.1',
+      version: '4.1.2',
+      source: 'package',
+      releaseNotes: { 'zh-CN': ['修复更新。'], 'en-US': ['Fixed updates.'] }
+    },
     targetPid: 4567
   }, {
-    spawnImpl: () => {
+    spawnImpl: (_executable, _arguments, options) => {
+      launchOptions = options;
       queueMicrotask(() => child.emit('spawn'));
       return child;
     },
@@ -157,6 +174,47 @@ test('update launch waits for updater handshake before returning', async (t) => 
   const result = await launchPromise;
   assert.equal(result.updaterPid, 1234);
   assert.equal(detached, true);
+  assert.equal(launchOptions.env.HAMSTER_UPDATE_NOTICE_FILE, result.noticeFile);
+  const notice = JSON.parse(await fs.readFile(result.noticeFile, 'utf8'));
+  assert.equal(notice.fromVersion, '4.1.1');
+  assert.equal(notice.toVersion, '4.1.2');
+  assert.equal(notice.source, 'package');
+  assert.deepEqual(notice.releaseNotes['en-US'], ['Fixed updates.']);
+});
+
+test('new version reads an updater notice only from its trusted updates directory', async (t) => {
+  const userDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-update-success-'));
+  t.after(() => fs.rm(userDataRoot, { recursive: true, force: true }));
+  const runRoot = path.join(userDataRoot, 'updates', '4.5.13-test');
+  await fs.mkdir(runRoot, { recursive: true });
+  const noticeFile = path.join(runRoot, 'update-notice.json');
+  await fs.writeFile(noticeFile, JSON.stringify({
+    schemaVersion: 1,
+    fromVersion: '4.5.12',
+    toVersion: '4.5.13',
+    source: 'automatic',
+    releaseNotes: { 'zh-CN': ['显示本次更新。'], 'en-US': ['Show this update.'] }
+  }));
+  const notice = await readUpdateSuccessNotice({
+    userDataDirectory: userDataRoot,
+    noticeFile,
+    currentVersion: '4.5.13'
+  });
+  assert.equal(notice.fromVersion, '4.5.12');
+  assert.equal(notice.toVersion, '4.5.13');
+  assert.deepEqual(notice.releaseNotes['zh-CN'], ['显示本次更新。']);
+  assert.equal(await readUpdateSuccessNotice({
+    userDataDirectory: userDataRoot,
+    noticeFile,
+    currentVersion: '4.5.12'
+  }), null);
+  const outsideNotice = path.join(userDataRoot, 'outside.json');
+  await fs.writeFile(outsideNotice, '{}');
+  await assert.rejects(() => readUpdateSuccessNotice({
+    userDataDirectory: userDataRoot,
+    noticeFile: outsideNotice,
+    currentVersion: '4.5.13'
+  }), /不在受信任/);
 });
 
 test('update launch reports a PowerShell spawn failure and keeps diagnostics', async (t) => {

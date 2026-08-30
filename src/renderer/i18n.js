@@ -40,14 +40,27 @@ const exactSections = [
     ['经典', 'Classic'],
     ['白昼', 'Daylight'],
     ['黑夜', 'Night'],
-    ['青瓷', 'Celadon'],
-    ['暮紫', 'Twilight Plum'],
+    ['森林', 'Forest'],
+    ['暮光', 'Twilight'],
     ['选择界面主题', 'Choose interface theme']
   ]],
   ['通用按钮与短词', [
     ['关闭', 'Close'],
     ['取消', 'Cancel'],
+    ['确定', 'OK'],
     ['确认', 'Confirm'],
+    ['继续', 'Continue'],
+    ['操作确认 / CONFIRM', 'CONFIRM ACTION'],
+    ['请确认操作', 'Confirm this action'],
+    ['确认启用', 'Enable'],
+    ['确认入库', 'Confirm and archive'],
+    ['删除成品', 'Delete output'],
+    ['确认清空', 'Clear all'],
+    ['确认并继续', 'Confirm and continue'],
+    ['选择并导入', 'Choose and import'],
+    ['确认切换', 'Confirm switch'],
+    ['开始重算', 'Start recalculation'],
+    ['复原到原位置', 'Restore to original location'],
     ['确认删除', 'Confirm deletion'],
     ['修改', 'Edit'],
     ['复制', 'Copy'],
@@ -78,7 +91,12 @@ const exactSections = [
     ['01 / 归档位置', '01 / LOCATIONS'],
     ['先确认这次从哪里收、存到哪里', 'Choose what to collect and where to store it'],
     ['需要备份的文件主目录', 'Source directory to back up'],
+    ['需备份目录', 'Directory to back up'],
     ['最终压缩包存放点', 'Archive output directory'],
+    ['压缩后保存在', 'Save archives to'],
+    ['扫描时会把所选目录下的每一个文件夹或视频分别加入队列，并跳过其他根级文件', 'Scanning adds each folder or video directly under the selected directory to the queue and skips other root-level files'],
+    ['选填', 'Optional'],
+    ['必填', 'Required'],
     ['批量备份文件时，为主目录下的每一个文件夹或视频，单独压缩进行备份，跳过其他文件', 'When backing up in bulk, each folder or video directly under the source directory is archived separately; other files are skipped'],
     ['推荐勾选，便于识别哪些文件被备份了', 'Recommended so backed-up sources are easy to identify']
   ]],
@@ -100,9 +118,9 @@ const exactSections = [
     ['仅在压缩、验证、入库全部成功后移动；失败时保留源文件', 'Move only after compression, verification and cataloging succeed; failures keep the source'],
     ['归档后移动位置', 'Move-after-archiving location'],
     ['完成后移入 Windows 回收站', 'Move to the Windows Recycle Bin after completion'],
-    ['可从回收站恢复；仅在压缩、验证、入库和缩略图全部成功后执行，异常时安全停止', 'Recoverable from the Recycle Bin; runs only after compression, verification, cataloging and thumbnails all succeed, with a safety stop on anomalies'],
+    ['可从回收站恢复；异常时安全停止', 'Recoverable from the Recycle Bin; stops safely on anomalies'],
     ['记录备份位置', 'Record backup location'],
-    ['把云盘、移动硬盘或其他备份去向写入仓库词条', 'Write the cloud drive, removable disk or other backup destination into a warehouse entry'],
+    ['云盘、移动硬盘或其他备份去向', 'Cloud drive, removable disk or other backup destination'],
     ['填写云盘、移动硬盘或其他备份去向', 'Enter a cloud drive, removable disk or other backup destination'],
     ['不记录备份位置', 'Do not record backup location'],
     ['归档完成后，把对应文件夹或视频移入指定位置', 'Move each archived folder or video to the selected location'],
@@ -185,9 +203,12 @@ const exactSections = [
     ['用户数据区', 'User data area'],
     ['集中保存设置、仓库数据库、缩略图、暂存文件和当前用户的一份运行日志', 'Stores settings, the warehouse database, thumbnails, staging files and the current user log'],
     ['切换时保留旧目录', 'The old directory is retained when switching'],
+    ['切换时保留旧目录，确认后重启应用生效', 'The old directory is retained when switching; restart the app after confirmation to apply the change'],
+    ['切换', 'Switch'],
     ['压缩暂存目录', 'Archive staging directory'],
     ['默认在打包存放点同目录下新建一个 staging 文件夹，目录不存在时自动创建', 'A staging folder is created beside the output directory when needed'],
     ['默认在打包存放点同目录下新建 staging 文件夹，也可选择其他安全位置', 'Creates a staging folder beside the output directory by default; another safe location can be selected'],
+    ['默认在压缩包存储点同目录下新建 staging 文件夹', 'Creates a staging folder beside the archive output location by default'],
     ['数据与维护工具', 'Data & maintenance tools'],
     ['高级设置', 'Advanced settings'],
     ['保存设置', 'Save settings']
@@ -199,6 +220,7 @@ const exactSections = [
     ['添加单个文件夹', 'Add folder'],
     ['添加单个视频', 'Add video'],
     ['扫描主目录', 'Scan source directory'],
+    ['扫描目录', 'Scan directory'],
     ['开始压缩入库', 'Start archiving'],
     ['不压缩直接入库', 'Add without compression'],
     ['拖拽或粘贴文件夹、视频，快速加入队列', 'Drop or paste a folder or video to add it to the queue'],
@@ -209,16 +231,35 @@ const exactSections = [
     ['原始总量', 'Original size'],
     ['查看相似项目', 'View similar projects'],
     ['确认并按 10G 分卷', 'Confirm and split at 10 GiB'],
-    ['确认重复风险', 'Confirm duplicate risk'],
     ['确认重复并继续', 'Confirm duplicate and continue'],
     ['核验后确认入库', 'Verify and add to warehouse'],
     ['删除异常成品', 'Delete abnormal output'],
     ['确认安全警告', 'Acknowledge safety warning'],
-    ['未选择任务（按住 Ctrl 可多选）', 'No tasks selected (hold Ctrl to multi-select)'],
     ['多选可进行批量操作', 'Select multiple items for batch actions'],
     ['选中内容后出现批量操作', 'Batch actions appear after selecting items'],
     ['未选择任务', 'No tasks selected'],
     ['移除所选', 'Remove selected'],
+    ['设置', 'Settings'],
+    ['相似报告', 'Similarity report'],
+    ['开启后，检测到相似项目时会给出详细报告', 'When enabled, detected similarities include a detailed report'],
+    ['自动跳过', 'Auto-skip'],
+    ['自动跳过已经完整存在于仓库中的项目', 'Automatically skip projects that already exist in full in the warehouse'],
+    ['卡顿规避', 'Performance safeguard'],
+    ['超大文件夹简化处理', 'Simplify very large folders'],
+    ['对于文件数量超过', 'For folders containing more than'],
+    ['的文件夹，', 'files,'],
+    ['选取 200 个代表文件记录 MD5、计算相似度', 'select 200 representative files for MD5 recording and similarity analysis'],
+    ['超大文件夹阈值', 'Very large folder threshold'],
+    ['MD5计算跳过极小文件', 'Skip tiny files during MD5 calculation'],
+    ['小于', 'Under'],
+    ['KB 的文件不记录 MD5', 'KB files are not recorded with MD5'],
+    ['极小文件阈值', 'Tiny file threshold'],
+    ['超大文件夹阈值必须是 1—100000 的整数。', 'The very large folder threshold must be an integer from 1 to 100000.'],
+    ['极小文件阈值必须是 1 KB—1 GB 之间的整数。', 'The tiny file threshold must be an integer from 1 KB to 1 GB.'],
+    ['跳过后', 'After skipping'],
+    ['在队列中删除对应项（日志中仍保留）', 'Remove the matching queue item (keep it in the log)'],
+    ['在队列中保留对应项', 'Keep the matching queue item'],
+    ['只有文件数量、相对文件名、文件大小和内容核验全部一致时，才会判定为精确重复项目。部分文件相同不会自动跳过。卡顿规避不会排除自动跳过与名称、路径诊断。', 'A project is an exact duplicate only when its file count, relative file names, file sizes and content verification all match. Partial matches are never auto-skipped. Performance safeguards do not exclude auto-skip or name and path diagnostics.'],
     ['重复项处理', 'Duplicate handling'],
     ['清除可能重复', 'Clear possible duplicates'],
     ['清除精确重复', 'Clear exact duplicates'],
@@ -235,6 +276,24 @@ const exactSections = [
     ['暂停当前任务', 'Pause current task'],
     ['继续当前任务', 'Resume current task'],
     ['还没有任务。选择一个实际主目录后开始扫描。', 'No tasks yet. Choose a real source directory and scan it.'],
+    ['还没有任务。点击“扫描目录”选择目录并开始扫描。', 'No tasks yet. Click “Scan directory” to choose a directory and start scanning.'],
+    ['队列检查 / SIMILARITY', 'QUEUE REVIEW / SIMILARITY'],
+    ['正在生成相似报告…', 'Generating similarity report…'],
+    ['相似报告生成失败，请检查项目位置后重试。', 'Could not generate the similarity report. Check the project location and try again.'],
+    ['位置', 'Location'],
+    ['红色 · 名称或相似证据', 'Red · name or similarity evidence'],
+    ['金色 · 内容精确重复', 'Gold · exact content duplicate'],
+    ['金色 · 内容或名称完全一致', 'Gold · identical content or name'],
+    ['精确重复会在队列生成 MD5 后显示；当前报告只显示名称和大小证据。', 'Exact duplicates appear after the queue generates MD5 values; this report currently shows name and size evidence only.'],
+    ['其余文件的精确重复会在队列生成 MD5 后显示；当前已复用仓库中同一源项目未变化文件的已有 MD5。', 'Exact matches for the remaining files appear after the queue generates MD5 values; existing MD5 values were reused for unchanged files from the same warehouse source.'],
+    ['已复用仓库中同一源项目的已有 MD5；未重新读取文件内容。', 'Existing MD5 values were reused from the same warehouse source without rereading file contents.'],
+    ['当前项目目录', 'Current project directory'],
+    ['当前没有可跳转的仓库项目。', 'No linked warehouse project is available to open.'],
+    ['跳转到项目', 'Open project'],
+    ['项目存在相似证据', 'The project has similarity evidence'],
+    ['项目名称完全一致', 'Identical project name'],
+    ['完整项目精确重复', 'Exact duplicate of the entire project'],
+    ['完成', 'Done'],
     ['折叠任务列表', 'Collapse task list'],
     ['展开任务列表', 'Expand task list'],
     ['大小', 'Size'],
@@ -257,6 +316,8 @@ const exactSections = [
     ['归档完成/源文件处理失败', 'Archived / source handling failed'],
     ['失败', 'Failed'],
     ['已取消', 'Cancelled'],
+    ['已自动跳过', 'Auto-skipped'],
+    ['与仓库内项目完全一致，已自动跳过', 'Identical to a warehouse project; auto-skipped'],
     ['重复待确认', 'Duplicate awaiting confirmation'],
     ['大小异常待核验', 'Abnormal size awaiting review'],
     ['回收站安全警告', 'Recycle Bin safety warning']
@@ -373,6 +434,7 @@ const exactSections = [
     ['例如：旅行, 摄影', 'e.g. travel, photography'],
     ['例如：旅行, 摄影, 待复查', 'e.g. travel, photography, to review'],
     ['备份位置', 'Backup location'],
+    ['备份 ·', 'Backup ·'],
     ['备注', 'Notes'],
     ['记录来源、内容特点、后续处理计划等，支持直接粘贴图片', 'Record the source, content and next steps; images can be pasted directly'],
     ['说明这项库存是什么、在哪里，或之后准备如何处理…', 'Describe what this inventory item is, where it lives, or how you plan to process it…'],
@@ -384,6 +446,10 @@ const exactSections = [
     ['定位相似文件', 'Locate similar files'],
     ['重新计算', 'Recalculate'],
     ['一键加入白名单', 'Add to whitelist'],
+    ['相似度设置 / WHITELIST', 'SIMILARITY SETTINGS / WHITELIST'],
+    ['加入相似度白名单', 'Add to similarity whitelist'],
+    ['以下词汇在相似度计算中将被忽略', 'The following term will be ignored in similarity calculations'],
+    ['白名单词汇', 'Whitelist term'],
     ['点击标记常用词', 'Click to mark as a common term'],
     ['当前没有已关联的相似项目。', 'No similar projects are linked.'],
     ['压缩包名称已复制', 'Archive name copied'],
@@ -439,10 +505,21 @@ const exactSections = [
     ['添加到仓库', 'Add to warehouse'],
     ['批量整理', 'Bulk organization'],
     ['追加标签', 'Add tags'],
+    ['标签自动补全', 'Tag autocomplete'],
+    ['按 Tab 补全', 'Press Tab to complete'],
     ['修改备份位置', 'Change backup location'],
     ['用逗号分隔。标签须以文字或数字开头，可使用文字、数字、空格、短横线、下划线和间隔号；单个最多 30 字。', 'Separate tags with commas. Tags must start with a letter or number and may contain letters, numbers, spaces, hyphens, underscores and middle dots; each tag may contain up to 30 characters.']
   ]],
   ['风险确认与删除对话框', [
+    ['启用回收站自动处理', 'Enable automatic Recycle Bin handling'],
+    ['确认体积异常', 'Confirm size anomaly'],
+    ['清空任务列表', 'Clear task list'],
+    ['批量确认重复风险', 'Confirm duplicate risks in bulk'],
+    ['开启相似度计算', 'Enable similarity detection'],
+    ['关闭相似度计算', 'Disable similarity detection'],
+    ['全局重算相似关系', 'Recalculate all similarity relations'],
+    ['删除项目图片', 'Delete project image'],
+    ['复原原文件', 'Restore original file'],
     ['未压缩入库 / CAUTION', 'UNCOMPRESSED INTAKE / CAUTION'],
     ['确认不压缩直接入库', 'Confirm uncompressed intake'],
     ['本次入库将不会执行压缩，可能导致用户备份时出现遗漏，请确认风险。', 'This intake will not create an archive and may be missed during backup. Please acknowledge the risk.'],
@@ -475,9 +552,18 @@ const exactSections = [
   ['安全熔断对话框', [
     ['安全熔断 / SAFETY HALT', 'SAFETY HALT'],
     ['队列已立即停止', 'Queue stopped immediately'],
+    ['已保护其余原文件', 'Remaining source files are protected'],
+    ['队列已立即停止，后续任务没有启动。', 'The queue stopped immediately and later tasks did not start.'],
+    ['触发原因', 'What triggered the halt'],
+    ['现在请检查', 'Check these now'],
+    ['确认原文件是否仍在原位置', 'Confirm whether the source is still in its original location'],
+    ['检查 Windows 回收站是否保留了对应项目', 'Check whether the Windows Recycle Bin retained the item'],
+    ['核对无误后，再手动重新开始队列', 'Restart the queue manually only after verifying the files'],
     ['自动移入回收站已经关闭', 'Automatic Recycle Bin moves are disabled'],
     ['后续任务尚未启动。请先检查 Windows 回收站和原文件位置，再决定是否重新开始队列。', 'Later tasks have not started. Check the Windows Recycle Bin and source location before restarting the queue.'],
     ['我已了解，保持队列停止', 'I understand; keep the queue stopped'],
+    ['确认本提示不会自动恢复队列，也不会重新启用删除操作。', 'Acknowledging this message will not resume the queue or re-enable deletion.'],
+    ['知道了，保持安全停止', 'Got it; keep the safety stop'],
     ['安全警告已确认；队列保持停止，自动移入回收站已关闭', 'Safety warning acknowledged; queue remains stopped and automatic Recycle Bin moves are disabled']
   ]],
   ['渲染层·提示与确认', [
@@ -591,7 +677,8 @@ const exactSections = [
     ['当前原文件不在可复原状态。', 'The original file is not in a restorable state.'],
     ['未知条目', 'Unknown entry'],
     ['仓库记录不存在。', 'The warehouse record does not exist.'],
-    ['队列运行期间不能修改路径。', 'Paths cannot be changed while the queue is running.'],
+    ['队列运行期间不能修改设置。', 'Settings cannot be changed while the queue is running.'],
+    ['队列运行期间不能修改设置', 'Settings cannot be changed while the queue is running'],
     ['勾选“记录备份位置”后，请填写备份位置。', 'Fill in the backup location after enabling “Record backup location”.'],
     ['解压密码最多 128 个字符，且不能包含换行或控制字符。留空表示不设置密码。', 'The archive password is limited to 128 characters without line breaks or control characters. Leave it empty for no password.'],
     ['每个视频的缩略帧数必须是 1—20 的整数。', 'Frames per video must be an integer between 1 and 20.'],
@@ -602,6 +689,7 @@ const exactSections = [
     ['小文件过滤阈值必须在 1 MB—100 GB 之间。', 'The small-file filter threshold must be between 1 MB and 100 GB.'],
     ['定时运行需要填写不同的开始和结束时间。', 'Scheduled run needs different start and end times.'],
     ['请选择有效的压缩包命名方式。', 'Choose a valid archive naming mode.'],
+    ['请选择有效的自动跳过后处理方式。', 'Choose a valid action for an auto-skipped project.'],
     ['归档后移动与移入回收站不能同时启用。', 'Move-after-archiving and Recycle Bin cannot both be enabled.'],
     ['请先确认回收站安全警告，再决定是否重新启用自动移入回收站。', 'Acknowledge the Recycle Bin safety warning before re-enabling automatic Recycle Bin moves.'],
     ['请填写归档后移动位置。', 'Fill in the move-after-archiving location.'],
@@ -646,6 +734,7 @@ const exactSections = [
     ['对应的未压缩仓库项目已经不存在。', 'The corresponding uncompressed warehouse item no longer exists.'],
     ['队列运行期间不能重新扫描。', 'Cannot rescan while the queue is running.'],
     ['所选主目录不是文件夹。', 'The chosen source directory is not a folder.'],
+    ['所选目录不是文件夹。', 'The chosen directory is not a folder.'],
     ['单项归档当前只支持文件夹或视频文件。', 'Single-item archiving currently supports folders or video files only.'],
     ['运行中的任务不能直接移除，请先取消它。', 'A running task cannot be removed directly; cancel it first.'],
     ['大小异常的成品已经生成，请先确认入库，不能直接从任务列表移除。', 'Abnormal output was already created; confirm or discard it before removing the task.'],
@@ -674,8 +763,13 @@ const exactSections = [
     ['包含标题相似的视频', 'Contains videos with similar titles'],
     ['视频大小完全一致', 'Identical video size'],
     ['目录名相似', 'Similar folder name'],
+    ['目录名完全一致', 'Identical folder name'],
     ['文件内容完全一致', 'Identical file content'],
     ['文件名相似', 'Similar file name'],
+    ['没有找到指定队列项目。', 'The specified queue item was not found.'],
+    ['队列相似报告已关闭。', 'Queue similarity reports are disabled.'],
+    ['等待精确重复核验', 'Waiting for exact-duplicate verification'],
+    ['项目与仓库中的现有项目完全一致，已按设置自动跳过。', 'The project is identical to an existing warehouse project and was auto-skipped according to the settings.'],
     ['名称重复', 'Duplicate name'],
     ['名称可能重复', 'Name may be duplicated'],
     ['存在精确重复文件', 'Exact duplicate files exist'],
@@ -716,6 +810,7 @@ const exactSections = [
     ['自动更新目前仅支持 Windows 便携版。', 'Automatic updates currently support the Windows portable edition only.'],
     ['从压缩包更新目前仅支持 Windows 便携版。', 'Updating from a ZIP currently supports the Windows portable edition only.'],
     ['只有打包后的 Windows 便携版可以从压缩包更新。', 'Only the packaged Windows portable edition can update from a ZIP.'],
+    ['安装版请运行新版安装程序进行升级；ZIP 更新只适用于便携版。', 'Upgrade the installed edition by running a newer installer; ZIP updates are available only in the portable edition.'],
     ['请选择 .zip 格式的新版本压缩包。', 'Choose a new-version package in .zip format.'],
     ['所选更新包已经不存在。', 'The selected update package no longer exists.'],
     ['所选更新包不是文件。', 'The selected update package is not a file.'],
@@ -734,13 +829,17 @@ const exactSections = [
     ['所选目录不是空目录，也没有找到可识别的 Hamster Archiver 用户数据。', 'The chosen directory is neither empty nor recognizable Hamster Archiver user data.'],
     ['用户数据布局无效。', 'The user data layout is invalid.'],
     ['请选择需要备份的文件主目录、文件夹或视频。', 'Choose a source directory, folder or video to back up.'],
+    ['请选择需要备份的目录、文件夹或视频。', 'Choose a directory, folder or video to back up.'],
     ['暂存目录不能与所选源项目互相包含。', 'The staging directory and selected source cannot contain one another.'],
     ['打包后文件存放点不能与所选源项目互相包含。', 'The output directory and selected source cannot contain one another.'],
+    ['压缩包存储点不能与所选源项目互相包含。', 'The archive output location and selected source cannot contain one another.'],
     ['仓库位置不能与所选源项目互相包含。', 'The warehouse location and selected source cannot contain one another.'],
     ['归档后移动位置不能与源项目互相包含。', 'The move-after-archiving location cannot contain, or be inside, the source item.'],
     ['主目录、暂存目录、打包后文件存放点和仓库位置不能为空。', 'The source directory, staging directory, output directory and warehouse location cannot be empty.'],
+    ['当前扫描目录、暂存目录、压缩包存储点和仓库位置不能为空。', 'The current scan directory, staging directory, archive output location and warehouse location cannot be empty.'],
     ['暂存目录与库目录不能互相包含。', 'The staging directory and the library directory cannot contain each other.'],
     ['仓库位置不能与暂存目录或打包后文件存放点互相包含。', 'The warehouse location cannot overlap the staging or output directory.'],
+    ['仓库位置不能与暂存目录或压缩包存储点互相包含。', 'The warehouse location cannot overlap the staging directory or archive output location.'],
     ['启用归档后移动时，必须填写移动位置。', 'A move destination is required when move-after-archiving is enabled.'],
     ['归档后移动位置不能与源项目、暂存目录、成品目录或仓库位置互相包含。', 'The move-after-archiving location cannot overlap the source, staging, output or warehouse directories.'],
     ['7-Zip 路径不是文件。', 'The 7-Zip path is not a file.'],
@@ -800,7 +899,6 @@ const patternSections = [
     [/^自定义「(.+)」$/, 'Custom “$1”']
   ]],
   ['队列与任务', [
-    [/^已选择 (\d+) 项（按住 Ctrl 可多选）$/, 'Selected $1 items (hold Ctrl to multi-select)'],
     [/^已选择 (\d+) 项$/, 'Selected $1 items'],
     [/^已选 (\d+) 项$/, 'Selected $1 items'],
     [/^(\d+) 个子目录 · 未压缩$/, '$1 subfolders · uncompressed'],
@@ -840,7 +938,12 @@ const patternSections = [
     [/^已暂停 · /, 'Paused · '],
     [/^低于过滤阈值 (.+) MB$/, 'Below the $1 MB filter threshold'],
     [/^手动图片 (\d+)$/, 'Manual image $1'],
-    [/^记录了 (\d+) 个根级跳过项（非视频、链接或无法读取的内容），当前不会自动移动。$/, 'Recorded $1 skipped root-level items (non-video, links or unreadable content); they are not moved automatically.']
+    [/^记录了 (\d+) 个根级跳过项（非视频、链接或无法读取的内容），当前不会自动移动。$/, 'Recorded $1 skipped root-level items (non-video, links or unreadable content); they are not moved automatically.'],
+    [/^卡顿规避：(\d+) 个文件中选取 (\d+) 个代表文件记录 MD5、计算文件相似度。$/, 'Performance safeguard: selected $2 representative files from $1 files for MD5 recording and file similarity analysis.'],
+    [/^卡顿规避：已跳过 (\d+) 个小于 (\d+) KB 的极小文件，不计算 MD5。$/, 'Performance safeguard: skipped MD5 calculation for $1 tiny files under $2 KB.'],
+    [/^精确重复补充核验未完成，继续使用常规重复保护：(.+)$/, 'Additional exact-duplicate verification did not finish; continuing with normal duplicate protection: $1'],
+    [/^精确重复核验前源文件发生变化：(.+)$/, 'The source changed before exact-duplicate verification: $1'],
+    [/^精确重复核验期间源文件发生变化：(.+)$/, 'The source changed during exact-duplicate verification: $1']
   ]],
   ['进度与剩余时间', [
     [/^已完成 (\d+)\/(\d+) 项 · 预计还需 (\d+) 分钟$/, 'Completed $1/$2 items · estimated time remaining: $3 minutes'],
@@ -880,7 +983,8 @@ const patternSections = [
     [/^没有可加入的文件夹或视频（(.+)）$/, 'No folders or videos to add ($1)'],
     [/^仓库压缩包已导出：(.+)$/, 'Warehouse archive exported: $1'],
     [/^已切换仓库位置$/, 'Warehouse location switched'],
-    [/^(\d+) 个项目入库失败，原文件已移动；(\d+) 个已加入队列$/, '$1 items failed because the source moved; $2 were queued'],
+    [/^(\d+) 个项目未能加入队列：(.+)；(\d+) 个已加入队列$/, '$1 items could not be queued: $2; $3 were queued'],
+    [/^(\d+) 个项目未能加入队列；(\d+) 个已加入队列$/, '$1 items could not be queued; $2 were queued'],
     [/^已将 (\d+) 个库内未压缩项目送入队列$/, 'Queued $1 uncompressed warehouse items'],
     [/^所选内容中没有可加入队列的未压缩项目$/, 'No selected uncompressed items can be queued'],
     [/^从任务列表移除所选 (\d+) 项？已入库档案和源文件不会删除。$/, 'Remove the selected $1 tasks? Archived files and source files will not be deleted.'],
@@ -893,7 +997,8 @@ const patternSections = [
     [/^已批量确认 (\d+) 个重复或相似任务。$/, 'Confirmed $1 duplicate or similar tasks in bulk.'],
     [/^已选择不压缩直接入库，共 (\d+) 个任务；原文件将保留在原位置。$/, 'Uncompressed intake selected for $1 tasks; sources stay in place.'],
     [/^该项目只有 ([\d.]+) MB，低于当前 (\d+) MB 的入库阈值。$/, 'This item is only $1 MB, below the current $2 MB intake threshold.'],
-    [/^已添加单项任务：(.+)$/, 'Added single task: $1']
+    [/^已添加单项任务：(.+)$/, 'Added single task: $1'],
+    [/^未能复用已有清单进行即时精确重复核验，将在队列运行时重新计算 MD5：(.+)$/, 'Could not reuse the existing manifest for immediate exact-duplicate verification; MD5 will be recalculated when the queue runs: $1']
   ]],
   ['仓库操作与撤回', [
     [/^撤回：(.+)$/, 'Undo: $1'],
@@ -929,6 +1034,7 @@ const patternSections = [
   ]],
   ['扫描与文件校验', [
     [/^开始扫描主目录：(.+)$/, 'Started scanning the source directory: $1'],
+    [/^开始扫描目录：(.+)$/, 'Started scanning the directory: $1'],
     [/^扫描完成：新增 (\d+) 个任务，过滤 (\d+) 个小项目，记录 (\d+) 个根级跳过项。$/, 'Scan finished: $1 tasks added, $2 small items filtered, $3 root-level skips recorded.'],
     [/^扫描时跳过无法读取的内容：(.+)（(.+)）$/, 'Skipped unreadable content while scanning: $1 ($2)'],
     [/^已跳过无法读取的目录：(.+)（(.+)）$/, 'Skipped the unreadable folder: $1 ($2)'],
@@ -995,8 +1101,14 @@ const patternSections = [
     [/^(\d+) 个内容完全相同的文件，(\d+) 个相似项目或视频$/, '$1 identical files, $2 similar projects or videos'],
     [/^(\d+) 个内容完全相同的文件$/, '$1 identical files'],
     [/^(\d+) 个相似项目或视频$/, '$1 similar projects or videos'],
+    [/^(\d+) 个精确重复文件$/, '$1 exact duplicate files'],
+    [/^(\d+) 个同名目录$/, '$1 identical-name folders'],
+    [/^(\d+) 个相似文件$/, '$1 similar files'],
+    [/^(\d+) 个相似目录$/, '$1 similar folders'],
     [/^发现(.+)，需要确认后才能(.+)。$/, 'Found $1; confirmation is required before $2.'],
     [/^发现 (.+)，已延后等待确认$/, 'Found $1; deferred for confirmation'],
+    [/^自动跳过精确重复项目“(.+)”(：.+)?；源文件和仓库均未修改，队列项已删除。$/, 'Auto-skipped exact duplicate “$1”$2; source files and warehouse unchanged; the queue item was removed.'],
+    [/^自动跳过精确重复项目“(.+)”(：.+)?；源文件和仓库均未修改，队列项已保留。$/, 'Auto-skipped exact duplicate “$1”$2; source files and warehouse unchanged; the queue item was retained.'],
     [/^(.+)（压缩率 (.+%)），等待核验$/, '$1 (compression ratio $2); awaiting review'],
     [/^压缩体积异常：(.+)；完整性测试已通过，但必须人工确认后才会入库。$/, 'Abnormal archive size: $1. The integrity test passed, but manual confirmation is required before cataloging.'],
     [/^缩略图生成未完成：(.+)$/, 'Thumbnail generation did not finish: $1'],
@@ -1006,7 +1118,7 @@ const patternSections = [
     [/^撤回图片时恢复文件失败：(.+)$/, 'Restoring the image during undo failed: $1'],
     [/^原文件位置已存在同名内容，已停止复原：(.+)$/, 'Something with the same name already exists at the original location; restoration stopped: $1'],
     [/^移动位置已经存在同名项目：(.+)$/, 'An item with the same name already exists at the move destination: $1'],
-    [/^库内项目“(.+)”压缩入库失败，原文件已移动或发生变化：(.+)$/, 'Compressing warehouse item “$1” failed; the original moved or changed: $2'],
+    [/^库内项目“(.+)”未能加入压缩队列：(.+)$/, 'Warehouse item “$1” could not be added to the compression queue: $2'],
     [/^恢复暂停任务失败，已取消当前任务并停止队列：(.+)$/, 'Resuming the paused task failed; the task was cancelled and the queue stopped: $1'],
     [/^恢复任务失败，已安全取消当前任务并停止队列：(.+)$/, 'Resuming the task failed; the task was cancelled safely and the queue stopped: $1'],
     [/^回收站安全熔断：(.+) 自动移入回收站已关闭，后续任务没有启动。$/, 'Recycle Bin safety halt: $1 Automatic Recycle Bin moves were disabled and later tasks were not started.'],
@@ -1032,6 +1144,7 @@ const stageFragmentSections = [
     ['正在生成逐文件清单与 MD5', 'Generating file manifest and MD5'],
     ['正在生成未压缩入库清单与 MD5', 'Generating uncompressed inventory manifest and MD5'],
     ['正在生成 MD5：', 'Generating MD5: '],
+    ['正在核验精确重复：', 'Verifying exact duplicate: '],
     ['正在加密压缩', 'Encrypting and compressing'],
     ['正在压缩', 'Compressing'],
     ['并生成 ', ' and creating '],
@@ -1041,6 +1154,10 @@ const stageFragmentSections = [
     ['正在把已验证成品移入归档库', 'Moving verified archives into the library'],
     ['超过 10 GiB', 'Over 10 GiB'],
     ['名称可能重复', 'Name may be duplicated'],
+    ['等待精确重复核验', 'Waiting for exact-duplicate verification'],
+    ['已自动跳过', 'Auto-skipped'],
+    ['与仓库中 ', 'Identical to '],
+    [' 个项目完全一致', ' warehouse project(s)'],
     ['等待手动确认', 'Awaiting manual confirmation'],
     ['等待压缩', 'Queued for compression'],
     ['等待未压缩直接入库', 'Queued for uncompressed intake'],
@@ -1168,15 +1285,25 @@ function translateStage(value) {
   return result;
 }
 
+function isUserText(node) {
+  const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+  return Boolean(element?.closest?.('[data-i18n-user-text]'));
+}
+
 function translateDom(root = document) {
   if (translating || !root) return;
   translating = true;
   try {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     const nodes = [];
-    let current;
-    while ((current = walker.nextNode())) nodes.push(current);
+    if (root.nodeType === Node.TEXT_NODE) {
+      nodes.push(root);
+    } else {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      let current;
+      while ((current = walker.nextNode())) nodes.push(current);
+    }
     for (const node of nodes) {
+      if (isUserText(node)) continue;
       const value = originalText.has(node) ? originalText.get(node) : node.nodeValue;
       originalText.set(node, value);
       const trimmed = value.trim();
@@ -1187,7 +1314,11 @@ function translateDom(root = document) {
       if (trimmed) node.nodeValue = value.replace(trimmed, translated);
     }
     const selector = TRANSLATABLE_ATTRIBUTES.map((attribute) => `[${attribute}]`).join(',');
-    for (const element of root.querySelectorAll?.(selector) || []) {
+    const elements = [];
+    if (root.nodeType === Node.ELEMENT_NODE && root.matches?.(selector)) elements.push(root);
+    elements.push(...(root.querySelectorAll?.(selector) || []));
+    for (const element of elements) {
+      if (isUserText(element)) continue;
       for (const attribute of TRANSLATABLE_ATTRIBUTES) {
         if (!element.hasAttribute(attribute)) continue;
         let values = originalAttributes.get(element);

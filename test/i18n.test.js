@@ -55,6 +55,14 @@ if (!rendererDir) {
     assert.equal(i18n.translate('保存设置'), 'Save settings');
     assert.equal(i18n.translate('一键加入白名单'), 'Add to whitelist');
     assert.equal(
+      i18n.translate('以下词汇在相似度计算中将被忽略'),
+      'The following term will be ignored in similarity calculations'
+    );
+    assert.equal(
+      i18n.translate('与仓库内项目完全一致，已自动跳过'),
+      'Identical to a warehouse project; auto-skipped'
+    );
+    assert.equal(
       i18n.translate('“PRESTIGE”已加入相似度白名单；已有关系不会自动重算'),
       '“PRESTIGE” added to the similarity whitelist; existing relations were not recalculated'
     );
@@ -89,6 +97,10 @@ if (!rendererDir) {
       'Found 3 similar items · Awaiting manual confirmation'
     );
     assert.equal(
+      i18n.translateStage('2 个精确重复文件 · 1 个相似文件 · 项目名称完全一致'),
+      '2 exact duplicate files · 1 similar files · Identical project name'
+    );
+    assert.equal(
       i18n.translateStage('正在压缩 · 已完成 1/4 项 · 预计还需 3 小时 12 分钟'),
       'Compressing · Completed 1/4 items · estimated time remaining: 3 hours 12 minutes'
     );
@@ -96,6 +108,56 @@ if (!rendererDir) {
       i18n.translateStage('开始调用 7-Zip；本任务未设置密码。'),
       'Starting 7-Zip; this task has no password.'
     );
+  });
+
+  test('dynamic DOM translation includes the inserted root and preserves user data', () => {
+    i18n.setLocale('en-US');
+    const previousNode = global.Node;
+    const previousNodeFilter = global.NodeFilter;
+    const previousDocument = global.document;
+    global.Node = { ELEMENT_NODE: 1, TEXT_NODE: 3 };
+    global.NodeFilter = { SHOW_TEXT: 4 };
+    global.document = {
+      createTreeWalker: () => ({ nextNode: () => null })
+    };
+    try {
+      const insertedText = {
+        nodeType: Node.TEXT_NODE,
+        nodeValue: '保存设置',
+        parentElement: { closest: () => null }
+      };
+      i18n.translateDom(insertedText);
+      assert.equal(insertedText.nodeValue, 'Save settings');
+
+      const userText = {
+        nodeType: Node.TEXT_NODE,
+        nodeValue: '视频',
+        parentElement: { closest: (selector) => selector === '[data-i18n-user-text]' ? {} : null }
+      };
+      i18n.translateDom(userText);
+      assert.equal(userText.nodeValue, '视频', 'user titles and tags must never be translated');
+
+      const attributes = new Map([['aria-label', '标签自动补全']]);
+      const insertedElement = {
+        nodeType: Node.ELEMENT_NODE,
+        closest: () => null,
+        matches: () => true,
+        querySelectorAll: () => [],
+        hasAttribute: (name) => attributes.has(name),
+        getAttribute: (name) => attributes.get(name),
+        setAttribute: (name, value) => attributes.set(name, value)
+      };
+      i18n.translateDom(insertedElement);
+      assert.equal(attributes.get('aria-label'), 'Tag autocomplete');
+    } finally {
+      if (previousNode === undefined) delete global.Node;
+      else global.Node = previousNode;
+      if (previousNodeFilter === undefined) delete global.NodeFilter;
+      else global.NodeFilter = previousNodeFilter;
+      if (previousDocument === undefined) delete global.document;
+      else global.document = previousDocument;
+      i18n.setLocale('zh-CN');
+    }
   });
 
   test('runtime queue and archive logs have English coverage', () => {
@@ -110,6 +172,7 @@ if (!rendererDir) {
       '用户已核对压缩体积异常，并确认入库。',
       '用户删除了大小异常成品；源项目未移动、未删除。',
       '用户已确认回收站安全警告；队列仍保持停止，后续任务需手动重新开始。',
+      '卡顿规避：已跳过 17 个小于 128 KB 的极小文件，不计算 MD5。',
       '运行中的任务已安全取消。'
     ];
     for (const message of messages) {

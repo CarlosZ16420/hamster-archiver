@@ -10,7 +10,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 Local-first · Batch archiving · Media previews · Portable data
 
-![Version](https://img.shields.io/badge/version-4.5.9-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.5.13-d45f3c?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
@@ -109,11 +109,13 @@ Hamster Archiver takes folders and videos piled up in a download directory, then
 
 1. Download the Windows x64 ZIP from [Releases](../../releases).
 2. Extract the complete package and run `HamsterArchiver.exe`.
-3. Choose the source directory and archive-output directory, scan and review the tasks, then start archiving.
+3. Optionally set Directory to back up, or click Scan directory and choose it then. Set the required Save archives to location, review the tasks and start archiving.
 
 Keep the complete release directory. Do not copy only the EXE: Electron, 7-Zip and FFmpeg depend on the complete package. The user data area defaults to the adjacent `userdata` directory and can be safely copied or switched under More settings.
 
 ### Manual update when automatic update is unavailable
+
+Update details are shown before replacement and once more when the new version first starts. Background checks remain silent and never force an update.
 
 1. Download the latest Windows x64 ZIP from [Releases](../../releases) without extracting it.
 2. In the old app, select Check for updates, choose Manual update and select the new release ZIP.
@@ -147,7 +149,7 @@ The source repository does not commit the large `ffmpeg.exe`. `dependency-lock.j
 ## Portable data layout
 
 ```text
-HamsterArchiver-v4.5.9-win-x64/
+HamsterArchiver-v4.5.13-win-x64/
 ├─ HamsterArchiver.exe
 ├─ tools/
 │  ├─ 7zip/

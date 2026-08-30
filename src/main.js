@@ -19,6 +19,7 @@ const {
 const {
   makeUserDataLayout,
   resolveUserDataRoot,
+  resolveUserDataRootFromLocationFile,
   userDataLocationPath
 } = require('./core/storage-paths');
 const { prepareUserDataTarget } = require('./core/storage-migration');
@@ -31,14 +32,19 @@ const {
   launchUpdate,
   cleanupSuccessfulUpdateRuns,
   consumeUpdateFailure,
+  readUpdateSuccessNotice,
   manualUpdateInstructions
 } = require('./core/update-manager');
+const { formatReleaseNotes } = require('./core/release-notes');
 const { findTrashItems, isTrashItemPresent, restoreTrashItem } = require('./core/recycle-bin');
 const { readAndVerifyReleaseManifest } = require('./core/tool-integrity');
 const { resolveDevelopmentUserDataRoot } = require('./core/development-paths');
 
 const appIconPath = path.join(__dirname, '..', 'assets', 'app-icon.png');
 const releasesUrl = 'https://github.com/CarlosZ16420/hamster-archiver/releases';
+const packageMetadata = require('../package.json');
+const distributionMode = packageMetadata.distributionMode === 'installed' ? 'installed' : 'portable';
+const isInstalledDistribution = app.isPackaged && distributionMode === 'installed';
 
 let mainWindow;
 let queueManager;
@@ -59,13 +65,19 @@ if (isSmokeTest) {
   }
 }
 const projectRoot = path.resolve(__dirname, '..');
+const defaultElectronUserDataRoot = app.getPath('userData');
 const applicationRoot = isSmokeTest && process.env.HAMSTER_SMOKE_USER_DATA_DIR
   ? path.join(path.resolve(process.env.HAMSTER_SMOKE_USER_DATA_DIR), 'portable-root')
   : app.isPackaged ? path.dirname(app.getPath('exe')) : projectRoot;
+const activeUserDataLocationPath = isSmokeTest || !isInstalledDistribution
+  ? userDataLocationPath(applicationRoot)
+  : userDataLocationPath(defaultElectronUserDataRoot);
 const configuredUserDataRoot = isSmokeTest
   ? resolveUserDataRoot(applicationRoot)
   : app.isPackaged
-    ? resolveUserDataRoot(applicationRoot)
+    ? (isInstalledDistribution
+        ? resolveUserDataRootFromLocationFile(activeUserDataLocationPath, defaultElectronUserDataRoot)
+        : resolveUserDataRoot(applicationRoot))
     : resolveDevelopmentUserDataRoot(projectRoot);
 const electronRuntimeDirectory = isSmokeTest && process.env.HAMSTER_SMOKE_USER_DATA_DIR
   ? path.resolve(process.env.HAMSTER_SMOKE_USER_DATA_DIR)
@@ -248,6 +260,31 @@ async function showUpdateFailureDialog({ error, releaseUrl = releasesUrl, runRoo
   }
 }
 
+function appendReleaseNotes(detail, releaseNotes, english) {
+  return `${detail}\n\n${formatReleaseNotes(releaseNotes, english ? 'en-US' : 'zh-CN')}`;
+}
+
+async function showUpdateSuccessDialog(notice) {
+  const english = queueManager?.config?.language === 'en-US';
+  const versionDetail = notice.fromVersion
+    ? (english
+        ? `Previous version: ${notice.fromVersion}\nCurrent version: ${notice.toVersion}`
+        : `原版本：${notice.fromVersion}\n当前版本：${notice.toVersion}`)
+    : (english ? `Current version: ${notice.toVersion}` : `当前版本：${notice.toVersion}`);
+  await dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    title: english ? 'Update complete' : '更新完成',
+    message: english
+      ? `Hamster Archiver ${notice.toVersion} is ready.`
+      : `Hamster Archiver 已更新至 ${notice.toVersion}。`,
+    detail: appendReleaseNotes(versionDetail, notice.releaseNotes, english),
+    buttons: [english ? 'Continue' : '开始使用'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+}
+
 
 async function promptAndLaunchPreparedUpdate({
   prepared,
@@ -261,9 +298,9 @@ async function promptAndLaunchPreparedUpdate({
     message: english
       ? `Hamster Archiver ${version} has been verified.`
       : `Hamster Archiver ${version} 已校验完成。`,
-    detail: english
+    detail: appendReleaseNotes(english
       ? 'Restart now to replace the program files and launch the new version. userdata, the warehouse, and archive packages will not be overwritten.'
-      : '点击“立即重启”后，程序会退出、替换程序文件并自动启动新版本。userdata、仓库和压缩包不会被覆盖。',
+      : '点击“立即重启”后，程序会退出、替换程序文件并自动启动新版本。userdata、仓库和压缩包不会被覆盖。', prepared.releaseNotes, english),
     buttons: [english ? 'Restart now' : '立即重启', english ? 'Later' : '稍后'],
     defaultId: 0,
     cancelId: 1,
@@ -284,6 +321,11 @@ async function promptAndLaunchPreparedUpdate({
 
 async function runLocalPackageUpdate() {
   const english = queueManager?.config?.language === 'en-US';
+  if (isInstalledDistribution) {
+    throw new Error(english
+      ? 'The installed edition is updated by running a newer installer. ZIP updates are only available in the portable edition.'
+      : '安装版请运行新版安装程序进行升级；ZIP 更新只适用于便携版。');
+  }
   if (!app.isPackaged || isSmokeTest) {
     throw new Error(english
       ? 'Only the packaged Windows portable app can update from a ZIP file.'
@@ -325,6 +367,140 @@ function assertTrustedSender(event) {
   }
 }
 
+async function inspectSmokeVisualColorStates(browserWindow) {
+  const fixtureId = 'hamster-smoke-visual-fixture';
+  const themes = ['classic', 'day', 'night', 'forest', 'twilight'];
+  const fixtureState = await browserWindow.webContents.executeJavaScript(`(() => {
+    document.querySelector('#${fixtureId}')?.remove();
+    const fixture = document.createElement('div');
+    fixture.id = '${fixtureId}';
+    fixture.style.cssText = 'position:fixed;z-index:2147483647;left:8px;top:8px;width:1100px;height:220px;overflow:hidden;opacity:.001;pointer-events:auto;';
+    const makeCatalogRow = (id, className) => {
+      const row = document.createElement('article');
+      row.id = id;
+      row.className = className;
+      row.style.position = 'relative';
+      return row;
+    };
+    const activeRow = makeCatalogRow('smoke-active-row', 'catalog-text-row active');
+    const selectedRow = makeCatalogRow('smoke-selected-row', 'catalog-text-row selected');
+    const hoverRow = makeCatalogRow('smoke-hover-row', 'catalog-text-row');
+    const ordinaryDirectory = document.createElement('div');
+    ordinaryDirectory.id = 'smoke-directory-row';
+    ordinaryDirectory.className = 'virtual-tree-row directory collapsible';
+    ordinaryDirectory.style.cssText = 'position:relative;left:auto;right:auto;top:auto;width:100%;';
+    const directoryIcon = document.createElement('span');
+    directoryIcon.id = 'smoke-directory-icon';
+    directoryIcon.className = 'virtual-tree-icon toggle';
+    directoryIcon.textContent = '▾';
+    const directoryName = document.createElement('strong');
+    directoryName.className = 'virtual-tree-name';
+    directoryName.textContent = 'ordinary-directory';
+    ordinaryDirectory.append(directoryIcon, directoryName);
+    const probe = document.createElement('div');
+    probe.id = 'smoke-color-probe';
+    fixture.append(activeRow, selectedRow, hoverRow, ordinaryDirectory, probe);
+    document.body.append(fixture);
+    return {
+      originalTheme: document.body.dataset.theme || 'day'
+    };
+  })()`);
+  const results = [];
+  const devTools = browserWindow.webContents.debugger;
+  const attachedHere = !devTools.isAttached();
+  let hoverNodeId;
+  let directoryNodeId;
+  try {
+    if (attachedHere) devTools.attach('1.3');
+    await devTools.sendCommand('DOM.enable');
+    await devTools.sendCommand('CSS.enable');
+    const { root } = await devTools.sendCommand('DOM.getDocument');
+    ({ nodeId: hoverNodeId } = await devTools.sendCommand('DOM.querySelector', {
+      nodeId: root.nodeId,
+      selector: '#smoke-hover-row'
+    }));
+    ({ nodeId: directoryNodeId } = await devTools.sendCommand('DOM.querySelector', {
+      nodeId: root.nodeId,
+      selector: '#smoke-directory-row'
+    }));
+    if (!hoverNodeId || !directoryNodeId) throw new Error('烟雾测试无法定位颜色状态验收节点。');
+    for (const theme of themes) {
+      await browserWindow.webContents.executeJavaScript(`document.body.dataset.theme = ${JSON.stringify(theme)}`);
+      await devTools.sendCommand('CSS.forcePseudoState', { nodeId: directoryNodeId, forcedPseudoClasses: [] });
+      await devTools.sendCommand('CSS.forcePseudoState', { nodeId: hoverNodeId, forcedPseudoClasses: ['hover'] });
+      const state = await browserWindow.webContents.executeJavaScript(`(() => {
+        const probe = document.querySelector('#smoke-color-probe');
+        const resolveBackground = (name) => {
+          probe.style.backgroundColor = 'var(' + name + ')';
+          return getComputedStyle(probe).backgroundColor;
+        };
+        const resolveColor = (name) => {
+          probe.style.color = 'var(' + name + ')';
+          return getComputedStyle(probe).color;
+        };
+        const styleOf = (selector) => getComputedStyle(document.querySelector(selector));
+        return {
+          activeBackground: styleOf('#smoke-active-row').backgroundColor,
+          selectedBackground: styleOf('#smoke-selected-row').backgroundColor,
+          hoverBackground: styleOf('#smoke-hover-row').backgroundColor,
+          directoryBackground: styleOf('#smoke-directory-row').backgroundColor,
+          directoryColor: styleOf('#smoke-directory-row').color,
+          directoryIconColor: styleOf('#smoke-directory-icon').color,
+          directoryIconBackground: styleOf('#smoke-directory-icon').backgroundColor,
+          okBackground: resolveBackground('--ok-bg'),
+          panelBackground: resolveBackground('--panel'),
+          neutralHoverBackground: resolveBackground('--neutral-bg'),
+          accentHoverBackground: resolveBackground('--accent-soft'),
+          dangerBackground: resolveBackground('--danger-bg'),
+          directoryIconBackgroundExpected: resolveBackground('--panel-tint'),
+          inkColor: resolveColor('--ink'),
+          mutedColor: resolveColor('--muted'),
+          accentColor: resolveColor('--accent-dark'),
+          dangerColor: resolveColor('--danger-fg')
+        };
+      })()`);
+      await devTools.sendCommand('CSS.forcePseudoState', { nodeId: hoverNodeId, forcedPseudoClasses: [] });
+      await devTools.sendCommand('CSS.forcePseudoState', { nodeId: directoryNodeId, forcedPseudoClasses: ['hover'] });
+      state.directoryHoverBackground = await browserWindow.webContents.executeJavaScript(
+        `getComputedStyle(document.querySelector('#smoke-directory-row')).backgroundColor`
+      );
+      await devTools.sendCommand('CSS.forcePseudoState', { nodeId: directoryNodeId, forcedPseudoClasses: [] });
+      results.push({ theme, ...state });
+    }
+  } finally {
+    if (devTools.isAttached()) {
+      if (hoverNodeId) {
+        await devTools.sendCommand('CSS.forcePseudoState', { nodeId: hoverNodeId, forcedPseudoClasses: [] }).catch(() => {});
+      }
+      if (directoryNodeId) {
+        await devTools.sendCommand('CSS.forcePseudoState', { nodeId: directoryNodeId, forcedPseudoClasses: [] }).catch(() => {});
+      }
+      if (attachedHere) devTools.detach();
+    }
+    await browserWindow.webContents.executeJavaScript(`(() => {
+      document.body.dataset.theme = ${JSON.stringify(fixtureState.originalTheme)};
+      document.querySelector('#${fixtureId}')?.remove();
+    })()`);
+  }
+  return {
+    valid: results.every((result) => result.activeBackground === result.okBackground &&
+      result.selectedBackground === result.okBackground &&
+      result.hoverBackground === result.neutralHoverBackground &&
+      result.hoverBackground !== result.accentHoverBackground &&
+      result.hoverBackground !== result.dangerBackground &&
+      result.directoryBackground === result.panelBackground &&
+      result.directoryHoverBackground === result.neutralHoverBackground &&
+      result.directoryColor === result.inkColor &&
+      result.directoryColor !== result.accentColor &&
+      result.directoryColor !== result.dangerColor &&
+      result.directoryIconColor === result.mutedColor &&
+      result.directoryIconColor !== result.accentColor &&
+      result.directoryIconColor !== result.dangerColor &&
+      result.directoryIconBackground === result.directoryIconBackgroundExpected),
+    results
+  };
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     show: process.env.HAMSTER_SMOKE_TEST !== '1' || process.env.HAMSTER_SMOKE_SHOW === '1',
@@ -355,16 +531,17 @@ function createWindow() {
     if (closePromptOpen) return;
     closePromptOpen = true;
     const paused = Boolean(queueManager.paused);
+    const english = queueManager?.config?.language === 'en-US';
     const result = await dialog.showMessageBox(mainWindow, {
       type: 'warning',
-      title: '归档任务仍在运行',
+      title: english ? 'Archive tasks are still running' : '归档任务仍在运行',
       message: paused
-        ? '当前任务已暂停。现在退出会取消当前任务，源文件不会被修改。'
-        : '现在退出会停止整个归档队列。源文件不会被修改。',
+        ? (english ? 'The current task is paused. Exiting now will cancel it without modifying source files.' : '当前任务已暂停。现在退出会取消当前任务，源文件不会被修改。')
+        : (english ? 'Exiting now will stop the entire archive queue. Source files will not be modified.' : '现在退出会停止整个归档队列。源文件不会被修改。'),
       detail: paused
-        ? '当前任务下次打开后可从“已取消”状态重试；尚未开始的任务会保留在列表中。选择“继续运行”可返回应用。'
-        : '当前压缩会安全取消，尚未开始的任务会保留在列表中，下次打开可继续。若正在移动已验证成品，程序会先完成入库记录再退出。',
-      buttons: ['继续运行', '停止队列并退出'],
+        ? (english ? 'You can retry the cancelled task next time. Tasks that have not started remain in the list. Choose “Keep running” to return.' : '当前任务下次打开后可从“已取消”状态重试；尚未开始的任务会保留在列表中。选择“继续运行”可返回应用。')
+        : (english ? 'The current compression will be cancelled safely. Tasks that have not started remain in the list. If verified output is being moved, its catalog record is completed before exit.' : '当前压缩会安全取消，尚未开始的任务会保留在列表中，下次打开可继续。若正在移动已验证成品，程序会先完成入库记录再退出。'),
+      buttons: english ? ['Keep running', 'Stop queue and exit'] : ['继续运行', '停止队列并退出'],
       defaultId: 0,
       cancelId: 0,
       noLink: true
@@ -382,7 +559,7 @@ function createWindow() {
       const bridgeStatus = await mainWindow.webContents.executeJavaScript(`(() => {
         const required = [
           'getState', 'chooseDirectory', 'chooseProgram', 'changeWarehouseLocation', 'openWarehouse', 'exportWarehouse', 'importWarehouse', 'checkForUpdates', 'installUpdatePackage', 'changeUserDataLocation', 'openExternal', 'copyText', 'chooseSingle', 'saveConfig', 'scanSource',
-          'addSingle', 'openTaskSource', 'getDroppedPath', 'confirmTask', 'confirmAnomaly', 'acknowledgeTrashSafety', 'cancelTask', 'retryTask', 'startQueue', 'startInventoryOnlyQueue',
+          'addSingle', 'openTaskSource', 'getQueueSimilarityReport', 'getDroppedPath', 'confirmTask', 'confirmAnomaly', 'acknowledgeTrashSafety', 'cancelTask', 'retryTask', 'startQueue', 'startInventoryOnlyQueue',
           'discardAnomaly', 'pauseQueue', 'resumeQueue', 'removeJobs', 'clearCompletedJobs', 'clearCancelledJobs', 'clearQueue', 'clearPotentialDuplicates', 'clearExactDuplicates', 'confirmAllDuplicates', 'finishNextAndPause', 'searchCatalog',
           'getCatalogSuggestions', 'openSimilarityIgnoreTerms', 'reloadSimilarityIgnoreTerms', 'addSimilarityIgnoreTerm', 'rebuildAllSimilarity', 'onSimilarityRebuildProgress',
           'getWarehouseInsights', 'getRandomCatalogRecord',
@@ -428,9 +605,11 @@ function createWindow() {
           window.hamsterUiState?.sourceDispositionPresentation(false, false)
         ]
       })`);
+      uiStatus.visualColorStates = await inspectSmokeVisualColorStates(mainWindow);
       if (!ipcStatus.hasConfig || !ipcStatus.hasJobs || !ipcStatus.hasCatalog ||
           !ipcStatus.archiveVolumeEnabled || ipcStatus.archiveVolumeBytes !== LARGE_TASK_BYTES ||
           !uiStatus.hasVolumeControls || !uiStatus.hasNoVolumeExample || !uiStatus.compressionDigest.includes('10 GB') ||
+          !uiStatus.visualColorStates?.valid ||
           uiStatus.sourceSafetyState !== expectedSourceState ||
           uiStatus.sourceSafetyText !== expectedSourceLabels[expectedSourceState] ||
           JSON.stringify(uiStatus.sourceDispositionStates) !== JSON.stringify([
@@ -736,24 +915,26 @@ function registerIpc() {
 
   ipcMain.handle('dialog:choose-program', async (event, initialPath) => {
     assertTrustedSender(event);
+    const english = queueManager?.config?.language === 'en-US';
     const configuredPath = String(initialPath || '').trim();
     const resolvedPath = configuredPath ? resolveApplicationPath(applicationRoot, configuredPath) : '';
     const defaultPath = resolvedPath && path.extname(resolvedPath)
       ? resolvedPath
       : (resolvedPath || undefined);
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: '选择 7-Zip 程序',
+      title: english ? 'Choose the 7-Zip program' : '选择 7-Zip 程序',
       ...(defaultPath ? { defaultPath: path.resolve(defaultPath) } : {}),
       properties: ['openFile'],
-      filters: [{ name: '7-Zip 程序', extensions: ['exe'] }]
+      filters: [{ name: english ? '7-Zip program' : '7-Zip 程序', extensions: ['exe'] }]
     });
     return result.canceled ? null : result.filePaths[0];
   });
 
   ipcMain.handle('warehouse:change-location', async (event) => {
     assertTrustedSender(event);
+    const english = queueManager?.config?.language === 'en-US';
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: '选择仓库位置（saves）',
+      title: english ? 'Choose warehouse location (saves)' : '选择仓库位置（saves）',
       defaultPath: queueManager.config.repositoryDirectory,
       properties: ['openDirectory', 'createDirectory']
     });
@@ -771,15 +952,16 @@ function registerIpc() {
 
   ipcMain.handle('warehouse:export', async (event) => {
     assertTrustedSender(event);
+    const english = queueManager?.config?.language === 'en-US';
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const defaultPath = path.join(
       queueManager.config.repositoryDirectory,
       `hamster-warehouse-export-${stamp}.zip`
     );
     const result = await dialog.showSaveDialog(mainWindow, {
-      title: '导出仓库为压缩包',
+      title: english ? 'Export warehouse as an archive' : '导出仓库为压缩包',
       defaultPath,
-      filters: [{ name: '仓库压缩包', extensions: ['zip'] }]
+      filters: [{ name: english ? 'Warehouse archive' : '仓库压缩包', extensions: ['zip'] }]
     });
     if (result.canceled || !result.filePath) return null;
     return queueManager.exportWarehouseToFile(result.filePath);
@@ -787,11 +969,12 @@ function registerIpc() {
 
   ipcMain.handle('warehouse:import', async (event) => {
     assertTrustedSender(event);
+    const english = queueManager?.config?.language === 'en-US';
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: '选择外来仓库压缩包',
+      title: english ? 'Choose an external warehouse archive' : '选择外来仓库压缩包',
       defaultPath: queueManager.config.repositoryDirectory,
       properties: ['openFile'],
-      filters: [{ name: '仓库压缩包', extensions: ['zip'] }]
+      filters: [{ name: english ? 'Warehouse archive' : '仓库压缩包', extensions: ['zip'] }]
     });
     if (result.canceled) return null;
     return queueManager.importWarehouseFromArchiveOrDirectory(result.filePaths[0]);
@@ -809,6 +992,21 @@ function registerIpc() {
       });
     } catch (error) {
       if (options?.silent === true) throw error;
+      if (isInstalledDistribution) {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'warning',
+          title: english ? 'Check for updates' : '检查更新',
+          message: english ? 'The latest version could not be retrieved.' : '暂时无法获取最新版本。',
+          detail: english
+            ? `Current version: ${app.getVersion()}\nLatest version: unavailable\n\nThe installed edition is upgraded by running a newer installer.`
+            : `当前版本：${app.getVersion()}\n最新版本：暂时无法获取\n\n安装版需要运行新版安装程序升级。`,
+          buttons: [english ? 'Close' : '关闭'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true
+        });
+        return { currentVersion: app.getVersion(), latestVersion: null, updateAvailable: false, checkFailed: true };
+      }
       const response = await dialog.showMessageBox(mainWindow, {
         type: 'warning',
         title: english ? 'Check for updates' : '检查更新',
@@ -827,6 +1025,30 @@ function registerIpc() {
       return { currentVersion: app.getVersion(), latestVersion: null, updateAvailable: false, checkFailed: true };
     }
     if (options?.silent === true) return result;
+    if (isInstalledDistribution) {
+      const response = await dialog.showMessageBox(mainWindow, {
+        type: result.updateAvailable ? 'info' : 'none',
+        title: english ? 'Check for updates' : '检查更新',
+        message: result.updateAvailable
+          ? (english ? `Version ${result.latestVersion} is available.` : `可以更新到 ${result.latestVersion}。`)
+          : (english ? 'You are using the latest version.' : '当前已是最新版本。'),
+        detail: result.updateAvailable
+          ? appendReleaseNotes(english
+              ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion || 'no published release'}\n\nThe installed edition is upgraded by running a newer installer. Microsoft Store builds will be updated by the Store.`
+              : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion || '暂无正式发行版'}\n\n安装版需要运行新版安装程序升级；未来的 Microsoft Store 版本将由商店负责更新。`, result.releaseNotes, english)
+          : (english
+              ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion || 'no published release'}\n\nThe installed edition is upgraded by running a newer installer. Microsoft Store builds will be updated by the Store.`
+              : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion || '暂无正式发行版'}\n\n安装版需要运行新版安装程序升级；未来的 Microsoft Store 版本将由商店负责更新。`),
+        buttons: result.updateAvailable
+          ? (english ? ['Open release page', 'Later'] : ['打开发布页', '稍后'])
+          : [english ? 'Close' : '关闭'],
+        defaultId: 0,
+        cancelId: result.updateAvailable ? 1 : 0,
+        noLink: true
+      });
+      if (result.updateAvailable && response.response === 0) await shell.openExternal(result.releaseUrl);
+      return result;
+    }
     if (!result.updateAvailable) {
       const response = await dialog.showMessageBox(mainWindow, {
         type: 'info',
@@ -848,9 +1070,9 @@ function registerIpc() {
         type: 'info',
         title: english ? 'New version available' : '发现新版本',
         message: english ? `Version ${result.latestVersion} is available.` : `可以更新到 ${result.latestVersion}。`,
-        detail: english
+        detail: appendReleaseNotes(english
           ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion}\n\nNo recognized Windows portable package is attached to this release.`
-          : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion}\n\n当前 Release 没有可识别的 Windows 便携包。`,
+          : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion}\n\n当前 Release 没有可识别的 Windows 便携包。`, result.releaseNotes, english),
         buttons: english ? ['Manual update', 'Open release page', 'Later'] : ['手动更新', '打开发布页', '稍后'],
         defaultId: 0,
         cancelId: 2,
@@ -864,9 +1086,9 @@ function registerIpc() {
       type: 'info',
       title: english ? 'New version available' : '发现新版本',
       message: english ? `Version ${result.latestVersion} is available.` : `可以更新到 ${result.latestVersion}。`,
-      detail: english
+      detail: appendReleaseNotes(english
         ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion}\nPackage size: ${Math.max(1, Math.round((result.asset.size || 0) / (1024 * 1024)))} MB\n\nAutomatic update downloads, verifies and restarts the app. User data is not overwritten.`
-        : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion}\n更新包大小：${Math.max(1, Math.round((result.asset.size || 0) / (1024 * 1024)))} MB\n\n自动更新会下载、校验并重启；用户数据不会被覆盖。`,
+        : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion}\n更新包大小：${Math.max(1, Math.round((result.asset.size || 0) / (1024 * 1024)))} MB\n\n自动更新会下载、校验并重启；用户数据不会被覆盖。`, result.releaseNotes, english),
       buttons: english
         ? ['Automatic update', 'Manual update', 'Open release page', 'Later']
         : ['自动更新', '手动更新', '打开发布页', '稍后'],
@@ -962,7 +1184,8 @@ function registerIpc() {
     await appStore.checkpoint(queueManager.config.repositoryDirectory);
     appStore.closeAll();
     const prepared = await prepareUserDataTarget(currentRoot, targetRoot);
-    await writeJsonAtomic(userDataLocationPath(applicationRoot), {
+    await fs.mkdir(path.dirname(activeUserDataLocationPath), { recursive: true });
+    await writeJsonAtomic(activeUserDataLocationPath, {
       version: 1,
       userDataDirectory: prepared.target,
       savedAt: new Date().toISOString()
@@ -988,26 +1211,6 @@ function registerIpc() {
 
   ipcMain.handle('similarity:add-ignore-term', async (event, term) => {
     assertTrustedSender(event);
-    if (!queueManager.config.suppressSimilarityWhitelistHint) {
-      const isEnglish = queueManager.config.language === 'en-US';
-      const response = await dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: isEnglish ? 'Similarity whitelist' : '相似度白名单',
-        message: isEnglish
-          ? 'Whitelisted terms are excluded from similarity calculations. You can edit the whitelist manually in Similarity Settings.'
-          : '加入白名单的词语会在相似度计算中排除，您可以在相似度设置中手动编辑白名单',
-        buttons: isEnglish ? ['Add to whitelist', 'Cancel'] : ['加入白名单', '取消'],
-        defaultId: 0,
-        cancelId: 1,
-        checkboxLabel: isEnglish ? 'Do not remind me again' : '下次不再提醒',
-        noLink: true
-      });
-      if (response.response !== 0) return { cancelled: true };
-      if (response.checkboxChecked) {
-        queueManager.config.suppressSimilarityWhitelistHint = true;
-        await appStore.saveSettings(queueManager.config);
-      }
-    }
     return queueManager.addSimilarityIgnoreTerm(term);
   });
 
@@ -1034,11 +1237,12 @@ function registerIpc() {
 
   ipcMain.handle('dialog:choose-single', async (event, kind) => {
     assertTrustedSender(event);
+    const english = queueManager?.config?.language === 'en-US';
     const options = kind === 'video'
       ? {
           properties: ['openFile'],
           filters: [{
-            name: '视频文件',
+            name: english ? 'Video files' : '视频文件',
             extensions: ['3gp', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'mts', 'rm', 'rmvb', 'ts', 'vob', 'webm', 'wmv']
           }]
         }
@@ -1068,6 +1272,11 @@ function registerIpc() {
     if (!job?.sourcePath) throw new Error('这个任务没有可打开的原文件位置。');
     await openItemLocation(job.sourcePath, '任务位置');
     return true;
+  });
+
+  ipcMain.handle('task:similarity-report', async (event, jobId) => {
+    assertTrustedSender(event);
+    return queueManager.getQueueSimilarityReport(jobId);
   });
 
   ipcMain.handle('task:confirm', async (event, jobId) => {
@@ -1323,6 +1532,14 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     resolveProgramPath: (configuredPath) => resolveApplicationPath(workspaceRoot, configuredPath)
   });
   await queueManager.initialize();
+  const pendingUpdateSuccess = await readUpdateSuccessNotice({
+    userDataDirectory: userDataLayout.root,
+    noticeFile: process.env.HAMSTER_UPDATE_NOTICE_FILE,
+    currentVersion: app.getVersion()
+  }).catch((error) => {
+    console.warn(`UPDATE_SUCCESS_READ_WARNING ${error.message}`);
+    return null;
+  });
   const pendingUpdateFailure = await consumeUpdateFailure(userDataLayout.root).catch((error) => {
     console.warn(`UPDATE_FAILURE_READ_WARNING ${error.message}`);
     return null;
@@ -1507,6 +1724,12 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   }
   registerIpc();
   createWindow();
+  if (pendingUpdateSuccess && !isSmokeTest) {
+    setImmediate(() => {
+      void showUpdateSuccessDialog(pendingUpdateSuccess)
+        .catch((error) => console.error(`UPDATE_SUCCESS_DIALOG_WARNING ${error.message}`));
+    });
+  }
   if (pendingUpdateFailure && !isSmokeTest) {
     setImmediate(() => {
       void showUpdateFailureDialog({

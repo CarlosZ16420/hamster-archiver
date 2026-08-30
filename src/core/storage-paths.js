@@ -23,12 +23,27 @@ function resolveUserDataRoot(
   pathExists = fs.existsSync
 ) {
   const resolvedApplicationRoot = path.resolve(applicationRoot);
-  const defaultRoot = path.join(resolvedApplicationRoot, 'userdata');
+  return resolveUserDataRootFromLocationFile(
+    userDataLocationPath(resolvedApplicationRoot),
+    path.join(resolvedApplicationRoot, 'userdata'),
+    readFileSync,
+    pathExists
+  );
+}
+
+function resolveUserDataRootFromLocationFile(
+  locationFilePath,
+  defaultRoot,
+  readFileSync = fs.readFileSync,
+  pathExists = fs.existsSync
+) {
+  const resolvedLocationFilePath = path.resolve(locationFilePath);
+  const resolvedDefaultRoot = path.resolve(defaultRoot);
   let source;
   try {
-    source = readFileSync(userDataLocationPath(resolvedApplicationRoot), 'utf8');
+    source = readFileSync(resolvedLocationFilePath, 'utf8');
   } catch (error) {
-    if (error?.code === 'ENOENT') return defaultRoot;
+    if (error?.code === 'ENOENT') return resolvedDefaultRoot;
     throw error;
   }
 
@@ -51,7 +66,7 @@ function resolveUserDataRoot(
   }
   const resolved = path.isAbsolute(configured)
     ? path.resolve(configured)
-    : path.resolve(resolvedApplicationRoot, configured);
+    : path.resolve(path.dirname(resolvedLocationFilePath), configured);
   if (path.parse(resolved).root === resolved) {
     throw userDataLocationError(
       'USER_DATA_LOCATION_INVALID',
@@ -92,5 +107,6 @@ module.exports = {
   USER_DATA_LOCATION_FILENAME,
   makeUserDataLayout,
   resolveUserDataRoot,
+  resolveUserDataRootFromLocationFile,
   userDataLocationPath
 };

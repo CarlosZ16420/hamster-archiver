@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { migrateToUserData, prepareUserDataTarget } = require('../src/core/storage-migration');
-const { makeUserDataLayout } = require('../src/core/storage-paths');
+const { makeUserDataLayout, resolveUserDataRootFromLocationFile } = require('../src/core/storage-paths');
 
 test('portable storage migration moves legacy data under the application root and merges the user log once', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-storage-migration-'));
@@ -93,4 +93,18 @@ test('user data switching accepts recognized existing data and rejects unsafe ne
     prepareUserDataTarget(current, path.join(current, 'nested')),
     /不能互相包含/
   );
+});
+
+test('installed distribution resolves data from a pointer beside the default Windows user data root', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-installed-storage-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const defaultRoot = path.join(root, 'AppData', 'Roaming', 'Hamster Archiver');
+  const selectedRoot = path.join(root, 'Documents', 'Hamster data');
+  const pointer = path.join(defaultRoot, 'user-data-location.json');
+  await fs.mkdir(defaultRoot, { recursive: true });
+  await fs.mkdir(selectedRoot, { recursive: true });
+
+  assert.equal(resolveUserDataRootFromLocationFile(pointer, defaultRoot), defaultRoot);
+  await fs.writeFile(pointer, JSON.stringify({ userDataDirectory: selectedRoot }), 'utf8');
+  assert.equal(resolveUserDataRootFromLocationFile(pointer, defaultRoot), selectedRoot);
 });

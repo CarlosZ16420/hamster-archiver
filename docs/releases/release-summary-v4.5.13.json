@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "4.5.13",
+  "notes": {
+    "zh-CN": [
+      "更新前后均可查看本次发行内容，在线更新和手动 ZIP 共用安全校验、回滚与更新后提示。",
+      "卡顿规避的默认阈值调整为 500 个文件和 5 KB，抽样不会影响完整归档、精确重复判断或自动跳过。",
+      "相似报告与自动跳过改用清晰且独立的证据链，修复库内压缩、自身比较、同源 MD5 复用和重复确认问题。",
+      "仓库标签支持逗号分段自动补全；列表、目录、相似与精确重复使用明确的绿色、中性、红色和金色语义。",
+      "森林与暮光主题统一软件配色，高级压缩设置修正分隔线和勾选项对齐。",
+      "修复清空仓库搜索后结果不恢复，以及选择列表项或卡片时页面闪烁。",
+      "项目详情标题背景与周围一致，顶部 Logo 使用原生 32 像素图标以提升清晰度。"
+    ],
+    "en-US": [
+      "Release notes are available before and after updates, with online and manual ZIP updates sharing integrity checks, rollback, and post-update notices.",
+      "Stall-avoidance defaults are now 500 files and 5 KB, while sampling remains isolated from complete archiving, exact duplicate decisions, and auto-skip.",
+      "Similarity reports and auto-skip now use clear independent evidence, fixing warehouse compression, self-matching, same-source MD5 reuse, and duplicate confirmation.",
+      "Warehouse tags gain comma-aware autocomplete, while lists, directories, similarity, and exact duplicates use distinct green, neutral, red, and gold cues.",
+      "Forest and Twilight unify application colors, and advanced compression fixes its separator and checkbox alignment.",
+      "Clearing warehouse search now restores all results, and selecting list rows or cards no longer flickers the page.",
+      "The detail heading matches its surrounding panel and the top-left logo uses the native 32-pixel icon for sharper rendering."
+    ]
+  }
+}

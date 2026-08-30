@@ -6,6 +6,7 @@
   },
   "packages": {
     "electron": "43.4.0",
+    "electron-builder": "26.15.7",
     "resedit": "3.0.2"
   },
   "packageArtifacts": {

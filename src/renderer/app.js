@@ -8,6 +8,7 @@ if (!window.archiveApp) {
 // 界面翻译：中文为源语言，英文环境在运行时替换词条；用户数据永不翻译。
 const i18n = window.hamsterI18n;
 const uiState = window.hamsterUiState;
+const tagAutocomplete = window.hamsterTagAutocomplete;
 const t = (value) => i18n?.translate(value) ?? value;
 i18n?.setLocale(String(navigator.language || 'zh-CN').toLowerCase().startsWith('en') ? 'en-US' : 'zh-CN');
 
@@ -40,6 +41,13 @@ const elements = {
   videoFrameCount: document.querySelector('#video-frame-count'),
   smallItemFilter: document.querySelector('#small-item-filter'),
   minimumTaskMb: document.querySelector('#minimum-task-mb'),
+  similarityReportEnabled: document.querySelector('#similarity-report-enabled'),
+  largeFolderSimplification: document.querySelector('#large-folder-simplification'),
+  largeFolderFileThreshold: document.querySelector('#large-folder-file-threshold'),
+  skipTinyMd5Files: document.querySelector('#skip-tiny-md5-files'),
+  tinyFileMd5ThresholdKb: document.querySelector('#tiny-file-md5-threshold-kb'),
+  autoSkipExactDuplicates: document.querySelector('#auto-skip-exact-duplicates'),
+  autoSkipExactDuplicateAction: document.querySelector('#auto-skip-exact-duplicate-action'),
   scheduleEnabled: document.querySelector('#schedule-enabled'),
   scheduleStart: document.querySelector('#schedule-start'),
   scheduleEnd: document.querySelector('#schedule-end'),
@@ -62,7 +70,6 @@ const elements = {
   selectAllTasks: document.querySelector('#select-all-tasks'),
   selectionCount: document.querySelector('#selection-count'),
   removeSelected: document.querySelector('#remove-selected'),
-  queueSelectionHint: document.querySelector('#queue-selection-hint'),
   queueSelectionActions: document.querySelector('#queue-selection-actions'),
   looseSummary: document.querySelector('#loose-summary'),
   logList: document.querySelector('#log-list'),
@@ -127,6 +134,12 @@ const elements = {
   activityMonths: document.querySelector('#activity-months'),
   warehouseDiscovery: document.querySelector('#warehouse-discovery'),
   thumbnailLightbox: document.querySelector('#thumbnail-lightbox'),
+  queueSimilarityReportDialog: document.querySelector('#queue-similarity-report-dialog'),
+  queueSimilarityReportContent: document.querySelector('#queue-similarity-report-content'),
+  similarityWhitelistDialog: document.querySelector('#similarity-whitelist-dialog'),
+  similarityWhitelistForm: document.querySelector('#similarity-whitelist-form'),
+  similarityWhitelistInput: document.querySelector('#similarity-whitelist-input'),
+  confirmSimilarityWhitelist: document.querySelector('#confirm-similarity-whitelist'),
   lightboxImage: document.querySelector('#lightbox-image'),
   lightboxTitle: document.querySelector('#lightbox-title'),
   lightboxPath: document.querySelector('#lightbox-path'),
@@ -136,6 +149,12 @@ const elements = {
   trashSafetyDialog: document.querySelector('#trash-safety-dialog'),
   trashSafetyMessage: document.querySelector('#trash-safety-message'),
   acknowledgeTrashSafety: document.querySelector('#acknowledge-trash-safety'),
+  confirmDialog: document.querySelector('#confirm-dialog'),
+  confirmDialogForm: document.querySelector('#confirm-dialog-form'),
+  confirmDialogTitle: document.querySelector('#confirm-dialog-title'),
+  confirmDialogMessage: document.querySelector('#confirm-dialog-message'),
+  acceptConfirmDialog: document.querySelector('#accept-confirm-dialog'),
+  cancelConfirmDialog: document.querySelector('#cancel-confirm-dialog'),
   toast: document.querySelector('#toast')
 };
 
@@ -151,6 +170,7 @@ const statusLabels = {
   moving: '移入库目录',
   completed: '已完成',
   completed_cleanup_failed: '归档完成/源文件处理失败',
+  skipped_duplicate: '已自动跳过',
   failed: '失败',
   cancelled: '已取消'
 };
@@ -162,6 +182,7 @@ function statusLabel(status) {
 let currentState = null;
 let activeCatalogId = null;
 let catalogDetailRequest = 0;
+let similarityWhitelistContext = null;
 let currentCatalogResults = [];
 let currentCatalogPageRecords = [];
 let catalogViewMode = localStorage.getItem('hamster-catalog-view-v2') === 'list' ? 'list' : 'grid';
@@ -192,6 +213,9 @@ let similarityManageRecordId = null;
 let similarityWhitelistPopover = null;
 let similarityWhitelistAnchor = null;
 let similarityWhitelistWriteInFlight = false;
+let activeQueueSimilarityReportJobId = null;
+let suspendedQueueSimilarityReport = false;
+let queueSimilarityReportRequest = 0;
 const thumbnailCache = new Map();
 const thumbnailPending = new Map();
 const THUMBNAIL_CACHE_LIMIT = 300;
@@ -199,9 +223,11 @@ const selectedJobIds = new Set();
 const selectedCatalogIds = new Set();
 
 const themeMode = document.querySelector('#theme-mode');
-const THEME_VALUES = ['classic', 'day', 'night', 'celadon', 'plum'];
+const THEME_VALUES = ['classic', 'day', 'night', 'forest', 'twilight'];
+const THEME_ALIASES = Object.freeze({ celadon: 'forest', plum: 'twilight' });
 function applyTheme(theme) {
-  const nextTheme = THEME_VALUES.includes(theme) ? theme : 'day';
+  const migratedTheme = THEME_ALIASES[theme] || theme;
+  const nextTheme = THEME_VALUES.includes(migratedTheme) ? migratedTheme : 'day';
   document.body.dataset.theme = nextTheme;
   if (themeMode) themeMode.value = nextTheme;
   localStorage.setItem('hamster-theme', nextTheme);
@@ -331,8 +357,25 @@ function showToast(message, isError = false) {
   toastTimer = setTimeout(() => { elements.toast.hidden = true; }, 4500);
 }
 
-function confirmUser(message) {
-  return window.confirm(t(message));
+let settleConfirmDialog = null;
+function closeConfirmDialog(accepted) {
+  if (!settleConfirmDialog) return;
+  const settle = settleConfirmDialog;
+  settleConfirmDialog = null;
+  elements.confirmDialog.close();
+  settle(Boolean(accepted));
+}
+
+function confirmUser(message, options = {}) {
+  if (settleConfirmDialog) closeConfirmDialog(false);
+  elements.confirmDialog.dataset.tone = options.tone || 'warning';
+  elements.confirmDialogTitle.textContent = t(options.title || '请确认操作');
+  elements.confirmDialogMessage.textContent = t(message);
+  elements.acceptConfirmDialog.textContent = t(options.confirmLabel || '继续');
+  elements.acceptConfirmDialog.className = `button ${options.tone === 'danger' ? 'danger' : 'primary'}`;
+  elements.confirmDialog.showModal();
+  elements.acceptConfirmDialog.focus();
+  return new Promise((resolve) => { settleConfirmDialog = resolve; });
 }
 
 async function safely(action) {
@@ -386,6 +429,20 @@ function make(tag, className, text) {
     i18n?.translateDom(node);
   }
   return node;
+}
+
+function makeUserText(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  node.dataset.i18nUserText = 'true';
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function makeUserOption(label, value) {
+  const option = new Option(label, value);
+  option.dataset.i18nUserText = 'true';
+  return option;
 }
 
 function makeStage(tag, className, text) {
@@ -535,9 +592,11 @@ function renderDiscovery(title, description, records) {
     }
     const info = make('span', 'discovery-hero-info');
     info.append(
-      make('strong', '', catalogTitle(record)),
+      makeUserText('strong', '', catalogTitle(record)),
       make('span', '', `${starText(record.rating)} · 入库 ${formatCatalogDate(record.inventoryDate || record.completedAt)}`),
-      make('small', '', (record.tags || []).length > 0 ? record.tags.join(' · ') : '暂无标签')
+      (record.tags || []).length > 0
+        ? makeUserText('small', '', record.tags.join(' · '))
+        : make('small', '', '暂无标签')
     );
     button.append(info);
     list.append(button);
@@ -591,6 +650,13 @@ function readConfig() {
     thumbnailLimit: Number(elements.thumbnailLimit.value),
     smallItemFilter: elements.smallItemFilter.checked,
     minimumTaskBytes: Number(elements.minimumTaskMb.value) * (1024 ** 2),
+    similarityReportEnabled: elements.similarityReportEnabled.checked,
+    largeFolderSimplification: elements.largeFolderSimplification.checked,
+    largeFolderFileThreshold: Number(elements.largeFolderFileThreshold.value),
+    skipTinyMd5Files: elements.skipTinyMd5Files.checked,
+    tinyFileMd5ThresholdBytes: Math.round(Number(elements.tinyFileMd5ThresholdKb.value) * 1024),
+    autoSkipExactDuplicates: elements.autoSkipExactDuplicates.checked,
+    autoSkipExactDuplicateAction: document.querySelector('input[name="auto-skip-exact-duplicate-action"]:checked')?.value || 'keep',
     scheduleEnabled: elements.scheduleEnabled.checked,
     scheduleStart: elements.scheduleStart.value,
     scheduleEnd: elements.scheduleEnd.value,
@@ -641,9 +707,8 @@ function updateSettingsDigests() {
 
 function updateBackupLocationControl() {
   const enabled = elements.recordBackupLocation.checked;
-  elements.backupLocation.disabled = !enabled;
   elements.backupLocation.required = enabled;
-  elements.backupLocationField.classList.toggle('disabled', !enabled);
+  elements.backupLocationField.classList.toggle('inactive', !enabled);
   updateSettingsDigests();
 }
 
@@ -655,6 +720,58 @@ function updateIntakeOptionControls() {
   elements.scheduleStart.required = elements.scheduleEnabled.checked;
   elements.scheduleEnd.required = elements.scheduleEnabled.checked;
   updateSettingsDigests();
+}
+
+function knownCatalogTags() {
+  return [...new Set((currentState?.catalog || [])
+    .flatMap((record) => catalogTags(record))
+    .filter((tag) => tag && tag !== '未压缩'))]
+    .sort((left, right) => left.localeCompare(right, 'zh-CN'));
+}
+
+function tagAutocompleteOptions() {
+  return {
+    getTags: knownCatalogTags,
+    label: t('标签自动补全'),
+    acceptHint: t('按 Tab 补全')
+  };
+}
+
+tagAutocomplete?.bindTagAutocomplete(elements.bulkTagsInput, tagAutocompleteOptions());
+
+function updateAutoSkipControls() {
+  const enabled = elements.autoSkipExactDuplicates.checked;
+  for (const control of elements.autoSkipExactDuplicateAction.querySelectorAll('input[type="radio"]')) {
+    control.disabled = !enabled;
+  }
+  elements.autoSkipExactDuplicateAction.classList.toggle('disabled', !enabled);
+}
+
+function updatePerformanceAvoidanceControls() {
+  elements.largeFolderFileThreshold.disabled = !elements.largeFolderSimplification.checked;
+  elements.tinyFileMd5ThresholdKb.disabled = !elements.skipTinyMd5Files.checked;
+}
+
+function setConfigControlsLocked(locked) {
+  const selector = [
+    '.settings-col input',
+    '.settings-col select',
+    '.settings-col button[data-pick]',
+    '#save-settings',
+    '#select-user-data',
+    '#language-toggle',
+    '.queue-settings-popover input',
+    '.queue-settings-popover select'
+  ].join(',');
+  for (const control of document.querySelectorAll(selector)) control.disabled = locked;
+  if (locked) return;
+  updateBackupLocationControl();
+  updateIntakeOptionControls();
+  updateAutoSkipControls();
+  updatePerformanceAvoidanceControls();
+  updateCompletionControls();
+  updateNamingControls();
+  updateVolumeControls();
 }
 
 function updateCompletionControls(changed = '') {
@@ -738,6 +855,15 @@ function renderConfig(config) {
   elements.videoFrameCount.value = String(config.videoFrameCount || 3);
   elements.smallItemFilter.checked = config.smallItemFilter !== false;
   elements.minimumTaskMb.value = String(Math.round((config.minimumTaskBytes || (100 * 1024 ** 2)) / (1024 ** 2)));
+  elements.similarityReportEnabled.checked = config.similarityReportEnabled !== false;
+  elements.largeFolderSimplification.checked = config.largeFolderSimplification === true;
+  elements.largeFolderFileThreshold.value = String(config.largeFolderFileThreshold || 500);
+  elements.skipTinyMd5Files.checked = config.skipTinyMd5Files === true;
+  elements.tinyFileMd5ThresholdKb.value = String(Math.round((config.tinyFileMd5ThresholdBytes || (5 * 1024)) / 1024));
+  elements.autoSkipExactDuplicates.checked = Boolean(config.autoSkipExactDuplicates);
+  const autoSkipAction = config.autoSkipExactDuplicateAction === 'remove' ? 'remove' : 'keep';
+  const autoSkipActionRadio = document.querySelector(`input[name="auto-skip-exact-duplicate-action"][value="${autoSkipAction}"]`);
+  if (autoSkipActionRadio) autoSkipActionRadio.checked = true;
   elements.scheduleEnabled.checked = Boolean(config.scheduleEnabled);
   elements.scheduleStart.value = config.scheduleStart || '';
   elements.scheduleEnd.value = config.scheduleEnd || '';
@@ -749,6 +875,8 @@ function renderConfig(config) {
   elements.backupLocation.value = config.backupLocation || '';
   updateBackupLocationControl();
   updateIntakeOptionControls();
+  updateAutoSkipControls();
+  updatePerformanceAvoidanceControls();
   updateCompletionControls();
   updateNamingControls();
   updateVolumeControls();
@@ -776,10 +904,9 @@ function updateSelectionControls(jobs) {
     if (!validIds.has(id)) selectedJobIds.delete(id);
   }
   elements.selectionCount.textContent = t(selectedJobIds.size > 0
-    ? `已选择 ${selectedJobIds.size} 项（按住 Ctrl 可多选）`
-    : '未选择任务（按住 Ctrl 可多选）');
+    ? `已选择 ${selectedJobIds.size} 项`
+    : '未选择任务');
   elements.removeSelected.disabled = selectedJobIds.size === 0;
-  elements.queueSelectionHint.hidden = selectedJobIds.size > 0;
   elements.queueSelectionActions.hidden = selectedJobIds.size === 0;
   elements.selectAllTasks.checked = jobs.length > 0 && selectedJobIds.size === jobs.length;
   elements.selectAllTasks.indeterminate = selectedJobIds.size > 0 && selectedJobIds.size < jobs.length;
@@ -814,11 +941,11 @@ function renderJobs(jobs) {
     openName.type = 'button';
     openName.dataset.openJobSource = job.id;
     openName.setAttribute('aria-label', `打开任务位置 ${job.displayName}`);
-    nameLine.append(make('strong', '', job.displayName));
+    nameLine.append(makeUserText('strong', '', job.displayName));
     if (job.sourceCatalogRecordId) nameLine.append(make('span', 'queue-origin-badge', '库内项目压缩'));
     else if (job.processingMode === 'inventory_only') nameLine.append(make('span', 'queue-origin-badge uncompressed', '未压缩入库'));
     nameLine.append(copyName, openName);
-    nameCell.append(nameLine, make('small', '', job.sourcePath));
+    nameCell.append(nameLine, makeUserText('small', '', job.sourcePath));
     row.append(nameCell);
     row.append(make('td', '', String(job.fileCount)));
     row.append(make('td', '', formatBytes(job.totalBytes)));
@@ -836,28 +963,27 @@ function renderJobs(jobs) {
     row.append(progressCell);
 
     const actionCell = make('td', 'row-actions');
-    const catalogSimilar = [
+    const catalogIds = new Set((currentState?.catalog || []).map((record) => record.id));
+    const hasCatalogSimilarity = [
       ...(job.nameDuplicateMatches || []).map((match) => match.archiveId),
-      ...(job.similarMatches || []).map((match) => match.id)
-    ].find((id) => id && currentState?.catalog?.some((record) => record.id === id));
-    if (['awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status) && catalogSimilar) {
-      const jump = actionButton('查看相似项目', 'view-similar', job.id, 'ghost');
-      jump.dataset.similarRecord = catalogSimilar;
-      actionCell.append(jump);
+      ...(job.similarMatches || []).map((match) => match.id),
+      ...(job.exactProjectMatches || []).map((match) => match.id),
+      ...(job.exactDuplicateMatches || []).flatMap((match) =>
+        (match.previous || []).map((previous) => previous.archiveId))
+    ].some((id) => id && catalogIds.has(id));
+    if (!job.sourceCatalogRecordId && currentState?.config?.similarityReportEnabled !== false && hasCatalogSimilarity) {
+      actionCell.append(actionButton('相似报告', 'similarity-report', job.id, 'ghost'));
     }
-    if (job.status === 'awaiting_confirmation') {
+    if (job.status === 'awaiting_confirmation' && job.confirmationReasons?.includes('large_task')) {
       const requestedVolumeBytes = Number(job.archiveVolumeBytes);
       const configuredVolumeBytes = job.archiveVolumeEnabled === true &&
         Number.isInteger(requestedVolumeBytes) &&
         requestedVolumeBytes >= 64 * 1024 ** 2 && requestedVolumeBytes <= 10 * 1024 ** 3
         ? requestedVolumeBytes
         : 10 * 1024 ** 3;
-      const label = job.confirmationReasons?.includes('large_task')
-        ? `确认并按 ${formatBytes(configuredVolumeBytes)} 分卷`
-        : '确认重复风险';
-      actionCell.append(actionButton(label, 'confirm', job.id, 'confirm'));
+      actionCell.append(actionButton(`确认并按 ${formatBytes(configuredVolumeBytes)} 分卷`, 'confirm', job.id, 'confirm'));
     }
-    if (job.status === 'awaiting_duplicate_confirmation') {
+    if (uiState?.shouldShowDuplicateConfirmation(job)) {
       actionCell.append(actionButton('确认重复并继续', 'confirm', job.id, 'confirm'));
     }
     if (job.status === 'awaiting_anomaly_confirmation') {
@@ -1009,10 +1135,12 @@ function renderCatalog(catalog) {
       button.type = 'button';
       button.dataset.recordId = record.id;
       const titleCell = make('span', 'catalog-text-title');
-      titleCell.append(make('strong', '', catalogTitle(record)));
+      titleCell.append(makeUserText('strong', '', catalogTitle(record)));
       const tagsCell = make('span', 'catalog-text-tags');
       for (const tag of catalogTags(record).slice(0, 3)) {
-        tagsCell.append(make('span', tag === '未压缩' ? 'uncompressed-tag' : '', tag));
+        tagsCell.append(tag === '未压缩'
+          ? make('span', 'uncompressed-tag', tag)
+          : makeUserText('span', '', tag));
       }
       if (record.possibleDuplicate) tagsCell.append(make('span', 'duplicate-tag', '可能重复'));
       const type = record.recordType === 'manual' ? '手动' : record.sourceType === 'video' ? '视频' : '文件夹';
@@ -1024,6 +1152,7 @@ function renderCatalog(catalog) {
           : `${formatBytes(record.archiveTotalBytes)}${volumeCount > 1 ? ` · ${volumeCount} 卷` : ''}`;
       const backupCell = document.createElement('span');
       backupCell.className = 'catalog-text-backup';
+      backupCell.dataset.i18nUserText = 'true';
       backupCell.textContent = record.backupLocation || '—';
       if (record.backupLocation) backupCell.title = record.backupLocation;
       button.append(
@@ -1072,7 +1201,7 @@ function renderCatalog(catalog) {
 
     const info = make('div', 'catalog-card-info');
     info.append(
-      make('strong', '', catalogTitle(record)),
+      makeUserText('strong', '', catalogTitle(record)),
       make('span', 'catalog-stars', starText(record.rating)),
       make('small', '', record.recordType === 'manual'
         ? '手动库存条目'
@@ -1085,12 +1214,16 @@ function renderCatalog(catalog) {
     if (visibleTags.length > 0) {
       const tags = make('div', 'catalog-card-tags');
       for (const tag of visibleTags.slice(0, catalogViewMode === 'grid' ? 4 : 2)) {
-        tags.append(make('span', tag === '未压缩' ? 'uncompressed-tag' : '', tag));
+        tags.append(tag === '未压缩'
+          ? make('span', 'uncompressed-tag', tag)
+          : makeUserText('span', '', tag));
       }
       info.append(tags);
     }
     if (record.backupLocation) {
-      info.append(make('span', 'backup-location-chip', `备份 · ${record.backupLocation}`));
+      const backupChip = make('span', 'backup-location-chip');
+      backupChip.append(make('span', '', '备份 · '), makeUserText('span', '', record.backupLocation));
+      info.append(backupChip);
     }
     if (record.possibleDuplicate) {
       info.append(make('span', 'duplicate-chip', `可能重复${record.similarCount ? ` · ${record.similarCount} 个相似项` : ''}`));
@@ -1110,8 +1243,20 @@ function updateTagFilterOptions(catalog) {
     .sort((a, b) => a.localeCompare(b, 'zh-CN'));
   elements.catalogTagFilter.replaceChildren(new Option('全部标签', ''));
   elements.catalogTagFilter.append(new Option('可能重复', possibleDuplicateFilter));
-  for (const tag of tags) elements.catalogTagFilter.append(new Option(tag, tag));
+  for (const tag of tags) elements.catalogTagFilter.append(makeUserOption(tag, tag));
   elements.catalogTagFilter.value = selected === possibleDuplicateFilter || tags.includes(selected) ? selected : '';
+}
+
+function syncCatalogItemState() {
+  for (const item of elements.catalogList.querySelectorAll('[data-catalog-id]')) {
+    const recordId = item.dataset.catalogId;
+    const selected = selectedCatalogIds.has(recordId);
+    item.classList.toggle('active', activeCatalogId === recordId);
+    item.classList.toggle('selected', selected);
+    const checkbox = item.querySelector('input[data-select-catalog]');
+    if (checkbox) checkbox.checked = selected;
+  }
+  updateCatalogSelectionControls();
 }
 
 function updateBackupLocationFilterOptions(catalog) {
@@ -1119,7 +1264,7 @@ function updateBackupLocationFilterOptions(catalog) {
   const locations = [...new Set(catalog.map((record) => record.backupLocation).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b, 'zh-CN'));
   elements.catalogBackupFilter.replaceChildren(new Option('全部备份位置', ''));
-  for (const location of locations) elements.catalogBackupFilter.append(new Option(location, location));
+  for (const location of locations) elements.catalogBackupFilter.append(makeUserOption(location, location));
   elements.catalogBackupFilter.value = locations.includes(selected) ? selected : '';
 }
 
@@ -1158,10 +1303,13 @@ async function refreshCatalogSuggestions() {
   }
   elements.catalogSuggestions.replaceChildren();
   for (const suggestion of suggestions) {
-    const button = make('button', '', suggestion.title);
+    const button = make('button');
     button.type = 'button';
     button.dataset.suggestionTitle = suggestion.title;
-    button.append(make('small', '', suggestion.score >= 0.9 ? '高度匹配' : '相似标题'));
+    button.append(
+      makeUserText('span', '', suggestion.title),
+      make('small', '', suggestion.score >= 0.9 ? '高度匹配' : '相似标题')
+    );
     elements.catalogSuggestions.append(button);
   }
   elements.catalogSuggestions.hidden = false;
@@ -1340,7 +1488,7 @@ function renderPendingManualImages() {
       pendingManualImages.splice(index, 1);
       renderPendingManualImages();
     });
-    item.append(image, make('span', '', input.name), remove);
+    item.append(image, makeUserText('span', '', input.name), remove);
     elements.manualImagePreview.append(item);
   }
 }
@@ -1361,6 +1509,9 @@ async function openThumbnailLightbox(recordId, relativePath, title) {
   }
   lightboxContext = { recordId, relativePath, title };
   elements.lightboxImage.src = dataUrl;
+  if (title) elements.lightboxTitle.dataset.i18nUserText = 'true';
+  else elements.lightboxTitle.removeAttribute('data-i18n-user-text');
+  elements.lightboxPath.dataset.i18nUserText = 'true';
   elements.lightboxTitle.textContent = title || t('媒体预览');
   elements.lightboxPath.textContent = relativePath;
   const summary = (currentState?.catalog || []).find((record) => record.id === recordId);
@@ -1429,72 +1580,88 @@ function ensureSimilarityWhitelistAction() {
   const button = make('button', 'similarity-whitelist-action', '一键加入白名单');
   button.type = 'button';
   button.hidden = true;
-  button.addEventListener('click', async (event) => {
+  button.addEventListener('click', (event) => {
     event.stopPropagation();
     if (similarityWhitelistWriteInFlight) return;
     const term = button.dataset.term || '';
-    const recordId = activeCatalogId;
+    const recordId = elements.queueSimilarityReportDialog.open ? null : activeCatalogId;
+    const reportJobId = activeQueueSimilarityReportJobId;
     hideSimilarityWhitelistAction();
     if (!term) return;
-    similarityWhitelistWriteInFlight = true;
-    try {
-      const result = await safely(() => window.archiveApp.addSimilarityIgnoreTerm(term));
-      if (!result || result.cancelled) return;
-      if (recordId && activeCatalogId === recordId) await loadCatalogDetails(recordId);
-      showToast(result.added
-        ? `“${result.term}”已加入相似度白名单；已有关系不会自动重算`
-        : `“${result.term}”已在相似度白名单中`);
-    } finally {
-      similarityWhitelistWriteInFlight = false;
-    }
+    similarityWhitelistContext = { recordId, reportJobId };
+    elements.similarityWhitelistInput.value = term;
+    elements.similarityWhitelistDialog.showModal();
+    requestAnimationFrame(() => {
+      elements.similarityWhitelistInput.focus();
+      elements.similarityWhitelistInput.select();
+    });
   });
   document.body.append(button);
   similarityWhitelistPopover = button;
   return button;
 }
 
+function closeSimilarityWhitelistDialog() {
+  if (elements.similarityWhitelistDialog.open) elements.similarityWhitelistDialog.close();
+  similarityWhitelistContext = null;
+  elements.similarityWhitelistInput.value = '';
+}
+
 function showSimilarityWhitelistAction(mark) {
   const term = mark?.dataset.whitelistTerm || '';
   if (!term) return;
   const button = ensureSimilarityWhitelistAction();
+  const host = mark.closest('dialog[open]') || document.body;
+  if (button.parentElement !== host) host.append(button);
   similarityWhitelistAnchor = mark;
   button.dataset.term = term;
   button.hidden = false;
   positionSimilarityWhitelistAction(mark);
 }
 
-function appendHighlightedName(parent, text, ranges = [], { whitelistable = false } = {}) {
-  let cursor = 0;
-  for (const [start, end] of ranges) {
-    const safeStart = Math.max(cursor, Math.min(text.length, Number(start) || 0));
-    const safeEnd = Math.max(safeStart, Math.min(text.length, Number(end) || 0));
-    if (safeStart > cursor) parent.append(document.createTextNode(text.slice(cursor, safeStart)));
-    if (safeEnd > safeStart) {
-      const mark = document.createElement('mark');
-      mark.className = 'similar-name-mark';
-      mark.textContent = text.slice(safeStart, safeEnd);
-      if (whitelistable) {
-        mark.classList.add('whitelistable');
-        mark.dataset.whitelistTerm = mark.textContent;
-        mark.tabIndex = 0;
-        mark.setAttribute('role', 'button');
-        mark.title = t('点击标记常用词');
-        mark.addEventListener('click', (event) => {
-          event.stopPropagation();
-          showSimilarityWhitelistAction(mark);
-        });
-        mark.addEventListener('keydown', (event) => {
-          if (event.key !== 'Enter' && event.key !== ' ') return;
-          event.preventDefault();
-          event.stopPropagation();
-          showSimilarityWhitelistAction(mark);
-        });
-      }
-      parent.append(mark);
+function appendHighlightedName(parent, text, similarRanges = [], { whitelistable = false, exactRanges = [] } = {}) {
+  parent.dataset.i18nUserText = 'true';
+  const normalizeRanges = (ranges) => (ranges || []).map(([start, end]) => [
+    Math.max(0, Math.min(text.length, Number(start) || 0)),
+    Math.max(0, Math.min(text.length, Number(end) || 0))
+  ]).filter(([start, end]) => end > start);
+  const redRanges = normalizeRanges(similarRanges);
+  const goldRanges = normalizeRanges(exactRanges);
+  const boundaries = [...new Set([0, text.length, ...redRanges.flat(), ...goldRanges.flat()])]
+    .sort((left, right) => left - right);
+  const overlaps = (ranges, start, end) => ranges.some(([rangeStart, rangeEnd]) => rangeStart < end && rangeEnd > start);
+  for (let index = 0; index < boundaries.length - 1; index += 1) {
+    const start = boundaries[index];
+    const end = boundaries[index + 1];
+    if (end <= start) continue;
+    const exact = overlaps(goldRanges, start, end);
+    const similar = !exact && overlaps(redRanges, start, end);
+    if (!exact && !similar) {
+      parent.append(document.createTextNode(text.slice(start, end)));
+      continue;
     }
-    cursor = safeEnd;
+    const mark = document.createElement('mark');
+    mark.className = exact ? 'exact-duplicate-mark' : 'similar-name-mark';
+    mark.textContent = text.slice(start, end);
+    if (similar && whitelistable) {
+      mark.classList.add('whitelistable');
+      mark.dataset.whitelistTerm = mark.textContent;
+      mark.tabIndex = 0;
+      mark.setAttribute('role', 'button');
+      mark.title = t('点击标记常用词');
+      mark.addEventListener('click', (event) => {
+        event.stopPropagation();
+        showSimilarityWhitelistAction(mark);
+      });
+      mark.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        event.stopPropagation();
+        showSimilarityWhitelistAction(mark);
+      });
+    }
+    parent.append(mark);
   }
-  if (cursor < text.length) parent.append(document.createTextNode(text.slice(cursor)));
 }
 
 function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
@@ -1542,8 +1709,11 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
       const similarity = similarityMap.get(`${item.type}:${relativePath}`);
       const whitelistable = Boolean(similarity?.matches?.some((match) =>
         match.reason === '目录名相似' || match.reason === '文件名相似'));
+      const hasExactDuplicate = Boolean(similarity?.matches?.some((match) =>
+        match.reason === '文件内容完全一致' || match.reason === '目录名完全一致'));
       if (similarity) {
         row.classList.add('similar-entry');
+        row.classList.toggle('exact-entry', hasExactDuplicate);
         row.dataset.similarEntry = 'true';
         row.title = similarity.matches.map((match) => `${match.reason}：${match.title} / ${match.relativePath}`).join('\n');
       }
@@ -1559,11 +1729,17 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
           row.append(make('span', 'virtual-tree-icon', '·'));
         }
         const name = make('strong', '');
-        appendHighlightedName(name, item.name, similarity?.ranges || [], { whitelistable });
+        appendHighlightedName(name, item.name, similarity?.similarRanges || similarity?.ranges || [], {
+          whitelistable,
+          exactRanges: similarity?.exactRanges || []
+        });
         row.append(name, make('small', '', `${item.count} 项`));
       } else {
         const name = make('span', 'virtual-tree-name');
-        appendHighlightedName(name, item.file.name, similarity?.ranges || [], { whitelistable });
+        appendHighlightedName(name, item.file.name, similarity?.similarRanges || similarity?.ranges || [], {
+          whitelistable,
+          exactRanges: similarity?.exactRanges || []
+        });
         row.append(
           make('span', 'virtual-tree-icon file', (item.file.extension || 'FILE').replace('.', '').slice(0, 4).toUpperCase()),
           name,
@@ -1603,6 +1779,101 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
   return viewport;
 }
 
+function queueSimilarityEvidenceText(project) {
+  const details = [];
+  if (project.exactFileCount > 0) details.push(`${project.exactFileCount} 个精确重复文件`);
+  if (project.exactDirectoryCount > 0) details.push(`${project.exactDirectoryCount} 个同名目录`);
+  if (project.similarFileCount > 0) details.push(`${project.similarFileCount} 个相似文件`);
+  if (project.similarDirectoryCount > 0) details.push(`${project.similarDirectoryCount} 个相似目录`);
+  for (const reason of project.reasons || []) {
+    if (!['文件内容完全一致', '文件名相似', '目录名相似', '目录名完全一致'].includes(reason)) details.push(reason);
+  }
+  return [...new Set(details)].join(' · ') || '项目存在相似证据';
+}
+
+function renderQueueSimilarityReport(report) {
+  elements.queueSimilarityReportContent.replaceChildren();
+  const overview = make('section', 'queue-similarity-overview');
+  overview.append(makeUserText('h3', '', report.displayName));
+  const location = make('div', 'queue-similarity-location');
+  location.append(make('span', '', '位置'), makeUserText('code', '', report.sourcePath));
+  const open = make('button', 'button ghost', '打开');
+  open.type = 'button';
+  open.dataset.reportOpenSource = report.jobId;
+  location.append(open);
+  overview.append(location);
+
+  const legend = make('div', 'similarity-report-legend');
+  legend.append(
+    make('span', 'similarity-report-legend-item similar', '红色 · 名称或相似证据'),
+    make('span', 'similarity-report-legend-item exact', '金色 · 内容或名称完全一致')
+  );
+  overview.append(legend);
+  if (report.fingerprintPending) {
+    overview.append(make('p', 'similarity-report-pending muted', report.reusedFingerprintCount > 0
+      ? '其余文件的精确重复会在队列生成 MD5 后显示；当前已复用仓库中同一源项目未变化文件的已有 MD5。'
+      : '精确重复会在队列生成 MD5 后显示；当前报告只显示名称和大小证据。'));
+  } else if (report.reusedFingerprintCount > 0) {
+    overview.append(make('p', 'similarity-report-pending muted', '已复用仓库中同一源项目的已有 MD5；未重新读取文件内容。'));
+  }
+  elements.queueSimilarityReportContent.append(overview);
+
+  const directorySection = make('section', 'queue-similarity-directory');
+  directorySection.append(make('h3', '', '当前项目目录'));
+  const root = createTree(
+    report.directories || [],
+    report.manifest || [],
+    report.sourceType === 'directory' ? report.displayName : ''
+  );
+  directorySection.append(renderVirtualDirectoryTree(root, report.similarEntryMatches || []));
+  elements.queueSimilarityReportContent.append(directorySection);
+
+  const projects = make('section', 'queue-similarity-projects');
+  projects.append(make('h3', '', '相似项目'));
+  if ((report.similarProjects || []).length === 0) {
+    projects.append(make('p', 'muted', '当前没有可跳转的仓库项目。'));
+  } else {
+    const list = make('div', 'queue-similarity-project-list');
+    for (const project of report.similarProjects) {
+      const item = make('article', 'queue-similarity-project');
+      const copy = make('div', 'queue-similarity-project-copy');
+      copy.append(makeUserText('strong', '', project.title), makeStage('small', '', queueSimilarityEvidenceText(project)));
+      const jump = make('button', 'button ghost', '跳转到项目');
+      jump.type = 'button';
+      jump.dataset.reportCatalogRecord = project.id;
+      item.append(copy, jump);
+      list.append(item);
+    }
+    projects.append(list);
+  }
+  elements.queueSimilarityReportContent.append(projects);
+}
+
+async function loadQueueSimilarityReport(jobId, { keepOpen = false } = {}) {
+  const requestId = ++queueSimilarityReportRequest;
+  activeQueueSimilarityReportJobId = jobId;
+  elements.queueSimilarityReportContent.replaceChildren(make('p', 'muted', '正在生成相似报告…'));
+  if (!elements.queueSimilarityReportDialog.open) elements.queueSimilarityReportDialog.showModal();
+  const report = await safely(() => window.archiveApp.getQueueSimilarityReport(jobId));
+  if (requestId !== queueSimilarityReportRequest || activeQueueSimilarityReportJobId !== jobId) return;
+  if (!report) {
+    elements.queueSimilarityReportContent.replaceChildren(make('p', 'muted', '相似报告生成失败，请检查项目位置后重试。'));
+    return;
+  }
+  renderQueueSimilarityReport(report);
+  if (keepOpen && !elements.queueSimilarityReportDialog.open) elements.queueSimilarityReportDialog.showModal();
+}
+
+function closeQueueSimilarityReport({ preserve = false } = {}) {
+  hideSimilarityWhitelistAction();
+  if (elements.queueSimilarityReportDialog.open) elements.queueSimilarityReportDialog.close();
+  if (!preserve) {
+    activeQueueSimilarityReportJobId = null;
+    suspendedQueueSimilarityReport = false;
+    queueSimilarityReportRequest += 1;
+  }
+}
+
 function renderCatalogEditor(record) {
   const section = make('section', 'catalog-editor');
   section.append(make('h3', '', '整理信息'));
@@ -1617,13 +1888,14 @@ function renderCatalogEditor(record) {
   titleInput.value = catalogTitle(record);
   titleLabel.append(titleInput);
 
-  const tagsLabel = make('label', 'editor-field');
+  const tagsLabel = make('label', 'editor-field tag-autocomplete-field');
   tagsLabel.append(make('span', '', '标签'));
   const tagsInput = document.createElement('input');
   tagsInput.name = 'tags';
   tagsInput.value = catalogTags(record).join('，');
   tagsInput.placeholder = '例如：摄影，旅行，待整理（用逗号分隔）';
   tagsLabel.append(tagsInput);
+  tagAutocomplete?.bindTagAutocomplete(tagsInput, tagAutocompleteOptions());
 
   const backupLabel = make('label', 'editor-field');
   backupLabel.append(make('span', '', '备份位置'));
@@ -1854,7 +2126,11 @@ function renderSimilarProjects(record) {
     const links = make('div', 'similar-project-links');
     for (const similar of record.similarRecords) {
       const item = make('span', 'similar-project-item');
-      const button = make('button', 'button ghost', `${similar.title} · ${Math.round((similar.score || 0) * 100)}%`);
+      const button = make('button', 'button ghost');
+      button.append(
+        makeUserText('span', '', similar.title),
+        document.createTextNode(` · ${Math.round((similar.score || 0) * 100)}%`)
+      );
       button.type = 'button';
       button.dataset.similarRecord = similar.id;
       button.title = (similar.reasons || []).join('；');
@@ -1879,9 +2155,11 @@ function renderCatalogDetail(record) {
   hideSimilarityWhitelistAction();
   elements.catalogDetail.replaceChildren();
   const heading = make('div', 'archive-heading');
-  heading.append(make('h3', '', catalogTitle(record)));
+  heading.append(makeUserText('h3', '', catalogTitle(record)));
   if (record.title && record.title !== record.displayName) {
-    heading.append(make('p', 'original-title', `原始名称：${record.displayName}`));
+    const originalTitle = make('p', 'original-title');
+    originalTitle.append(make('span', '', '原始名称：'), makeUserText('span', '', record.displayName));
+    heading.append(originalTitle);
   }
   heading.append(make('p', 'inventory-date', `入库日期：${formatCatalogDate(record.inventoryDate || record.completedAt)}`));
   if (record.recordType === 'manual') {
@@ -1892,12 +2170,12 @@ function renderCatalogDetail(record) {
     const sourceLine = make('p', 'source-location');
     sourceLine.append(document.createTextNode('原文件位置：'));
     if (sourceLocation.isPath && isHttpUrl(sourceLocation.value)) {
-      const sourceLink = make('button', 'inline-link', sourceLocation.text);
+      const sourceLink = makeUserText('button', 'inline-link', sourceLocation.text);
       sourceLink.type = 'button';
       sourceLink.dataset.externalUrl = sourceLocation.value;
       sourceLine.append(sourceLink);
     } else {
-      sourceLine.append(document.createTextNode(sourceLocation.text));
+      sourceLine.append(makeUserText('span', '', sourceLocation.text));
     }
     if (sourceLocation.canOpen && !isHttpUrl(sourceLocation.value)) {
       const openSource = make('button', 'mini-copy-button', '打开');
@@ -1936,7 +2214,11 @@ function renderCatalogDetail(record) {
         : `压缩后 ${formatBytes(record.archiveTotalBytes)}`)
     );
   }
-  if (record.backupLocation) stats.append(make('span', 'backup-stat', `备份位置：${record.backupLocation}`));
+  if (record.backupLocation) {
+    const backupStat = make('span', 'backup-stat');
+    backupStat.append(make('span', '', '备份位置：'), makeUserText('span', '', record.backupLocation));
+    stats.append(backupStat);
+  }
   heading.append(stats);
   elements.catalogDetail.append(heading);
   elements.catalogDetail.append(renderCatalogEditor(record));
@@ -1980,7 +2262,7 @@ function renderCatalogDetail(record) {
         const groupHead = make('div', 'thumbnail-group-head');
         const details = videoInfoText(file);
         groupHead.append(
-          make('strong', '', file.relativePath),
+          makeUserText('strong', '', file.relativePath),
           make('span', '', `同一视频 · ${thumbnails.length} 帧 · 平均取样${details ? ` · ${details}` : ''}`)
         );
         group.append(groupHead);
@@ -2018,10 +2300,15 @@ function renderCatalogDetail(record) {
 async function loadCatalogDetails(recordId) {
   const requestId = ++catalogDetailRequest;
   activeCatalogId = recordId;
-  renderCatalog(currentCatalogResults);
-  elements.catalogDetail.replaceChildren(make('p', 'muted', '正在读取完整目录和缩略图…'));
+  syncCatalogItemState();
+  elements.catalogDetail.setAttribute('aria-busy', 'true');
+  if (elements.catalogDetail.querySelector('.empty-library')) {
+    elements.catalogDetail.replaceChildren(make('p', 'muted', '正在读取完整目录和缩略图…'));
+  }
   const record = await safely(() => window.archiveApp.getCatalogDetails(recordId));
-  if (record && requestId === catalogDetailRequest && activeCatalogId === recordId) renderCatalogDetail(record);
+  if (requestId !== catalogDetailRequest || activeCatalogId !== recordId) return;
+  elements.catalogDetail.removeAttribute('aria-busy');
+  if (record) renderCatalogDetail(record);
 }
 
 function renderSummary(state) {
@@ -2052,7 +2339,7 @@ function renderSummary(state) {
   document.querySelector('#scan-source').disabled = state.running;
   document.querySelector('#add-folder').disabled = state.running;
   document.querySelector('#add-video').disabled = state.running;
-  document.querySelector('#save-settings').disabled = state.running;
+  setConfigControlsLocked(state.running);
   document.querySelector('#clear-completed').disabled = !jobs.some((job) => String(job.status).startsWith('completed'));
   document.querySelector('#clear-cancelled').disabled = !jobs.some((job) => job.status === 'cancelled');
   document.querySelector('#clear-queue').disabled = jobs.length === 0;
@@ -2123,10 +2410,19 @@ function render(state, includeConfig = false) {
 }
 
 async function saveConfig() {
+  if (currentState?.running) {
+    renderConfig(currentState.config);
+    setConfigControlsLocked(true);
+    showToast('队列运行期间不能修改设置', true);
+    return null;
+  }
   const state = await safely(() => window.archiveApp.saveConfig(readConfig()));
   if (state) {
     render(state, true);
     showToast('设置已保存');
+  } else if (currentState?.config) {
+    renderConfig(currentState.config);
+    setConfigControlsLocked(Boolean(currentState.running));
   }
   return state;
 }
@@ -2138,6 +2434,12 @@ document.querySelectorAll('.nav-button').forEach((button) => {
     if (button.dataset.page === 'library-page' && currentState) {
       if (catalogRefreshDirty || Date.now() - lastCatalogRefreshAt > 10_000) void refreshCatalog();
       requestAnimationFrame(applyCatalogGridLayout);
+    }
+    if (button.dataset.page === 'workspace-page' && suspendedQueueSimilarityReport && activeQueueSimilarityReportJobId) {
+      suspendedQueueSimilarityReport = false;
+      requestAnimationFrame(() => {
+        if (!elements.queueSimilarityReportDialog.open) elements.queueSimilarityReportDialog.showModal();
+      });
     }
   });
 });
@@ -2185,7 +2487,6 @@ document.querySelectorAll('[data-pick]').forEach((button) => {
 
 document.querySelector('.settings-col').addEventListener('input', updateSettingsDigests);
 document.querySelector('.settings-col').addEventListener('change', updateSettingsDigests);
-
 document.querySelector('#save-settings').addEventListener('click', saveConfig);
 window.archiveApp.onUpdateProgress((progress) => {
   if (!elements.updateStatusChip || progress?.stage === 'prepared') return;
@@ -2210,6 +2511,52 @@ const usageGuideDialog = document.querySelector('#usage-guide-dialog');
 document.querySelector('#open-usage-guide').addEventListener('click', () => usageGuideDialog.showModal());
 document.querySelector('#close-usage-guide').addEventListener('click', () => usageGuideDialog.close());
 document.querySelector('#confirm-usage-guide').addEventListener('click', () => usageGuideDialog.close());
+elements.confirmDialogForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  closeConfirmDialog(true);
+});
+elements.cancelConfirmDialog.addEventListener('click', () => closeConfirmDialog(false));
+elements.confirmDialog.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  closeConfirmDialog(false);
+});
+elements.confirmDialog.addEventListener('click', (event) => {
+  if (event.target === elements.confirmDialog) closeConfirmDialog(false);
+});
+for (const selector of ['#close-similarity-whitelist', '#cancel-similarity-whitelist']) {
+  document.querySelector(selector).addEventListener('click', closeSimilarityWhitelistDialog);
+}
+elements.similarityWhitelistDialog.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  closeSimilarityWhitelistDialog();
+});
+elements.similarityWhitelistDialog.addEventListener('click', (event) => {
+  if (event.target === elements.similarityWhitelistDialog) closeSimilarityWhitelistDialog();
+});
+elements.similarityWhitelistForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (similarityWhitelistWriteInFlight) return;
+  const term = elements.similarityWhitelistInput.value.trim();
+  if (!term) return;
+  const context = similarityWhitelistContext;
+  similarityWhitelistWriteInFlight = true;
+  elements.confirmSimilarityWhitelist.disabled = true;
+  try {
+    const result = await safely(() => window.archiveApp.addSimilarityIgnoreTerm(term));
+    if (!result) return;
+    closeSimilarityWhitelistDialog();
+    if (context?.recordId && activeCatalogId === context.recordId) await loadCatalogDetails(context.recordId);
+    if (context?.reportJobId && activeQueueSimilarityReportJobId === context.reportJobId) {
+      await loadQueueSimilarityReport(context.reportJobId, { keepOpen: true });
+    }
+    showToast(result.added
+      ? `“${result.term}”已加入相似度白名单；已有关系不会自动重算`
+      : `“${result.term}”已在相似度白名单中`);
+  } finally {
+    similarityWhitelistWriteInFlight = false;
+    elements.confirmSimilarityWhitelist.disabled = false;
+  }
+});
 elements.recordBackupLocation.addEventListener('change', () => {
   updateBackupLocationControl();
   if (elements.recordBackupLocation.checked) elements.backupLocation.focus();
@@ -2224,11 +2571,29 @@ elements.moveCompleted.addEventListener('change', async () => {
 [elements.videoFrameBackup, elements.smallItemFilter, elements.scheduleEnabled].forEach((control) => {
   control.addEventListener('change', updateIntakeOptionControls);
 });
+elements.similarityReportEnabled.addEventListener('change', () => { void saveConfig(); });
+elements.largeFolderSimplification.addEventListener('change', () => {
+  updatePerformanceAvoidanceControls();
+  void saveConfig();
+});
+elements.largeFolderFileThreshold.addEventListener('change', () => { void saveConfig(); });
+elements.skipTinyMd5Files.addEventListener('change', () => {
+  updatePerformanceAvoidanceControls();
+  void saveConfig();
+});
+elements.tinyFileMd5ThresholdKb.addEventListener('change', () => { void saveConfig(); });
+elements.autoSkipExactDuplicates.addEventListener('change', () => {
+  updateAutoSkipControls();
+  void saveConfig();
+});
+for (const control of elements.autoSkipExactDuplicateAction.querySelectorAll('input[type="radio"]')) {
+  control.addEventListener('change', () => { void saveConfig(); });
+}
 elements.smallItemFilter.addEventListener('change', () => { void saveConfig(); });
 elements.minimumTaskMb.addEventListener('change', () => { void saveConfig(); });
 elements.autoTrash.addEventListener('change', async () => {
   if (elements.autoTrash.checked) {
-    const accepted = confirmUser('启用后，每个任务只有在验证并入库成功后，才会把对应源文件夹或视频移入 Windows 回收站。是否启用？');
+    const accepted = await confirmUser('启用后，每个任务只有在验证并入库成功后，才会把对应源文件夹或视频移入 Windows 回收站。是否启用？', { title: '启用回收站自动处理', confirmLabel: '确认启用' });
     if (!accepted) {
       elements.autoTrash.checked = false;
       return;
@@ -2268,6 +2633,11 @@ document.querySelector('#select-user-data').addEventListener('click', async () =
 });
 
 document.querySelector('#scan-source').addEventListener('click', async () => {
+  if (!elements.intakeDirectory.value.trim()) {
+    const selected = await safely(() => window.archiveApp.chooseDirectory(''));
+    if (!selected) return;
+    elements.intakeDirectory.value = selected;
+  }
   const saved = await saveConfig();
   if (!saved) return;
   elements.notice.textContent = t('正在扫描下一级目录，请稍候…');
@@ -2439,17 +2809,17 @@ elements.taskList.addEventListener('click', async (event) => {
   if (button) {
     const { action, jobId } = button.dataset;
     let state;
-    if (action === 'view-similar') {
-      await jumpToCatalogRecord(button.dataset.similarRecord);
+    if (action === 'similarity-report') {
+      await loadQueueSimilarityReport(jobId);
       return;
     }
     if (action === 'confirm') state = await safely(() => window.archiveApp.confirmTask(jobId));
     if (action === 'confirm-anomaly') {
-      if (!confirmUser('完整性测试已经通过，但压缩前后体积比例超出安全阈值。请先人工核对日志和源项目；确认仍要入库吗？')) return;
+      if (!await confirmUser('完整性测试已经通过，但压缩前后体积比例超出安全阈值。请先人工核对日志和源项目；确认仍要入库吗？', { title: '确认体积异常', confirmLabel: '确认入库' })) return;
       state = await safely(() => window.archiveApp.confirmAnomaly(jobId));
     }
     if (action === 'discard-anomaly') {
-      if (!confirmUser('删除这次异常任务生成的压缩文件和缩略图？源文件会完整保留在原位置，且不会加入仓库。')) return;
+      if (!await confirmUser('删除这次异常任务生成的压缩文件和缩略图？源文件会完整保留在原位置，且不会加入仓库。', { tone: 'danger', title: '删除异常成品', confirmLabel: '删除成品' })) return;
       state = await safely(() => window.archiveApp.discardAnomaly(jobId));
     }
     if (action === 'acknowledge-trash-safety') {
@@ -2469,9 +2839,27 @@ elements.taskList.addEventListener('click', async (event) => {
   renderJobs(currentState?.jobs || []);
 });
 
+for (const selector of ['#close-queue-similarity-report', '#done-queue-similarity-report']) {
+  document.querySelector(selector).addEventListener('click', () => closeQueueSimilarityReport());
+}
+elements.queueSimilarityReportDialog.addEventListener('cancel', () => closeQueueSimilarityReport());
+elements.queueSimilarityReportContent.addEventListener('click', async (event) => {
+  const openSource = event.target.closest('button[data-report-open-source]');
+  if (openSource) {
+    const opened = await safely(() => window.archiveApp.openTaskSource(openSource.dataset.reportOpenSource));
+    if (opened) showToast('已打开任务所在位置');
+    return;
+  }
+  const jump = event.target.closest('button[data-report-catalog-record]');
+  if (!jump) return;
+  suspendedQueueSimilarityReport = true;
+  closeQueueSimilarityReport({ preserve: true });
+  await jumpToCatalogRecord(jump.dataset.reportCatalogRecord);
+});
+
 elements.removeSelected.addEventListener('click', async () => {
   if (selectedJobIds.size === 0) return;
-  if (!confirmUser(`从任务列表移除所选 ${selectedJobIds.size} 项？已入库档案和源文件不会删除。`)) return;
+  if (!await confirmUser(`从任务列表移除所选 ${selectedJobIds.size} 项？已入库档案和源文件不会删除。`)) return;
   const state = await safely(() => window.archiveApp.removeJobs([...selectedJobIds]));
   if (state) {
     selectedJobIds.clear();
@@ -2480,7 +2868,7 @@ elements.removeSelected.addEventListener('click', async () => {
 });
 
 document.querySelector('#clear-queue').addEventListener('click', async () => {
-  if (!confirmUser('清空整个任务列表？如果当前正在运行，会停止当前任务并阻止后续任务启动。已入库档案和源文件不会删除。')) return;
+  if (!await confirmUser('清空整个任务列表？如果当前正在运行，会停止当前任务并阻止后续任务启动。已入库档案和源文件不会删除。', { tone: 'danger', title: '清空任务列表', confirmLabel: '确认清空' })) return;
   const state = await safely(() => window.archiveApp.clearQueue());
   if (state) {
     selectedJobIds.clear();
@@ -2509,7 +2897,7 @@ document.querySelector('#clear-cancelled').addEventListener('click', async () =>
 });
 
 document.querySelector('#clear-duplicates').addEventListener('click', async () => {
-  if (!confirmUser('从任务列表清除所有名称或标题可能重复的项目？已入库档案和源文件不会删除。')) return;
+  if (!await confirmUser('从任务列表清除所有名称或标题可能重复的项目？已入库档案和源文件不会删除。')) return;
   const result = await safely(() => window.archiveApp.clearPotentialDuplicates());
   if (!result) return;
   selectedJobIds.clear();
@@ -2518,7 +2906,7 @@ document.querySelector('#clear-duplicates').addEventListener('click', async () =
 });
 
 document.querySelector('#clear-exact-duplicates').addEventListener('click', async () => {
-  if (!confirmUser('从任务列表清除所有已确认存在内容完全相同文件的项目？已入库档案和源文件不会删除。')) return;
+  if (!await confirmUser('从任务列表清除所有已确认存在内容完全相同文件的项目？已入库档案和源文件不会删除。')) return;
   const result = await safely(() => window.archiveApp.clearExactDuplicates());
   if (!result) return;
   selectedJobIds.clear();
@@ -2527,7 +2915,7 @@ document.querySelector('#clear-exact-duplicates').addEventListener('click', asyn
 });
 
 document.querySelector('#confirm-all-duplicates').addEventListener('click', async () => {
-  if (!confirmUser('同意任务列表中全部名称重复、标题相似或视频大小相同的风险，并让它们进入等待压缩状态？')) return;
+  if (!await confirmUser('同意任务列表中全部名称重复、标题相似或视频大小相同的风险，并让它们进入等待压缩状态？', { title: '批量确认重复风险', confirmLabel: '确认并继续' })) return;
   const result = await safely(() => window.archiveApp.confirmAllDuplicates());
   if (!result) return;
   render(result.state);
@@ -2550,7 +2938,7 @@ elements.catalogList.addEventListener('click', async (event) => {
   if (event.ctrlKey || event.metaKey) {
     if (selectedCatalogIds.has(button.dataset.recordId)) selectedCatalogIds.delete(button.dataset.recordId);
     else selectedCatalogIds.add(button.dataset.recordId);
-    renderCatalog(currentCatalogResults);
+    syncCatalogItemState();
     return;
   }
   await loadCatalogDetails(button.dataset.recordId);
@@ -2560,14 +2948,18 @@ elements.catalogList.addEventListener('click', async (event) => {
 });
 
 let searchTimer;
+function runCatalogSearchNow() {
+  clearTimeout(searchTimer);
+  catalogPage = 1;
+  void refreshCatalog();
+  void refreshCatalogSuggestions();
+}
 elements.catalogSearch.addEventListener('input', () => {
   clearTimeout(searchTimer);
   catalogPage = 1;
-  searchTimer = setTimeout(() => {
-    void refreshCatalog();
-    void refreshCatalogSuggestions();
-  }, 280);
+  searchTimer = setTimeout(runCatalogSearchNow, 280);
 });
+elements.catalogSearch.addEventListener('search', runCatalogSearchNow);
 
 elements.catalogSuggestions.addEventListener('mousedown', (event) => {
   const button = event.target.closest('button[data-suggestion-title]');
@@ -2638,7 +3030,7 @@ document.querySelector('#export-warehouse').addEventListener('click', async () =
   if (result) showToast(`仓库压缩包已导出：${result.path}`);
 });
 document.querySelector('#import-warehouse').addEventListener('click', async () => {
-  if (!confirmUser('选择外部仓库压缩包（.zip）后，会把其中的仓库记录、缩略图和解压密码记录一并并入当前仓库。相同 ID 的记录会跳过；外部压缩包实体不会被移动或删除。是否继续？')) return;
+  if (!await confirmUser('选择外部仓库压缩包（.zip）后，会把其中的仓库记录、缩略图和解压密码记录一并并入当前仓库。相同 ID 的记录会跳过；外部压缩包实体不会被移动或删除。是否继续？', { title: '并入外部仓库', confirmLabel: '选择并导入' })) return;
   const result = await safely(() => window.archiveApp.importWarehouse());
   if (!result) return;
   render(result.state);
@@ -2672,7 +3064,7 @@ elements.similarityEnabled.addEventListener('change', async () => {
   const message = enabling
     ? '开启相似度计算后，新入库项目会自动与老入库项目对比计算相似度。'
     : '关闭相似度计算，不会清空旧有相似度关系，新入库项目不再计算相似度。';
-  if (!window.confirm(t(message))) {
+  if (!await confirmUser(message, { title: enabling ? '开启相似度计算' : '关闭相似度计算', confirmLabel: '确认切换' })) {
     elements.similarityEnabled.checked = !enabling;
     return;
   }
@@ -2692,7 +3084,7 @@ elements.similarityStrength.addEventListener('change', async () => {
   showToast(t(`相似度强度已切换为“${SIMILARITY_STRENGTH_LABELS[strength] || strength}”；已有关系不会自动重算`));
 });
 elements.rebuildSimilarity.addEventListener('click', async () => {
-  if (!window.confirm(t('计算量较大，可能出现卡顿。确定要重算整个仓库的相似关系吗？'))) return;
+  if (!await confirmUser('计算量较大，可能出现卡顿。确定要重算整个仓库的相似关系吗？', { title: '全局重算相似关系', confirmLabel: '开始重算' })) return;
   elements.rebuildSimilarity.disabled = true;
   elements.similarityRebuildProgress.hidden = false;
   updateSimilarityProgress({ active: true, completed: 0, total: 0, elapsedMs: 0 });
@@ -2787,7 +3179,7 @@ elements.setThumbnailCover.addEventListener('click', async () => {
 elements.deleteThumbnail.addEventListener('click', async () => {
   if (!lightboxContext) return;
   const context = { ...lightboxContext };
-  if (!confirmUser('确定删除这张图片？删除后可以通过仓库顶部的“撤回”恢复。')) return;
+  if (!await confirmUser('确定删除这张图片？删除后可以通过仓库顶部的“撤回”恢复。', { tone: 'danger', title: '删除项目图片', confirmLabel: '删除图片' })) return;
   const updated = await safely(() => window.archiveApp.deleteCatalogImage(context.recordId, context.relativePath));
   if (!updated) return;
   invalidateThumbnailCache(context.recordId, context.relativePath);
@@ -2816,7 +3208,7 @@ elements.catalogDetail.addEventListener('click', (event) => {
     void safely(() => window.archiveApp.openCatalogSource(openSource.dataset.openSource)).then(async (result) => {
       if (!result) return;
       if (result.status === 'trashed') {
-        if (!confirmUser('该原文件在 Windows 回收站中。要将文件从回收站移出到原位置吗？')) return;
+        if (!await confirmUser('该原文件在 Windows 回收站中。要将文件从回收站移出到原位置吗？', { title: '复原原文件', confirmLabel: '复原到原位置' })) return;
         const restored = await safely(() => window.archiveApp.restoreCatalogSource(openSource.dataset.openSource));
         if (!restored) return;
         renderCatalogDetail(restored.record);
@@ -2914,7 +3306,7 @@ elements.selectAllCatalog.addEventListener('change', () => {
     if (elements.selectAllCatalog.checked) selectedCatalogIds.add(record.id);
     else selectedCatalogIds.delete(record.id);
   }
-  renderCatalog(currentCatalogResults);
+  syncCatalogItemState();
 });
 
 function closeBulkTagsDialog() {
@@ -2956,7 +3348,8 @@ async function queueSelectedUncompressedRecords() {
   if (!result) return;
   render(result.state);
   if (result.failedCount > 0) {
-    showToast(`${result.failedCount} 个项目入库失败，原文件已移动；${result.queuedCount} 个已加入队列`, true);
+    const firstReason = result.failures?.[0]?.reason ? `：${result.failures[0].reason}` : '';
+    showToast(`${result.failedCount} 个项目未能加入队列${firstReason}；${result.queuedCount} 个已加入队列`, true);
   } else if (result.queuedCount > 0) {
     showToast(`已将 ${result.queuedCount} 个库内未压缩项目送入队列`);
   } else {
@@ -3182,7 +3575,7 @@ enableMarqueeSelection(
   '.catalog-card[data-catalog-id]',
   (item) => item.dataset.catalogId,
   selectedCatalogIds,
-  () => renderCatalog(currentCatalogResults)
+  syncCatalogItemState
 );
 
 window.archiveApp.onStateChanged((state) => render(state));

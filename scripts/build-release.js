@@ -6,12 +6,22 @@ const { execFileSync } = require('node:child_process');
 const packageJson = require('../package.json');
 const { embedWindowsIcon } = require('./embed-windows-icon');
 const { createFileIntegrityEntries, hashFile } = require('../src/core/tool-integrity');
+const { compactReleaseNotesPayload } = require('../src/core/release-notes');
 const { dependencyLock, verifyToolchain } = require('./verify-toolchain');
 const { assertPathInsideLocalRoot, makeLocalLayout } = require('../src/core/local-paths');
 
 const projectRoot = path.resolve(__dirname, '..');
 const electronDist = path.join(projectRoot, 'node_modules', 'electron', 'dist');
-const releaseName = `HamsterArchiver-v${packageJson.version}-win-x64`;
+const distributionArgument = process.argv.slice(2).find((value) => value.startsWith('--distribution='));
+const unknownArguments = process.argv.slice(2).filter((value) => !value.startsWith('--distribution='));
+if (unknownArguments.length > 0) throw new Error(`未知构建参数：${unknownArguments.join(', ')}`);
+const distributionMode = distributionArgument?.split('=')[1] || 'portable';
+if (!['portable', 'installed'].includes(distributionMode)) {
+  throw new Error(`不支持的发行形态：${distributionMode}`);
+}
+const releaseName = distributionMode === 'installed'
+  ? `HamsterArchiver-v${packageJson.version}-win-x64-installed`
+  : `HamsterArchiver-v${packageJson.version}-win-x64`;
 const localLayout = makeLocalLayout(projectRoot);
 const outputRoot = path.join(localLayout.stagingRoot, releaseName);
 assertPathInsideLocalRoot(outputRoot, localLayout.root, '发行构建目录');
@@ -33,6 +43,30 @@ async function copyVerifiedFile(relativePath, destinationRoot) {
     hashFile(destinationPath)
   ]);
   if (sourceDigest !== destinationDigest) throw new Error('发布工具复制校验失败：' + relativePath);
+}
+
+async function readReleaseSummary() {
+  const relativePath = path.join('docs', 'releases', `release-summary-v${packageJson.version}.json`);
+  const summaryPath = path.join(projectRoot, relativePath);
+  let summary;
+  try {
+    summary = JSON.parse(await fs.readFile(summaryPath, 'utf8'));
+  } catch (error) {
+    throw new Error(`无法读取发行更新说明 ${relativePath}：${error.message}`);
+  }
+  if (summary.schemaVersion !== 1 || summary.version !== packageJson.version) {
+    throw new Error(`发行更新说明必须使用 schemaVersion 1，并与版本 ${packageJson.version} 一致。`);
+  }
+  for (const locale of ['zh-CN', 'en-US']) {
+    if (!Array.isArray(summary.notes?.[locale]) || summary.notes[locale].length === 0) {
+      throw new Error(`发行更新说明缺少 ${locale} 内容。`);
+    }
+  }
+  const releaseNotes = compactReleaseNotesPayload(summary.notes);
+  if (!releaseNotes?.['zh-CN']?.length || !releaseNotes?.['en-US']?.length) {
+    throw new Error('发行更新说明没有可用的中英文条目。');
+  }
+  return releaseNotes;
 }
 
 async function main() {
@@ -86,24 +120,28 @@ async function main() {
     name: packageJson.name,
     productName: 'Hamster Archiver',
     version: packageJson.version,
+    author: packageJson.author,
     description: packageJson.description,
     main: 'src/main.js',
-    license: 'MIT'
+    license: 'MIT',
+    distributionMode
   }, null, 2)}\n`, 'utf8');
 
-  const userDataDirectory = path.join(outputRoot, 'userdata');
-  for (const directory of ['config', 'warehouse', 'logs', 'processed', 'electron']) {
-    await fs.mkdir(path.join(userDataDirectory, directory), { recursive: true });
+  if (distributionMode === 'portable') {
+    const userDataDirectory = path.join(outputRoot, 'userdata');
+    for (const directory of ['config', 'warehouse', 'logs', 'processed', 'electron']) {
+      await fs.mkdir(path.join(userDataDirectory, directory), { recursive: true });
+    }
+    await fs.writeFile(path.join(userDataDirectory, 'README.txt'), [
+      'Hamster Archiver portable user data directory',
+      '',
+      '设置、仓库、缩略图、日志和默认 processed 都保存在这里。',
+      '压缩暂存目录会在“打包后文件存放点”旁自动建立，不在 userdata 中。',
+      '备份软件时，请把整个 userdata 文件夹一并备份。',
+      '程序运行时不要移动、覆盖或同步正在写入的 SQLite 文件。',
+      ''
+    ].join('\r\n'), 'utf8');
   }
-  await fs.writeFile(path.join(userDataDirectory, 'README.txt'), [
-    'Hamster Archiver portable user data directory',
-    '',
-    '设置、仓库、缩略图、日志和默认 processed 都保存在这里。',
-    '压缩暂存目录会在“打包后文件存放点”旁自动建立，不在 userdata 中。',
-    '备份软件时，请把整个 userdata 文件夹一并备份。',
-    '程序运行时不要移动、覆盖或同步正在写入的 SQLite 文件。',
-    ''
-  ].join('\r\n'), 'utf8');
 
   const localeDirectory = path.join(outputRoot, 'locales');
   if (await exists(localeDirectory)) {
@@ -128,19 +166,26 @@ async function main() {
     'resources/app/src/core/archive-engine.js',
     'resources/app/src/core/media-service.js',
     'resources/app/src/core/paths.js',
+    'resources/app/src/core/release-notes.js',
     'resources/app/src/core/tool-integrity.js',
+    'resources/app/src/core/update-checker.js',
     'resources/app/src/core/update-manager.js',
     ...Object.values(dependencyLock.bundledTools).flatMap((tool) => tool.files)
   ];
   const integrityFiles = await createFileIntegrityEntries(outputRoot, integrityPaths);
+  const releaseNotes = await readReleaseSummary();
   const releaseManifest = {
     schemaVersion: 2,
     name: releaseName,
     version: packageJson.version,
     platform: 'win32-x64',
+    distributionMode,
     commit,
     builtAt: new Date().toISOString(),
-    portableUserData: 'userdata',
+    releaseNotes,
+    ...(distributionMode === 'portable'
+      ? { portableUserData: 'userdata' }
+      : { installedUserData: 'Electron userData directory' }),
     toolchain: {
       node: toolchain.dependencies.node,
       npm: toolchain.dependencies.npm,

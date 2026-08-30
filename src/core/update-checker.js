@@ -1,5 +1,7 @@
 'use strict';
 
+const { compactReleaseNotesPayload } = require('./release-notes');
+
 const RELEASES_URL = 'https://github.com/CarlosZ16420/hamster-archiver/releases';
 const LATEST_RELEASE_API = 'https://api.github.com/repos/CarlosZ16420/hamster-archiver/releases/latest';
 
@@ -51,6 +53,7 @@ async function checkForUpdates({ currentVersion, fetchImpl = globalThis.fetch, t
     latestVersion,
     updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
     releaseUrl: release.html_url || RELEASES_URL,
+    releaseNotes: compactReleaseNotesPayload(release.body),
     installable: Boolean(archiveAsset?.browser_download_url),
     asset: archiveAsset ? {
       name: String(archiveAsset.name || ''),

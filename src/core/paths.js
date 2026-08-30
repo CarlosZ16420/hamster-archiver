@@ -131,6 +131,13 @@ function makeDefaultConfig(workspaceRoot, userDataLayout = {}) {
     archiveVolumeBytes: LARGE_TASK_BYTES,
     smallItemFilter: true,
     minimumTaskBytes: 100 * MIB,
+    largeFolderSimplification: false,
+    largeFolderFileThreshold: 500,
+    skipTinyMd5Files: false,
+    tinyFileMd5ThresholdBytes: 5 * 1024,
+    autoSkipExactDuplicates: false,
+    autoSkipExactDuplicateAction: 'keep',
+    similarityReportEnabled: true,
     scheduleEnabled: false,
     scheduleStart: '',
     scheduleEnd: '',
@@ -146,10 +153,10 @@ function makeDefaultConfig(workspaceRoot, userDataLayout = {}) {
 }
 
 function validateSourceSelection(config, sourcePath = config.intakeDirectory) {
-  if (!sourcePath) throw new Error('请选择需要备份的文件主目录、文件夹或视频。');
+  if (!sourcePath) throw new Error('请选择需要备份的目录、文件夹或视频。');
   const checks = [
     ['archiveStagingDirectory', '暂存目录不能与所选源项目互相包含。'],
-    ['archiveOutputDirectory', '打包后文件存放点不能与所选源项目互相包含。'],
+    ['archiveOutputDirectory', '压缩包存储点不能与所选源项目互相包含。'],
     ['repositoryDirectory', '仓库位置不能与所选源项目互相包含。']
   ];
   for (const [key, message] of checks) {
@@ -169,7 +176,7 @@ function validateSourceSelection(config, sourcePath = config.intakeDirectory) {
 function validatePathLayout(config, sourcePath = config.intakeDirectory) {
   const repositoryDirectory = config.repositoryDirectory;
   if (!sourcePath || !config.archiveStagingDirectory || !config.archiveOutputDirectory || !repositoryDirectory) {
-    throw new Error('主目录、暂存目录、打包后文件存放点和仓库位置不能为空。');
+    throw new Error('当前扫描目录、暂存目录、压缩包存储点和仓库位置不能为空。');
   }
   validateSourceSelection(config, sourcePath);
   if (isPathInside(config.archiveStagingDirectory, config.archiveOutputDirectory) ||
@@ -181,7 +188,7 @@ function validatePathLayout(config, sourcePath = config.intakeDirectory) {
   const repositoryOverlapsOutput = isPathInside(config.archiveOutputDirectory, repositoryDirectory) ||
     isPathInside(repositoryDirectory, config.archiveOutputDirectory);
   if (repositoryOverlapsStaging || repositoryOverlapsOutput) {
-    throw new Error('仓库位置不能与暂存目录或打包后文件存放点互相包含。');
+    throw new Error('仓库位置不能与暂存目录或压缩包存储点互相包含。');
   }
   if (config.moveCompleted) {
     if (!config.processedSourceDirectory) throw new Error('启用归档后移动时，必须填写移动位置。');

@@ -19,7 +19,7 @@
 
   <header class="app-bar">
     <div class="brand">
-      <img class="brand-icon" src="../../assets/app-icon.png" alt="">
+      <img class="brand-icon" src="../../assets/app-icon.ico" width="32" height="32" alt="">
       <span class="brand-name">Hamster Archiver</span>
       <button id="check-for-updates" class="update-status-chip" data-state="current" type="button"><span class="update-status-dot" aria-hidden="true"></span><strong id="update-status-label">检查更新</strong></button>
     </div>
@@ -29,7 +29,7 @@
     </nav>
     <div class="hero-actions app-bar-actions">
       <div id="source-safety-chip" class="safety-chip" data-state="keep"><span></span><strong id="source-safety-label">归档后不移动原文件</strong></div>
-      <label class="theme-picker" for="theme-mode"><span>主题</span><select id="theme-mode" aria-label="选择界面主题"><option value="classic">经典</option><option value="day" selected>白昼</option><option value="night">黑夜</option><option value="celadon">青瓷</option><option value="plum">暮紫</option></select></label>
+      <label class="theme-picker" for="theme-mode"><span>主题</span><select id="theme-mode" aria-label="选择界面主题"><option value="classic">经典</option><option value="day" selected>白昼</option><option value="night">黑夜</option><option value="forest">森林</option><option value="twilight">暮光</option></select></label>
       <button id="language-toggle" class="language-toggle" type="button" aria-label="切换到 English"><span class="language-toggle-icon" aria-hidden="true">⇄</span><span id="language-toggle-label">EN</span></button>
     </div>
   </header>
@@ -46,12 +46,12 @@
 
             <div class="path-stack">
               <label class="path-field">
-                <span>需要备份的文件主目录 <span class="help-tip" tabindex="0" aria-label="批量备份文件时，为主目录下的每一个文件夹或视频，单独压缩进行备份，跳过其他文件" data-tooltip="批量备份文件时，为主目录下的每一个文件夹或视频，单独压缩进行备份，跳过其他文件">!</span></span>
-                <div><input id="intake-directory" type="text"><button data-pick="intake-directory">选择</button></div>
+                <span>需备份目录 <span class="help-tip" tabindex="0" aria-label="扫描时会把所选目录下的每一个文件夹或视频分别加入队列，并跳过其他根级文件" data-tooltip="扫描时会把所选目录下的每一个文件夹或视频分别加入队列，并跳过其他根级文件">!</span></span>
+                <div><input id="intake-directory" type="text" placeholder="选填"><button data-pick="intake-directory">选择</button></div>
               </label>
               <label class="path-field">
-                <span>最终压缩包存放点</span>
-                <div><input id="archive-output-directory" type="text"><button data-pick="archive-output-directory">选择</button></div>
+                <span>压缩后保存在</span>
+                <div><input id="archive-output-directory" type="text" placeholder="必填"><button data-pick="archive-output-directory">选择</button></div>
               </label>
             </div>
 
@@ -78,13 +78,13 @@
                   <input id="auto-trash-completed" type="checkbox">
                   <span>
                     <strong>完成后移入 Windows 回收站</strong>
-                    <small>可从回收站恢复；仅在压缩、验证、入库和缩略图全部成功后执行，异常时安全停止</small>
+                    <small>可从回收站恢复；异常时安全停止</small>
                   </span>
                 </label>
                 <div class="post-option-card backup-option-card">
                   <label class="post-option-heading backup-location-toggle">
                     <input id="record-backup-location" type="checkbox">
-                    <span><strong>记录备份位置</strong><small>把云盘、移动硬盘或其他备份去向写入仓库词条</small></span>
+                    <span><strong>记录备份位置</strong><small>云盘、移动硬盘或其他备份去向</small></span>
                   </label>
                   <label id="backup-location-field" class="backup-location-field embedded-text-field">
                     <input id="backup-location" type="text" maxlength="200" aria-label="备份位置" placeholder="例如：百度网盘 / 家庭备份盘 A">
@@ -102,6 +102,15 @@
                 <span class="group-chevron" aria-hidden="true">⌄</span>
               </summary>
               <div class="group-body">
+                <div class="password-row archive-password-setting">
+                  <span>解压密码</span>
+                  <input id="archive-password" type="password" maxlength="128" value="" autocomplete="new-password" placeholder="留空则不设置密码">
+                  <button id="toggle-password" class="text-button">显示</button>
+                </div>
+                <label class="record-password-option">
+                  <input id="record-archive-password" type="checkbox">
+                  <span><strong>记录解压密码</strong><small>把任务实际使用的密码作为专属词条写入仓库；不勾选时只记录“已加密”。</small></span>
+                </label>
                 <div class="compression-options-row">
                   <label class="compact-number-setting compression-setting">
                     <span><strong>压缩格式</strong></span>
@@ -136,15 +145,6 @@
                     </label>
                   </div>
                 </div>
-                <div class="password-row archive-password-setting">
-                  <span>解压密码</span>
-                  <input id="archive-password" type="password" maxlength="128" value="" autocomplete="new-password" placeholder="留空则不设置密码">
-                  <button id="toggle-password" class="text-button">显示</button>
-                </div>
-                <label class="record-password-option">
-                  <input id="record-archive-password" type="checkbox">
-                  <span><strong>记录解压密码</strong><small>把任务实际使用的密码作为专属词条写入仓库；不勾选时只记录“已加密”。</small></span>
-                </label>
                 <p class="safety-note">安全上限保持为 10 GiB：即使关闭主动分卷，超过 10 GiB 的任务仍须确认并按 10 GiB 分卷。分卷发布、校验、删除与回滚始终按整组处理。</p>
               </div>
             </details>
@@ -213,8 +213,8 @@
                   </div>
                 </div>
                 <div class="advanced-paths">
-                  <label class="path-field advanced-path-field"><span>用户数据区</span><div><input id="user-data-path" type="text" readonly><button id="select-user-data" type="button">选择</button></div><small>切换时保留旧目录</small></label>
-                  <label class="path-field advanced-path-field"><span>压缩暂存目录</span><div><input id="archive-staging-directory" type="text"><button data-pick="archive-staging-directory" type="button">选择</button></div><small>默认在打包存放点同目录下新建 staging 文件夹，也可选择其他安全位置</small></label>
+                  <label class="path-field advanced-path-field"><span>用户数据区</span><div><input id="user-data-path" type="text" spellcheck="false" readonly><button id="select-user-data" type="button">切换</button></div><small>切换时保留旧目录，确认后重启应用生效</small></label>
+                  <label class="path-field advanced-path-field"><span>压缩暂存目录</span><div><input id="archive-staging-directory" type="text"><button data-pick="archive-staging-directory" type="button">选择</button></div><small>默认在压缩包存储点同目录下新建 staging 文件夹</small></label>
                 </div>
                 <div class="settings-utility-actions">
                   <button id="save-settings" class="button primary">保存设置</button>
@@ -234,7 +234,7 @@
               <div class="button-row queue-actions">
                 <button id="add-folder" class="button ghost">添加单个文件夹</button>
                 <button id="add-video" class="button ghost">添加单个视频</button>
-                <button id="scan-source" class="button secondary">扫描主目录</button>
+                <button id="scan-source" class="button secondary">扫描目录</button>
                 <span class="queue-action-break" aria-hidden="true"></span>
                 <button id="start-inventory-only" class="button ghost">不压缩直接入库</button>
                 <button id="start-queue" class="button primary">开始压缩入库</button>
@@ -246,9 +246,22 @@
               <article><span>任务</span><strong id="summary-total">0</strong></article><article><span>等待确认</span><strong id="summary-confirm">0</strong></article><article><span>等待压缩</span><strong id="summary-queued">0</strong></article><article><span>已完成</span><strong id="summary-completed">0</strong></article><article><span>原始总量</span><strong id="summary-bytes">0 B</strong></article>
             </div>
             <div class="queue-toolbar">
-              <span id="queue-selection-hint" class="toolbar-hint">多选可进行批量操作</span>
               <div id="queue-selection-actions" class="context-actions" hidden><span id="selection-count" class="selection-count">未选择任务</span><button id="remove-selected" class="button ghost" disabled>移除所选</button></div>
               <div class="queue-maintenance">
+                <details class="action-menu queue-settings-menu"><summary class="button ghost">设置</summary><div class="action-menu-popover queue-settings-popover">
+                  <label class="queue-setting-toggle"><input id="similarity-report-enabled" type="checkbox" checked><span><strong>相似报告</strong><small>开启后，检测到相似项目时会给出详细报告</small></span></label>
+                  <section class="queue-setting-section" aria-labelledby="performance-avoidance-title">
+                    <h3 id="performance-avoidance-title">卡顿规避</h3>
+                    <div class="queue-setting-item"><label class="queue-setting-toggle"><input id="large-folder-simplification" type="checkbox"><span><strong>超大文件夹简化处理</strong></span></label><div class="queue-threshold-note"><span class="queue-threshold-clause"><span>对于文件数量超过</span><input id="large-folder-file-threshold" class="queue-inline-number" type="number" min="1" max="100000" step="1" value="500" aria-label="超大文件夹阈值"><span>的文件夹，</span></span><span>选取 200 个代表文件记录 MD5、计算相似度</span></div></div>
+                    <div class="queue-setting-item"><label class="queue-setting-toggle"><input id="skip-tiny-md5-files" type="checkbox"><span><strong>MD5计算跳过极小文件</strong></span></label><div class="queue-threshold-note"><span>小于</span><input id="tiny-file-md5-threshold-kb" class="queue-inline-number" type="number" min="1" max="1048576" step="1" value="5" aria-label="极小文件阈值"><span>KB 的文件不记录 MD5</span></div></div>
+                  </section>
+                  <label class="queue-setting-toggle"><input id="auto-skip-exact-duplicates" type="checkbox"><span><strong>自动跳过</strong><small>自动跳过已经完整存在于仓库中的项目</small></span></label>
+                  <fieldset id="auto-skip-exact-duplicate-action" class="queue-setting-options"><legend>跳过后</legend>
+                    <label><input type="radio" name="auto-skip-exact-duplicate-action" value="remove"> <span>在队列中删除对应项（日志中仍保留）</span></label>
+                    <label><input type="radio" name="auto-skip-exact-duplicate-action" value="keep" checked> <span>在队列中保留对应项</span></label>
+                  </fieldset>
+                  <p class="queue-setting-note">只有文件数量、相对文件名、文件大小和内容核验全部一致时，才会判定为精确重复项目。部分文件相同不会自动跳过。卡顿规避不会排除自动跳过与名称、路径诊断。</p>
+                </div></details>
                 <details class="action-menu"><summary class="button ghost">重复项处理</summary><div class="action-menu-popover"><button id="clear-duplicates" class="menu-button">清除可能重复</button><button id="clear-exact-duplicates" class="menu-button">清除精确重复</button><button id="confirm-all-duplicates" class="menu-button">同意全部重复</button></div></details>
                 <details class="action-menu"><summary class="button ghost">清理队列</summary><div class="action-menu-popover"><button id="clear-completed" class="menu-button">清空已完成队列</button><button id="clear-cancelled" class="menu-button">清空已取消队列</button><button id="clear-queue" class="menu-button danger">一键清空队列…</button></div></details>
               </div>
@@ -258,7 +271,7 @@
                 <button id="resume-queue" class="button primary" hidden>继续当前任务</button>
               </div>
             </div>
-            <div id="task-list-container" class="table-wrap"><table><thead><tr><th class="select-cell"><input id="select-all-tasks" type="checkbox" aria-label="选择全部任务"></th><th>任务</th><th>文件</th><th>大小</th><th>状态</th><th>进度</th><th>操作</th></tr></thead><tbody id="task-list"></tbody></table><div id="empty-tasks" class="empty-state">还没有任务。选择一个实际主目录后开始扫描。</div></div>
+            <div id="task-list-container" class="table-wrap"><table><thead><tr><th class="select-cell"><input id="select-all-tasks" type="checkbox" aria-label="选择全部任务"></th><th>任务</th><th>文件</th><th>大小</th><th>状态</th><th>进度</th><th>操作</th></tr></thead><tbody id="task-list"></tbody></table><div id="empty-tasks" class="empty-state">还没有任务。点击“扫描目录”选择目录并开始扫描。</div></div>
             <div id="loose-summary" class="loose-summary" hidden></div>
           </section>
 
@@ -455,7 +468,7 @@
     <form id="bulk-tags-form">
       <div class="dialog-heading"><div><p class="step">批量整理</p><h2>追加标签</h2></div><button id="close-bulk-tags" class="dialog-close" type="button" aria-label="关闭">×</button></div>
       <p class="dialog-help">用逗号分隔。标签须以文字或数字开头，可使用文字、数字、空格、短横线、下划线和间隔号；单个最多 30 字。</p>
-      <label class="editor-field"><span>标签</span><input id="bulk-tags-input" type="text" maxlength="500" required placeholder="例如：旅行, 摄影, 待复查"></label>
+      <label class="editor-field tag-autocomplete-field"><span>标签</span><input id="bulk-tags-input" type="text" maxlength="500" required placeholder="例如：旅行, 摄影, 待复查"></label>
       <div class="dialog-actions"><button id="cancel-bulk-tags" class="button ghost" type="button">取消</button><button class="button primary" type="submit">追加</button></div>
     </form>
   </dialog>
@@ -509,19 +522,53 @@
     <div class="dialog-actions"><button id="confirm-usage-guide" class="button primary" type="button">知道了</button></div>
   </dialog>
 
-  <dialog id="trash-safety-dialog" class="manual-dialog compact-dialog trash-safety-dialog">
-    <div class="dialog-heading"><div><p class="step">安全熔断 / SAFETY HALT</p><h2>队列已立即停止</h2></div></div>
-    <p id="trash-safety-message" class="dialog-help"></p>
-    <div class="trash-safety-guidance">
-      <strong>自动移入回收站已经关闭</strong>
-      <p>后续任务尚未启动。请先检查 Windows 回收站和原文件位置，再决定是否重新开始队列。</p>
+  <dialog id="queue-similarity-report-dialog" class="manual-dialog queue-similarity-report-dialog">
+    <div class="dialog-heading">
+      <div><p class="step">队列检查 / SIMILARITY</p><h2>相似报告</h2></div>
+      <button id="close-queue-similarity-report" class="dialog-close" type="button" aria-label="关闭">×</button>
     </div>
-    <div class="dialog-actions"><button id="acknowledge-trash-safety" class="button danger" type="button">我已了解，保持队列停止</button></div>
+    <div id="queue-similarity-report-content" class="queue-similarity-report-content"><p class="muted">正在生成相似报告…</p></div>
+    <div class="dialog-actions"><button id="done-queue-similarity-report" class="button primary" type="button">完成</button></div>
+  </dialog>
+
+  <dialog id="similarity-whitelist-dialog" class="manual-dialog compact-dialog similarity-whitelist-dialog">
+    <form id="similarity-whitelist-form">
+      <div class="dialog-heading">
+        <div><p class="step">相似度设置 / WHITELIST</p><h2>加入相似度白名单</h2></div>
+        <button id="close-similarity-whitelist" class="dialog-close" type="button" aria-label="关闭">×</button>
+      </div>
+      <p class="dialog-help">以下词汇在相似度计算中将被忽略</p>
+      <label class="editor-field"><span>白名单词汇</span><input id="similarity-whitelist-input" type="text" maxlength="200" required autocomplete="off"></label>
+      <div class="dialog-actions"><button id="cancel-similarity-whitelist" class="button ghost" type="button">取消</button><button id="confirm-similarity-whitelist" class="button primary" type="submit">确定</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="manual-dialog compact-dialog confirm-dialog">
+    <form id="confirm-dialog-form">
+      <div class="confirm-dialog-hero"><span class="confirm-dialog-icon" aria-hidden="true">?</span><div><p class="step">操作确认 / CONFIRM</p><h2 id="confirm-dialog-title">请确认操作</h2></div></div>
+      <p id="confirm-dialog-message" class="confirm-dialog-message"></p>
+      <div class="dialog-actions"><button id="cancel-confirm-dialog" class="button ghost" type="button">取消</button><button id="accept-confirm-dialog" class="button primary" type="submit">继续</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="trash-safety-dialog" class="manual-dialog compact-dialog safety-dialog trash-safety-dialog">
+    <div class="safety-dialog-hero">
+      <span class="safety-dialog-icon" aria-hidden="true">!</span>
+      <div><p class="step">安全熔断 / SAFETY HALT</p><h2>已保护其余原文件</h2><p>队列已立即停止，后续任务没有启动。</p></div>
+    </div>
+    <div class="safety-dialog-reason"><span>触发原因</span><p id="trash-safety-message"></p></div>
+    <div class="safety-dialog-checklist">
+      <strong>现在请检查</strong>
+      <ol><li>确认原文件是否仍在原位置</li><li>检查 Windows 回收站是否保留了对应项目</li><li>核对无误后，再手动重新开始队列</li></ol>
+    </div>
+    <div class="safety-dialog-status"><span aria-hidden="true">✓</span><div><strong>自动移入回收站已经关闭</strong><p>确认本提示不会自动恢复队列，也不会重新启用删除操作。</p></div></div>
+    <div class="dialog-actions"><button id="acknowledge-trash-safety" class="button primary" type="button">知道了，保持安全停止</button></div>
   </dialog>
 
   <div id="toast" class="toast" hidden></div>
   <script src="ui-state.js"></script>
   <script src="i18n.js"></script>
+  <script src="tag-autocomplete.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

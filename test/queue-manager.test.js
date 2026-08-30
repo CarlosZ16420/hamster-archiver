@@ -238,18 +238,427 @@ test('exact duplicate tasks can be cleared separately', async () => {
   assert.deepEqual(manager.jobs.map((job) => job.id), ['possible']);
 });
 
+test('automatic exact-duplicate checking inventories name matches instead of blocking before MD5', () => {
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library',
+    autoSkipExactDuplicates: true
+  });
+  manager.catalog = [{ id: 'existing', title: '相同项目', displayName: '相同项目', manifest: [] }];
+
+  const normal = manager.createJob({
+    sourcePath: 'E:\\source\\normal', sourceType: 'directory', displayName: '相同项目', fileCount: 1, totalBytes: 10
+  });
+  const large = manager.createJob({
+    sourcePath: 'E:\\source\\large', sourceType: 'directory', displayName: '相同项目', fileCount: 1, totalBytes: LARGE_TASK_BYTES + 1
+  });
+
+  assert.equal(normal.status, 'queued');
+  assert.equal(normal.stageText, '等待精确重复核验');
+  assert.equal(normal.automaticDuplicateCheckPending, true);
+  assert.equal(large.status, 'awaiting_confirmation');
+  assert.ok(large.confirmationReasons.includes('large_task'));
+});
+
+test('queued automatic duplicate checking can be manually confirmed and continued', async () => {
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library',
+    autoSkipExactDuplicates: true
+  });
+  manager.catalog = [{ id: 'existing', title: '相同项目', displayName: '相同项目', manifest: [] }];
+  const job = manager.createJob({
+    sourcePath: 'E:\\source\\incoming', sourceType: 'directory', displayName: '相同项目', fileCount: 1, totalBytes: 10
+  });
+  manager.jobs = [job];
+
+  await manager.confirmJob(job.id);
+
+  assert.equal(job.status, 'queued');
+  assert.equal(job.automaticDuplicateCheckPending, false);
+  assert.ok(job.duplicateConfirmedAt);
+});
+
+test('automatic exact-duplicate checking can keep the skipped queue item and persistent log', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-keep-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const manifest = [{ relativePath: 'same.txt', name: 'same.txt', size: 4, md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }];
+  const manager = new QueueManager(new FakeStore(), {
+    archiveOutputDirectory: path.join(root, 'output'),
+    archiveStagingDirectory: path.join(root, 'staging'),
+    repositoryDirectory: path.join(root, 'warehouse'),
+    autoSkipExactDuplicates: true,
+    autoSkipExactDuplicateAction: 'keep'
+  }, {
+    archiveRunner: async (_job, _config, hooks) => hooks.onManifestReady(manifest)
+  });
+  manager.catalog = [{ id: 'existing', title: '已入库项目', displayName: '已入库项目', manifest }];
+  manager.jobs = [queuedJob('incoming')];
+
+  await manager.startQueue();
+
+  assert.equal(manager.jobs[0].status, 'skipped_duplicate');
+  assert.equal(manager.jobs[0].progress, 100);
+  assert.deepEqual(manager.jobs[0].exactProjectMatches.map((match) => match.id), ['existing']);
+  assert.ok(await manager.store.loadPendingManifest(manager.config.repositoryDirectory, manager.jobs[0].id));
+  assert.ok(manager.logs.some((entry) => /源文件和仓库均未修改，队列项已保留/.test(entry.message)));
+});
+
+test('automatic exact-duplicate checking immediately reuses unchanged kept sources for compressed and uncompressed records', async (t) => {
+  for (const archiveState of ['uncompressed', 'compressed']) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), `hamster-auto-skip-reuse-${archiveState}-`));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const sourcePath = path.join(root, 'same-project');
+    await fs.mkdir(sourcePath);
+    await fs.writeFile(path.join(sourcePath, 'same.txt'), 'same-content');
+    const manifest = await buildManifest(sourcePath, 'directory');
+    const manager = new QueueManager(new FakeStore(), {
+      repositoryDirectory: path.join(root, 'warehouse'),
+      archiveStagingDirectory: path.join(root, 'staging'),
+      smallItemFilter: false,
+      autoSkipExactDuplicates: true,
+      autoSkipExactDuplicateAction: 'keep'
+    });
+    manager.catalog = [{
+      id: `${archiveState}-existing`, title: 'same-project', displayName: 'same-project',
+      archiveState, sourceDisposition: 'kept', sourceType: 'directory',
+      sourcePath, originalSourcePath: sourcePath, manifest
+    }];
+
+    await manager.addSingle(sourcePath);
+
+    assert.equal(manager.jobs[0].status, 'skipped_duplicate', archiveState);
+    assert.equal(manager.jobs[0].automaticDuplicateCheckPending, false, archiveState);
+    assert.deepEqual(manager.jobs[0].exactProjectMatches.map((match) => match.id), [`${archiveState}-existing`]);
+    assert.ok(await manager.store.loadPendingManifest(manager.config.repositoryDirectory, manager.jobs[0].id));
+  }
+});
+
+test('automatic exact-duplicate checking immediately reuses unchanged sources with sampled MD5 gaps', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-partial-reuse-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'same-project');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'tiny-a.txt'), 'a');
+  await fs.writeFile(path.join(sourcePath, 'tiny-b.txt'), 'b');
+  const manifest = await buildManifest(sourcePath, 'directory', {
+    skipTinyMd5Files: true,
+    tinyFileMd5ThresholdBytes: 5 * 1024
+  });
+  assert.equal(manifest.filter((file) => file.md5).length, 0);
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    smallItemFilter: false,
+    autoSkipExactDuplicates: true,
+    autoSkipExactDuplicateAction: 'keep'
+  });
+  manager.catalog = [{
+    id: 'partial-existing', title: 'same-project', displayName: 'same-project',
+    archiveState: 'compressed', sourceDisposition: 'kept', sourceType: 'directory',
+    sourcePath, originalSourcePath: sourcePath, manifest
+  }];
+
+  await manager.addSingle(sourcePath);
+
+  assert.equal(manager.jobs[0].status, 'skipped_duplicate');
+  assert.equal(manager.jobs[0].stageText, '与仓库内项目完全一致，已自动跳过');
+  assert.deepEqual(manager.jobs[0].exactProjectMatches.map((match) => match.id), ['partial-existing']);
+});
+
+test('automatic exact verification fills safeguard MD5 gaps for a copied source when the original is available', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-partial-copy-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const catalogSource = path.join(root, 'catalog-source');
+  const incomingSource = path.join(root, 'incoming-copy');
+  await fs.mkdir(catalogSource);
+  await fs.mkdir(incomingSource);
+  for (const name of ['tiny-a.txt', 'tiny-b.txt']) {
+    await fs.writeFile(path.join(catalogSource, name), `same-${name}`);
+    await fs.copyFile(path.join(catalogSource, name), path.join(incomingSource, name));
+  }
+  const manifest = await buildManifest(catalogSource, 'directory', {
+    skipTinyMd5Files: true,
+    tinyFileMd5ThresholdBytes: 5 * 1024
+  });
+  assert.equal(manifest.filter((file) => file.md5).length, 0);
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    smallItemFilter: false,
+    autoSkipExactDuplicates: true,
+    autoSkipExactDuplicateAction: 'keep',
+    skipTinyMd5Files: true,
+    tinyFileMd5ThresholdBytes: 5 * 1024
+  });
+  manager.catalog = [{
+    id: 'partial-copy-existing', title: 'catalog-source', displayName: 'catalog-source',
+    archiveState: 'compressed', sourceDisposition: 'kept', sourceType: 'directory',
+    sourcePath: catalogSource, originalSourcePath: catalogSource, manifest
+  }];
+
+  await manager.addSingle(incomingSource);
+  manager.jobs[0].processingMode = 'inventory_only';
+  await manager.startQueue();
+
+  assert.equal(manager.jobs[0].status, 'skipped_duplicate');
+  assert.equal(manager.jobs[0].stageText, '与仓库内项目完全一致，已自动跳过');
+});
+
+test('automatic exact-duplicate checking hashes copied sources and skips matches against compressed and uncompressed records', async (t) => {
+  for (const archiveState of ['uncompressed', 'compressed']) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), `hamster-auto-skip-runtime-${archiveState}-`));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const catalogSource = path.join(root, 'catalog-source');
+    const incomingSource = path.join(root, 'incoming-copy');
+    await fs.mkdir(catalogSource);
+    await fs.mkdir(incomingSource);
+    await fs.writeFile(path.join(catalogSource, 'same.txt'), 'same-content');
+    await fs.writeFile(path.join(incomingSource, 'same.txt'), 'same-content');
+    const manifest = await buildManifest(catalogSource, 'directory');
+    const manager = new QueueManager(new FakeStore(), {
+      repositoryDirectory: path.join(root, 'warehouse'),
+      smallItemFilter: false,
+      autoSkipExactDuplicates: true,
+      autoSkipExactDuplicateAction: 'keep'
+    });
+    manager.catalog = [{
+      id: `${archiveState}-existing`, title: 'catalog-source', displayName: 'catalog-source',
+      archiveState, sourceDisposition: 'kept', sourceType: 'directory',
+      sourcePath: catalogSource, originalSourcePath: catalogSource, manifest
+    }];
+
+    await manager.addSingle(incomingSource);
+    assert.equal(manager.jobs[0].status, 'queued', archiveState);
+    manager.jobs[0].processingMode = 'inventory_only';
+    await manager.startQueue();
+
+    assert.equal(manager.jobs[0].status, 'skipped_duplicate', archiveState);
+    assert.deepEqual(manager.jobs[0].exactProjectMatches.map((match) => match.id), [`${archiveState}-existing`]);
+  }
+});
+
+test('queue similarity report summarizes exact files and linked warehouse projects', async () => {
+  const store = new FakeStore();
+  const manager = new QueueManager(store, {
+    repositoryDirectory: 'E:\\warehouse',
+    similarityReportEnabled: true
+  });
+  const manifest = [{
+    relativePath: 'same.mp4', name: 'same.mp4', extension: '.mp4', size: 100,
+    md5: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+  }];
+  manager.catalog = [{
+    id: 'existing', title: '仓库中的相同项目', displayName: '仓库中的相同项目',
+    sourceType: 'directory', directories: [], manifest
+  }];
+  manager.jobs = [{
+    ...queuedJob('report-job'), sourceType: 'video', displayName: '待检查视频.mp4',
+    exactDuplicateMatches: [{
+      sourceRelativePath: 'same.mp4', previous: [{ archiveId: 'existing', relativePath: 'same.mp4' }]
+    }]
+  }];
+  await store.savePendingManifest(manager.config.repositoryDirectory, 'report-job', manifest);
+
+  const report = await manager.getQueueSimilarityReport('report-job');
+
+  assert.equal(report.similarProjects.length, 1);
+  assert.equal(report.similarProjects[0].id, 'existing');
+  assert.equal(report.similarProjects[0].exactFileCount, 1);
+  assert.ok(report.similarEntryMatches[0].exactRanges.length > 0);
+  manager.config.similarityReportEnabled = false;
+  await assert.rejects(() => manager.getQueueSimilarityReport('report-job'), /相似报告已关闭/);
+});
+
+test('queue similarity report stays fast before inventory and one explicit duplicate confirmation continues the task', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-report-exact-flow-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, '相同项目');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'same.txt'), 'same-content');
+  const manifest = await buildManifest(sourcePath, 'directory');
+  const store = new FakeStore();
+  const manager = new QueueManager(store, {
+    archiveOutputDirectory: path.join(root, 'output'),
+    archiveStagingDirectory: path.join(root, 'staging'),
+    repositoryDirectory: path.join(root, 'warehouse'),
+    similarityReportEnabled: true
+  }, {
+    archiveRunner: async (_job, _config, hooks) => {
+      await hooks.onManifestReady(manifest);
+      return {
+        archiveFiles: [{ name: 'confirmed.7z', size: 6 }],
+        archiveTotalBytes: 6,
+        manifest,
+        directories: [],
+        skippedFiles: [],
+        passwordScheme: 'none',
+        hasPassword: false,
+        verifiedAt: new Date().toISOString()
+      };
+    }
+  });
+  manager.catalog = [{
+    id: 'existing', jobId: 'old-job', title: '相同项目', displayName: '相同项目',
+    sourceType: 'directory', directories: [], manifest
+  }];
+  const job = manager.createJob({
+    sourcePath, sourceType: 'directory', displayName: '相同项目',
+    fileCount: manifest.length, totalBytes: manifest.reduce((sum, file) => sum + file.size, 0)
+  });
+  manager.jobs = [job];
+
+  const reportBeforeInventory = await manager.getQueueSimilarityReport(job.id);
+  assert.equal(reportBeforeInventory.fingerprintPending, true);
+  assert.equal(reportBeforeInventory.manifest.filter((file) => file.md5).length, 0);
+  assert.equal(reportBeforeInventory.similarProjects[0].exactFileCount, 0);
+  assert.equal(await store.loadPendingManifest(manager.config.repositoryDirectory, job.id), null);
+
+  await manager.confirmJob(job.id);
+  assert.ok(job.confirmedAt);
+  assert.ok(job.duplicateConfirmedAt);
+  await manager.startQueue();
+
+  assert.equal(job.status, 'completed');
+  const reportAfterInventory = await manager.getQueueSimilarityReport(job.id);
+  assert.equal(reportAfterInventory.fingerprintPending, false);
+  assert.equal(reportAfterInventory.similarProjects[0].exactFileCount, 1);
+  assert.deepEqual(
+    reportAfterInventory.similarEntryMatches.find((entry) => entry.kind === 'file').exactRanges,
+    [[0, 'same.txt'.length]]
+  );
+  assert.ok(reportAfterInventory.similarProjects[0].reasons.includes('完整项目精确重复'));
+  assert.ok(reportAfterInventory.similarProjects[0].reasons.includes('项目名称完全一致'));
+  assert.ok(!reportAfterInventory.similarProjects[0].reasons.includes('标题相似'));
+  assert.ok(!reportAfterInventory.similarProjects[0].reasons.includes('标题一致'));
+});
+
+test('queue similarity report reuses unchanged MD5 values from the same uncompressed source', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-report-uncompressed-cache-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, '未压缩项目');
+  await fs.mkdir(sourcePath);
+  const sourceFile = path.join(sourcePath, 'same.txt');
+  await fs.writeFile(sourceFile, 'same-content');
+  const manifest = await buildManifest(sourcePath, 'directory');
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'), similarityReportEnabled: true
+  });
+  manager.catalog = [{
+    id: 'uncompressed-existing', jobId: 'old-job', title: '未压缩项目', displayName: '未压缩项目',
+    recordType: 'archive', archiveState: 'uncompressed', sourceDisposition: 'kept',
+    sourceType: 'directory', sourcePath, originalSourcePath: sourcePath, directories: [], manifest
+  }];
+  const job = manager.createJob({
+    sourcePath, sourceType: 'directory', displayName: '未压缩项目',
+    fileCount: manifest.length, totalBytes: manifest.reduce((sum, file) => sum + file.size, 0)
+  });
+  manager.jobs = [job];
+
+  const unchangedReport = await manager.getQueueSimilarityReport(job.id);
+  assert.equal(unchangedReport.fingerprintPending, false);
+  assert.equal(unchangedReport.reusedFingerprintCount, 1);
+  assert.equal(unchangedReport.manifest[0].md5, manifest[0].md5);
+  assert.equal(unchangedReport.similarProjects[0].exactFileCount, 1);
+  assert.ok(unchangedReport.similarProjects[0].reasons.includes('完整项目精确重复'));
+
+  await fs.writeFile(sourceFile, 'changed-content-is-longer');
+  const changedReport = await manager.getQueueSimilarityReport(job.id);
+  assert.equal(changedReport.fingerprintPending, true);
+  assert.equal(changedReport.reusedFingerprintCount, 0);
+  assert.equal(changedReport.manifest[0].md5, undefined);
+  assert.equal(changedReport.similarProjects[0].exactFileCount, 0);
+});
+
+test('completed queue report reuses the catalog manifest without matching the record against itself', async () => {
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: 'E:\\warehouse', similarityReportEnabled: true
+  });
+  const manifest = [{
+    relativePath: 'same.txt', name: 'same.txt', extension: '.txt', size: 4,
+    md5: 'ffffffffffffffffffffffffffffffff'
+  }];
+  manager.catalog = [
+    { id: 'existing', title: '旧项目', displayName: '旧项目', sourceType: 'directory', directories: [], manifest },
+    { id: 'completed-record', jobId: 'completed-job', title: '新项目', displayName: '新项目', sourceType: 'directory', directories: [], manifest }
+  ];
+  manager.jobs = [{
+    ...queuedJob('completed-job'), displayName: '新项目', status: 'completed',
+    exactDuplicateMatches: [{ sourceRelativePath: 'same.txt', previous: [{ archiveId: 'existing', relativePath: 'same.txt' }] }]
+  }];
+
+  const report = await manager.getQueueSimilarityReport('completed-job');
+
+  const exactMatches = report.similarEntryMatches.flatMap((entry) => entry.matches)
+    .filter((match) => match.reason === '文件内容完全一致');
+  assert.ok(exactMatches.some((match) => match.recordId === 'existing'));
+  assert.ok(exactMatches.every((match) => match.recordId !== 'completed-record'));
+});
+
+test('automatic exact-duplicate checking can remove only the queue item while retaining its log', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-remove-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const manifest = [{ relativePath: 'same.txt', name: 'same.txt', size: 4, md5: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }];
+  const manager = new QueueManager(new FakeStore(), {
+    archiveOutputDirectory: path.join(root, 'output'),
+    archiveStagingDirectory: path.join(root, 'staging'),
+    repositoryDirectory: path.join(root, 'warehouse'),
+    autoSkipExactDuplicates: true,
+    autoSkipExactDuplicateAction: 'remove'
+  }, {
+    archiveRunner: async (_job, _config, hooks) => hooks.onManifestReady(manifest)
+  });
+  manager.catalog = [{ id: 'existing', title: '已入库项目', displayName: '已入库项目', manifest }];
+  manager.jobs = [queuedJob('incoming')];
+
+  await manager.startQueue();
+
+  assert.deepEqual(manager.jobs, []);
+  assert.ok(manager.logs.some((entry) => /源文件和仓库均未修改，队列项已删除/.test(entry.message)));
+});
+
+test('automatic exact-duplicate checking restores duplicate review when the complete project differs', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-review-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const manager = new QueueManager(new FakeStore(), {
+    archiveOutputDirectory: path.join(root, 'output'),
+    archiveStagingDirectory: path.join(root, 'staging'),
+    repositoryDirectory: path.join(root, 'warehouse'),
+    autoSkipExactDuplicates: true
+  }, {
+    archiveRunner: async (_job, _config, hooks) => hooks.onManifestReady([{
+      relativePath: 'new.txt', name: 'new.txt', size: 4, md5: 'cccccccccccccccccccccccccccccccc'
+    }])
+  });
+  manager.catalog = [{
+    id: 'existing', title: '相同项目', displayName: '相同项目',
+    manifest: [{ relativePath: 'old.txt', name: 'old.txt', size: 4, md5: 'dddddddddddddddddddddddddddddddd' }]
+  }];
+  manager.jobs = [manager.createJob({
+    sourcePath: path.join(root, 'incoming'), sourceType: 'directory',
+    displayName: '相同项目', fileCount: 1, totalBytes: 4
+  })];
+
+  await manager.startQueue();
+
+  assert.equal(manager.jobs[0].status, 'awaiting_duplicate_confirmation');
+  assert.match(manager.jobs[0].stageText, /已延后等待确认/);
+  assert.equal(manager.catalog.length, 1);
+});
+
 test('all duplicate and similar confirmations can be accepted in one action', async () => {
   const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
   manager.jobs = [
     { ...queuedJob('similar'), status: 'awaiting_confirmation', confirmationReasons: ['similar_title'] },
     { ...queuedJob('exact'), status: 'awaiting_duplicate_confirmation', confirmationReasons: [] },
-    { ...queuedJob('unique'), status: 'queued', confirmationReasons: [] }
+    { ...queuedJob('unique'), status: 'queued', confirmationReasons: [] },
+    { ...queuedJob('large'), status: 'awaiting_confirmation', confirmationReasons: ['large_task', 'name_match'] }
   ];
   const result = await manager.confirmAllDuplicateJobs();
-  assert.equal(result.confirmedCount, 2);
+  assert.equal(result.confirmedCount, 3);
+  assert.ok(manager.jobs[0].confirmedAt);
   assert.ok(manager.jobs[0].duplicateConfirmedAt);
   assert.ok(manager.jobs[1].duplicateConfirmedAt);
   assert.equal(manager.jobs[2].duplicateConfirmedAt, undefined);
+  assert.ok(manager.jobs[3].duplicateConfirmedAt);
+  assert.equal(manager.jobs[3].confirmedAt, undefined);
+  assert.equal(manager.jobs[3].status, 'awaiting_confirmation');
 });
 
 test('each queued task keeps the password that was active when it was added', async () => {
@@ -584,6 +993,47 @@ test('changing similarity strength keeps existing relations until an explicit re
   assert.equal(manager.similarityStrength, 'strict');
   assert.deepEqual(manager.catalog[0].similarRecords, [{ id: 'b', score: 0.75 }]);
   assert.deepEqual(manager.catalog[1].similarRecords, [{ id: 'a', score: 0.75 }]);
+});
+
+test('each queued task snapshots performance safeguard settings', async () => {
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library',
+    largeFolderSimplification: true,
+    largeFolderFileThreshold: 800,
+    skipTinyMd5Files: true,
+    tinyFileMd5ThresholdBytes: 128 * 1024
+  });
+  const job = manager.createJob({
+    sourcePath: 'E:\\source\\large-folder',
+    sourceType: 'directory',
+    displayName: 'large-folder',
+    fileCount: 1000,
+    totalBytes: 1000
+  });
+
+  await manager.updateConfig({
+    largeFolderSimplification: false,
+    largeFolderFileThreshold: 1200,
+    skipTinyMd5Files: false,
+    tinyFileMd5ThresholdBytes: 256 * 1024
+  });
+  assert.equal(job.largeFolderSimplification, true);
+  assert.equal(job.largeFolderFileThreshold, 800);
+  assert.equal(job.skipTinyMd5Files, true);
+  assert.equal(job.tinyFileMd5ThresholdBytes, 128 * 1024);
+  await assert.rejects(manager.updateConfig({ largeFolderFileThreshold: 0 }), /1—100000/);
+  await assert.rejects(manager.updateConfig({ tinyFileMd5ThresholdBytes: 0 }), /1 KB—1 GB/);
+});
+
+test('all settings are rejected consistently while the queue is running', async () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.running = true;
+
+  await assert.rejects(
+    manager.updateConfig({ similarityReportEnabled: false }),
+    /队列运行期间不能修改设置/
+  );
+  assert.equal(manager.config.similarityReportEnabled, true);
 });
 
 test('adding a similarity whitelist term is serialized, normalized and does not rebuild relations', async () => {
@@ -1698,7 +2148,8 @@ test('warehouse compression upgrades the same uncompressed record and removes it
     archiveOutputDirectory: path.join(root, 'archives'),
     archiveStagingDirectory: path.join(root, 'staging'),
     moveCompleted: false,
-    autoTrashCompleted: false
+    autoTrashCompleted: false,
+    autoSkipExactDuplicates: true
   }, {
     archiveRunner: async (_job, _config, hooks) => {
       await hooks.onManifestReady(manifest);
@@ -1735,16 +2186,34 @@ test('warehouse compression upgrades the same uncompressed record and removes it
     manifest,
     directories: [],
     archiveFiles: []
+  }, {
+    id: 'other-exact-record',
+    jobId: 'other-job',
+    title: '原始名称',
+    displayName: '原始名称',
+    recordType: 'archive',
+    archiveState: 'compressed',
+    sourceDisposition: 'kept',
+    sourceType: 'directory',
+    sourcePath,
+    originalSourcePath: sourcePath,
+    originalBytes: 10,
+    manifest,
+    directories: [],
+    archiveFiles: [{ name: 'existing.7z', size: 5 }]
   }];
 
   const queued = await manager.queueCatalogRecordsForCompression(['uncompressed-upgrade']);
   assert.equal(queued.queuedCount, 1);
   assert.equal(manager.jobs[0].sourceCatalogRecordId, 'uncompressed-upgrade');
   assert.equal(manager.jobs[0].stageText, '库内项目压缩 · 等待压缩');
+  assert.deepEqual(manager.jobs[0].nameDuplicateMatches, []);
+  assert.deepEqual(manager.jobs[0].similarMatches, []);
+  assert.equal(manager.jobs[0].automaticDuplicateCheckPending, false);
   await manager.startQueue();
 
   assert.equal(manager.jobs[0].status, 'completed');
-  assert.equal(manager.catalog.length, 1);
+  assert.equal(manager.catalog.length, 2);
   assert.equal(manager.catalog[0].id, 'uncompressed-upgrade');
   assert.equal(manager.catalog[0].archiveState, 'compressed');
   assert.equal(manager.catalog[0].tags.includes('未压缩'), false);

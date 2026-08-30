@@ -283,6 +283,11 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
     const manifest = hooks.preparedManifest || await buildManifest(job.sourcePath, job.sourceType, {
         signal,
         pauseController,
+        largeFolderSimplification: job.largeFolderSimplification ?? config.largeFolderSimplification,
+        largeFolderFileThreshold: job.largeFolderFileThreshold ?? config.largeFolderFileThreshold,
+        skipTinyMd5Files: job.skipTinyMd5Files ?? config.skipTinyMd5Files,
+        tinyFileMd5ThresholdBytes: job.tinyFileMd5ThresholdBytes ?? config.tinyFileMd5ThresholdBytes,
+        onPlan: hooks.onInventoryPlan,
         onProgress: (progress) => {
           onProgress(progress.percent);
           if (progress.currentFile) hooks.onInventoryProgress?.(progress);

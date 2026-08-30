@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.5.12",
+  "notes": {
+    "zh-CN": [
+      "队列新增可选的“卡顿规避”，超大文件夹可抽取 200 个代表文件参与 MD5 和文件级相似度计算。",
+      "代表文件同时覆盖大文件和完整目录中的不同位置，避免只取开头文件。",
+      "极小文件可先跳过再补足代表样本；完整清单、归档内容和源文件变化校验不受影响。",
+      "队列相似报告遵循任务入队时保存的卡顿规避设置。"
+    ],
+    "en-US": [
+      "Queue settings add optional stall avoidance, allowing very large folders to sample 200 representative files for MD5 and file-level similarity.",
+      "Representative files cover both large content and different positions across the full directory instead of only taking the first files.",
+      "Tiny files can be excluded before filling the sample; the complete manifest, archived content, and source-change checks remain unaffected.",
+      "Queue similarity reports follow the stall-avoidance settings captured when each task is added."
+    ]
+  }
+}

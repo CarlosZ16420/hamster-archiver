@@ -10,7 +10,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 本地优先 · 批量归档 · 媒体预览 · 便携数据
 
-![Version](https://img.shields.io/badge/version-4.5.9-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.5.13-d45f3c?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
@@ -29,7 +29,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 - 📁 下载文件夹里堆了几个 TB 的视频和图片，**找起来像考古**
 - 🔁 同一个资源**重复下载了 3 次才想起来**"好像已经存过了"
-- ，🗂 想整理，但**一打开文件夹就放弃了**
+- 🗂 想整理，但**一打开文件夹就放弃了**
 - 😰 备份到云盘，但**文件凌乱**，传上去就再也找不到
 - 🔒 不想把私人媒体交给**云相册的 AI 扫描**
 
@@ -113,13 +113,13 @@ Local-first batch archiver and searchable media vault for Windows.
 
 1. 在 [Releases](../../releases) 下载 Windows x64 压缩包。
 2. 完整解压后运行 `HamsterArchiver.exe`。
-3. 选择“需要备份的文件主目录”和“打包后文件存放点”，先扫描并确认任务，再开始压缩入库。
+3. 可先填写“需备份目录”，也可直接点击“扫描目录”再选择；填写必需的“压缩后保存在”，确认任务后开始压缩入库。
 
 请保留发行包的目录结构，不要只复制 EXE。Electron、7-Zip 与 FFmpeg 依赖完整发行目录；用户数据区默认是旁边的 `userdata`，也可以在“更多设置”中安全复制或切换到其他目录。
 
 ### 自动更新失败时手动更新
 
-点击应用左上角的“检查更新”，选择手动更新，导入最新版本的压缩包。当
+点击应用左上角的“检查更新”，选择手动更新，导入最新版本的压缩包。应用会在替换前显示包内更新内容，并在新版本首次启动后再次提示；后台检查不会强制更新或主动弹窗。
 
 1. 从 [Releases](../../releases) 下载最新 Windows x64 压缩包，无需解压。
 2. 在旧应用中，点击应用左上角的“检查更新”，选择手动更新，选择最新版本的压缩包。
@@ -155,7 +155,7 @@ npm start
 ## 便携数据布局
 
 ```text
-HamsterArchiver-v4.5.9-win-x64/
+HamsterArchiver-v4.5.13-win-x64/
 ├─ HamsterArchiver.exe
 ├─ tools/
 │  ├─ 7zip/
@@ -169,7 +169,7 @@ HamsterArchiver-v4.5.9-win-x64/
    └─ electron/     # 本地界面缓存
 ```
 
-压缩暂存目录默认建立在“打包后文件存放点”旁，例如 `D:\packed-staging`，以减少跨盘移动。待备份主目录和成品存放点由用户选择，不属于源码或用户数据库。
+压缩暂存目录默认建立在“压缩后保存在”所选位置旁，例如 `D:\packed-staging`，以减少跨盘移动。需备份目录和成品存放点由用户选择，不属于源码或用户数据库。
 
 用户数据区可能包含密码、文件路径、缩略图和仓库索引。它被 Git 忽略，也不会进入公开快照；通过“更多设置”切换位置时，空目标会先复制数据且保留旧目录，已有数据目标不会与当前仓库自动合并。
 

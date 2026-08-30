@@ -10,6 +10,16 @@
     if (moveCompleted) return { state: 'move', label: '归档后移动原文件' };
     return { state: 'keep', label: '归档后不移动原文件' };
   },
+  shouldShowDuplicateConfirmation(job = {}) {
+    if (job.sourceCatalogRecordId || job.duplicateConfirmedAt) return false;
+    if (job.status === 'awaiting_duplicate_confirmation') return true;
+    if (job.status === 'queued' && (job.automaticDuplicateCheckPending === true ||
+      (job.stageText === '等待精确重复核验' && (job.confirmationReasons || []).some((reason) =>
+        ['name_match', 'similar_title', 'same_video_size'].includes(reason))))) return true;
+    if (job.status !== 'awaiting_confirmation' || (job.confirmationReasons || []).includes('large_task')) return false;
+    return (job.confirmationReasons || []).some((reason) =>
+      ['name_match', 'similar_title', 'same_video_size'].includes(reason));
+  },
   similarityProgressPresentation(progress = {}) {
     const total = Math.max(1, Number(progress.total) || 1);
     const completed = Math.max(0, Number(progress.completed) || 0);

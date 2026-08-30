@@ -8,6 +8,7 @@ const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const { verifyFileIntegrityEntries } = require('./tool-integrity');
 const { compareVersions } = require('./update-checker');
+const { compactReleaseNotesPayload } = require('./release-notes');
 
 const execFileAsync = promisify(execFile);
 const UPDATE_LAUNCH_TIMEOUT_MS = 8_000;
@@ -162,6 +163,48 @@ function normalizeVersion(value) {
   return String(value || '').trim().replace(/^v(?=\d)/i, '');
 }
 
+async function writeUpdateSuccessNotice(prepared) {
+  const noticeFile = path.join(prepared.runRoot, 'update-notice.json');
+  const payload = {
+    schemaVersion: 1,
+    fromVersion: normalizeVersion(prepared.currentVersion),
+    toVersion: normalizeVersion(prepared.version),
+    source: prepared.source === 'package' ? 'package' : 'automatic',
+    releaseUrl: String(prepared.releaseUrl || '').slice(0, 2_000),
+    releaseNotes: compactReleaseNotesPayload(prepared.releaseNotes),
+    preparedAt: new Date().toISOString()
+  };
+  await fsp.writeFile(noticeFile, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  return noticeFile;
+}
+
+async function readUpdateSuccessNotice({ userDataDirectory, noticeFile, currentVersion }) {
+  if (!noticeFile) return null;
+  const updatesRoot = path.join(path.resolve(userDataDirectory), 'updates');
+  const resolvedNoticeFile = path.resolve(String(noticeFile));
+  const relative = path.relative(updatesRoot, resolvedNoticeFile);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error('更新完成提示文件不在受信任的用户数据更新目录中。');
+  }
+  let notice;
+  try {
+    notice = JSON.parse((await fsp.readFile(resolvedNoticeFile, 'utf8')).replace(/^\uFEFF/, ''));
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw new Error(`无法读取更新完成提示：${error.message}`);
+  }
+  if (notice.schemaVersion !== 1) throw new Error('更新完成提示版本不受支持。');
+  const toVersion = normalizeVersion(notice.toVersion);
+  if (!toVersion || toVersion !== normalizeVersion(currentVersion)) return null;
+  return {
+    fromVersion: normalizeVersion(notice.fromVersion),
+    toVersion,
+    source: notice.source === 'package' ? 'package' : 'automatic',
+    releaseUrl: String(notice.releaseUrl || '').slice(0, 2_000),
+    releaseNotes: compactReleaseNotesPayload(notice.releaseNotes)
+  };
+}
+
 async function fetchDigestSidecar(url, fetchImpl) {
   if (!url) return '';
   const parsed = new URL(String(url));
@@ -258,7 +301,7 @@ async function validateUpdatePackage(packageRoot, currentVersion, expectedVersio
     throw new Error(`所选更新包版本 ${version} 不高于当前版本 ${normalizeVersion(currentVersion)}。`);
   }
   await verifyFileIntegrityEntries(packageRoot, manifest.integrity?.files);
-  return { manifest, version };
+  return { manifest, version, releaseNotes: compactReleaseNotesPayload(manifest.releaseNotes) };
 }
 
 async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath, currentVersion, release, fetchImpl, onProgress = () => {} }) {
@@ -279,9 +322,19 @@ async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath,
     if (actualDigest !== expectedDigest) throw new Error('更新包 SHA256 校验失败，文件可能已损坏。');
     await extractArchive(sevenZipPath, archivePath, extractRoot);
     const packageRoot = await locatePackageRoot(extractRoot);
-    await validateUpdatePackage(packageRoot, currentVersion, release.latestVersion);
+    const validated = await validateUpdatePackage(packageRoot, currentVersion, release.latestVersion);
     onProgress({ stage: 'prepared', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
-    return { runRoot, packageRoot, archivePath, version: release.latestVersion, currentVersion, applicationRoot: path.resolve(applicationRoot) };
+    return {
+      runRoot,
+      packageRoot,
+      archivePath,
+      version: release.latestVersion,
+      currentVersion,
+      applicationRoot: path.resolve(applicationRoot),
+      source: 'automatic',
+      releaseUrl: release.releaseUrl,
+      releaseNotes: compactReleaseNotesPayload(release.releaseNotes) || validated.releaseNotes
+    };
   } catch (error) {
     await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
     throw error;
@@ -323,7 +376,7 @@ async function prepareLocalUpdate({
     await extractArchive(sevenZipPath, archivePath, extractRoot);
     const packageRoot = await locatePackageRoot(extractRoot);
     onProgress({ stage: 'verifying', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
-    const { version } = await validateUpdatePackage(packageRoot, currentVersion);
+    const { version, releaseNotes } = await validateUpdatePackage(packageRoot, currentVersion);
     onProgress({ stage: 'prepared', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
     return {
       runRoot,
@@ -331,7 +384,9 @@ async function prepareLocalUpdate({
       archivePath,
       version,
       currentVersion,
-      applicationRoot: path.resolve(applicationRoot)
+      applicationRoot: path.resolve(applicationRoot),
+      source: 'package',
+      releaseNotes
     };
   } catch (error) {
     await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
@@ -385,6 +440,7 @@ async function launchUpdate({ prepared, targetPid }, {
   const launcherScriptPath = path.join(prepared.runRoot, 'launch-update.ps1');
   const startedFile = path.join(prepared.runRoot, 'started.json');
   const launcherLogPath = path.join(prepared.runRoot, 'launcher.log');
+  const noticeFile = await writeUpdateSuccessNotice(prepared);
   await fsp.writeFile(scriptPath, `\uFEFF${APPLY_UPDATE_SCRIPT}`, 'utf8');
   await fsp.writeFile(launcherScriptPath, `\uFEFF${UPDATE_LAUNCHER_SCRIPT}`, 'utf8');
   const launcherLogFd = fs.openSync(launcherLogPath, 'a');
@@ -405,6 +461,7 @@ async function launchUpdate({ prepared, targetPid }, {
         HAMSTER_UPDATE_STAGE_ROOT: prepared.packageRoot,
         HAMSTER_UPDATE_RUN_ROOT: prepared.runRoot,
         HAMSTER_UPDATE_VALIDATION_FILE: validationFile,
+        HAMSTER_UPDATE_NOTICE_FILE: noticeFile,
         HAMSTER_UPDATE_TARGET_PID: String(targetPid),
         HAMSTER_UPDATE_VERSION: String(prepared.version)
       }
@@ -442,6 +499,7 @@ async function launchUpdate({ prepared, targetPid }, {
     scriptPath,
     launcherScriptPath,
     launcherLogPath,
+    noticeFile,
     runRoot: prepared.runRoot,
     updaterPid: child.pid
   };
@@ -523,6 +581,8 @@ module.exports = {
   launchUpdate,
   cleanupSuccessfulUpdateRuns,
   consumeUpdateFailure,
+  readUpdateSuccessNotice,
+  writeUpdateSuccessNotice,
   manualUpdateInstructions,
   resolvePowerShellExecutable,
   waitForUpdaterStart,

@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const {
+  shouldShowDuplicateConfirmation,
   similarityProgressPresentation,
   sourceDispositionPresentation
 } = require('../src/renderer/ui-state');
@@ -42,8 +43,16 @@ test('queue scan actions stay grouped and right-aligned', () => {
 
 test('maintenance paths are selectable and usage guide is the final footer action', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
 
-  assert.match(html, /id="select-user-data"[^>]*>选择<\/button>/);
+  assert.match(html, /id="user-data-path"[^>]*spellcheck="false"/);
+  assert.match(html, /id="user-data-path"[^>]*readonly/);
+  assert.match(html, /id="select-user-data"[^>]*>切换<\/button>/);
+  assert.doesNotMatch(app, /userDataPathDirty|changeUserDataLocation\(requestedPath\)/);
+  assert.match(preload, /changeUserDataLocation:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('user-data:change-location'\)/);
+  assert.match(main, /ipcMain\.handle\('user-data:change-location', async \(event\)[\s\S]*?dialog\.showOpenDialog/);
   assert.match(html, /id="archive-staging-directory"[^>]*><button data-pick="archive-staging-directory"/);
   assert.match(html, /欢迎反馈<\/button>[\s\S]*id="open-usage-guide"[^>]*>使用说明<\/button>[\s\S]*<\/footer>/);
 });
@@ -86,16 +95,74 @@ test('similarity settings use the standard nested background without a repeated 
   assert.doesNotMatch(app, /rebuildSimilarity\.disabled\s*&&\s*!progress\?\.active/);
 });
 
-test('theme picker exposes the two curated themes with complete style blocks', () => {
+test('theme picker exposes Forest and Twilight, migrates old values and keeps semantic contrast', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
 
-  assert.match(html, /<option value="celadon">青瓷<\/option>/);
-  assert.match(html, /<option value="plum">暮紫<\/option>/);
-  assert.match(app, /THEME_VALUES = \['classic', 'day', 'night', 'celadon', 'plum'\]/);
-  assert.match(styles, /body\[data-theme="celadon"\]\s*\{[^}]*--accent:/s);
-  assert.match(styles, /body\[data-theme="plum"\]\s*\{[^}]*--accent:/s);
+  assert.match(html, /<option value="forest">森林<\/option>/);
+  assert.match(html, /<option value="twilight">暮光<\/option>/);
+  assert.doesNotMatch(html, /青瓷|暮紫|value="celadon"|value="plum"/);
+  assert.match(app, /THEME_VALUES = \['classic', 'day', 'night', 'forest', 'twilight'\]/);
+  assert.match(app, /THEME_ALIASES = Object\.freeze\(\{ celadon: 'forest', plum: 'twilight' \}\)/);
+  assert.match(app, /const migratedTheme = THEME_ALIASES\[theme\] \|\| theme/);
+  assert.match(main, /const themes = \['classic', 'day', 'night', 'forest', 'twilight'\]/);
+  assert.doesNotMatch(styles, /body\[data-theme="(?:celadon|plum)"\]/);
+
+  const luminance = (hex) => {
+    const channels = hex.slice(1).match(/.{2}/g).map((part) => Number.parseInt(part, 16) / 255)
+      .map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+  };
+  const contrast = (left, right) => {
+    const [bright, dark] = [luminance(left), luminance(right)].sort((a, b) => b - a);
+    return (bright + 0.05) / (dark + 0.05);
+  };
+  for (const theme of ['forest', 'twilight']) {
+    const block = styles.match(new RegExp(`body\\[data-theme="${theme}"\\]\\s*\\{([^}]*)\\}`, 's'))?.[1] || '';
+    const variables = Object.fromEntries([...block.matchAll(/--([\w-]+):\s*(#[0-9a-f]{6})/gi)]
+      .map((match) => [match[1], match[2].toLowerCase()]));
+    assert.match(block, /color-scheme:\s*(?:light|dark)/);
+    for (const required of ['ink', 'muted', 'paper', 'panel', 'field', 'line', 'accent', 'accent-soft',
+      'focus-ring', 'ok-fg', 'ok-bg', 'warn-fg', 'warn-bg', 'danger-fg', 'danger-bg',
+      'info-fg', 'info-bg', 'neutral-fg', 'neutral-bg', 'on-accent']) {
+      assert.match(block, new RegExp(`--${required}:`), `${theme} is missing --${required}`);
+    }
+    assert.ok(contrast(variables.ink, variables.panel) >= 7, `${theme} primary text contrast`);
+    assert.ok(contrast(variables.muted, variables.panel) >= 4.5, `${theme} secondary text contrast`);
+    assert.ok(contrast(variables['on-accent'], variables.accent) >= 4.5, `${theme} accent action contrast`);
+    for (const state of ['ok', 'warn', 'danger', 'info']) {
+      assert.ok(contrast(variables[`${state}-fg`], variables[`${state}-bg`]) >= 4.5,
+        `${theme} ${state} prompt contrast`);
+    }
+    assert.equal(new Set(['ok-bg', 'warn-bg', 'danger-bg', 'info-bg', 'neutral-bg']
+      .map((name) => variables[name])).size, 5, `${theme} prompt colors must remain distinct`);
+  }
+  assert.match(styles, /\.language-toggle:hover\s*\{[^}]*background:\s*var\(--accent-soft\)/s);
+  assert.doesNotMatch(styles, /var\(--(?:panel-strong|input-bg)\)/);
+});
+
+test('duplicate continuation appears in every actionable duplicate state but never for warehouse compression or large-task confirmation', () => {
+  assert.equal(shouldShowDuplicateConfirmation({
+    status: 'awaiting_confirmation', confirmationReasons: ['name_match']
+  }), true);
+  assert.equal(shouldShowDuplicateConfirmation({
+    status: 'queued', automaticDuplicateCheckPending: true
+  }), true);
+  assert.equal(shouldShowDuplicateConfirmation({
+    status: 'queued', stageText: '等待精确重复核验', confirmationReasons: ['name_match']
+  }), true);
+  assert.equal(shouldShowDuplicateConfirmation({ status: 'awaiting_duplicate_confirmation' }), true);
+  assert.equal(shouldShowDuplicateConfirmation({
+    status: 'awaiting_confirmation', confirmationReasons: ['large_task', 'name_match']
+  }), false);
+  assert.equal(shouldShowDuplicateConfirmation({
+    status: 'queued', automaticDuplicateCheckPending: true, sourceCatalogRecordId: 'warehouse-record'
+  }), false);
+  assert.equal(shouldShowDuplicateConfirmation({
+    status: 'queued', automaticDuplicateCheckPending: true, duplicateConfirmedAt: '2026-08-30T00:00:00.000Z'
+  }), false);
 });
 
 test('manual package update is offered from check for updates instead of a separate header button', () => {
@@ -107,17 +174,91 @@ test('manual package update is offered from check for updates instead of a separ
   assert.match(main, /\['Automatic update', 'Manual update', 'Open release page', 'Later'\]/);
 });
 
+test('manual update checks and successful restarts both surface release notes', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+  const checker = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'update-checker.js'), 'utf8');
+  const manager = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'update-manager.js'), 'utf8');
+
+  assert.match(checker, /releaseNotes:\s*compactReleaseNotesPayload\(release\.body\)/);
+  assert.match(main, /appendReleaseNotes\([\s\S]*result\.releaseNotes/);
+  assert.match(main, /showUpdateSuccessDialog\(pendingUpdateSuccess\)/);
+  assert.match(manager, /HAMSTER_UPDATE_NOTICE_FILE:\s*noticeFile/);
+});
+
+test('safety halt uses the shared styled dialog instead of a bare warning box', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+
+  assert.match(html, /id="trash-safety-dialog"[^>]*safety-dialog/);
+  assert.match(html, /class="safety-dialog-hero"/);
+  assert.match(html, /class="safety-dialog-checklist"/);
+  assert.match(styles, /\.safety-dialog-hero\s*\{/);
+  assert.match(styles, /\.safety-dialog-status\s*\{/);
+});
+
+test('backup location remains manually editable even before recording is enabled', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const control = app.match(/function updateBackupLocationControl\(\) \{([\s\S]*?)\n\}/)?.[1] || '';
+
+  assert.doesNotMatch(control, /backupLocation\.disabled/);
+  assert.match(control, /backupLocation\.required = enabled/);
+});
+
+test('renderer confirmations use one themed dialog instead of browser confirm boxes', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+
+  assert.match(html, /id="confirm-dialog"[^>]*confirm-dialog/);
+  assert.doesNotMatch(app, /window\.confirm\(/);
+  assert.match(app, /function confirmUser\(message, options = \{\}\)/);
+});
+
 test('compact settings copy and activity colors follow the current UI specification', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
 
   for (const removed of ['备份位置词条', '将已备份文件移动到', '关闭后保留已有相似关系，新入库项目不再计算',
     '集中保存设置、仓库数据库、缩略图、已处理文件和当前用户的一份运行日志；切换时保留旧目录',
     '点击任务行的复选框可进行批量操作']) {
     assert.doesNotMatch(html, new RegExp(removed));
   }
-  assert.match(html, />切换时保留旧目录<\/small>/);
-  assert.match(html, />多选可进行批量操作<\/span>/);
+  assert.match(html, />切换时保留旧目录，确认后重启应用生效<\/small>/);
+  assert.doesNotMatch(html, /多选可进行批量操作/);
+  assert.match(html, /id="auto-skip-exact-duplicates"/);
+  assert.match(html, /id="similarity-report-enabled"[^>]*checked/);
+  assert.match(html, /id="queue-similarity-report-dialog"/);
+  assert.match(html, /文件数量、相对文件名、文件大小和内容核验全部一致/);
+  assert.match(html, /class="queue-threshold-clause"[\s\S]*?id="large-folder-file-threshold"[\s\S]*?>的文件夹，<\/span><\/span>/);
+  assert.match(app, /actionButton\('相似报告', 'similarity-report'/);
+  assert.doesNotMatch(app, /Ctrl.*多选/);
+  assert.ok(
+    app.indexOf("actionButton('确认重复并继续'") < app.indexOf("actionButton('取消'"),
+    'duplicate continuation must remain immediately before cancel in the action order'
+  );
+  assert.match(app, /exact-duplicate-mark/);
+  assert.match(app, /row\.classList\.toggle\('exact-entry', hasExactDuplicate\)/);
+  assert.match(app, /const similar = !exact && overlaps\(redRanges, start, end\)/);
+  assert.match(app, /workspace-page' && suspendedQueueSimilarityReport && activeQueueSimilarityReportJobId/);
+  assert.match(styles, /\.virtual-tree-row\.exact-entry\s*\{[^}]*background:\s*var\(--warn-bg\)/s);
+  assert.doesNotMatch(styles, /\.virtual-tree-row\.exact-entry\s*\{[^}]*box-shadow:/s);
+  assert.match(styles, /\.exact-duplicate-mark\s*\{[^}]*border:\s*1px solid var\(--amber\)/s);
+  assert.match(styles, /\.virtual-tree-row\.directory\s*\{[^}]*color:\s*var\(--ink\)[^}]*background:\s*var\(--panel\)/s);
+  assert.match(styles, /\.virtual-tree-row\.directory > \.virtual-tree-icon\s*\{[^}]*color:\s*var\(--muted\)[^}]*background:\s*var\(--panel-tint\)/s);
+  assert.match(styles, /\.virtual-tree-row\.directory\.collapsible:not\(\.similar-entry\):not\(\.exact-entry\):hover\s*\{[^}]*background:\s*var\(--neutral-bg\)/s);
+  assert.doesNotMatch(styles, /\.virtual-tree-row\.directory\.collapsible[^\{]*:hover\s*\{[^}]*(?:accent|danger)/s);
+  assert.match(styles, /\.catalog-text-row:hover\s*\{[^}]*background:\s*var\(--neutral-bg\)/s);
+  assert.doesNotMatch(styles, /\.catalog-text-row:hover\s*\{[^}]*(?:accent|danger)/s);
+  assert.match(styles, /\.catalog-text-row\.active,\s*\.catalog-text-row\.selected\s*\{[^}]*background:\s*var\(--ok-bg\)/s);
+  assert.match(styles, /\.catalog-text-row\.selected\s*\{[^}]*box-shadow:\s*inset 3px 0 var\(--ok-fg\)/s);
+  assert.doesNotMatch(styles, /\.catalog-text-row:hover,\s*\.catalog-text-row\.active/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8'),
+    /inspectSmokeVisualColorStates[\s\S]*hoverBackground === result\.neutralHoverBackground[\s\S]*directoryIconColor === result\.mutedColor/);
+  assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8'),
+    /CSS\.forcePseudoState[\s\S]*forcedPseudoClasses:\s*\['hover'\]/);
+  assert.match(app, /const host = mark\.closest\('dialog\[open\]'\) \|\| document\.body/);
+  assert.match(styles, /\.queue-similarity-directory \.virtual-directory-tree\s*\{[^}]*height:\s*240px/s);
+  assert.match(styles, /\.location-panel \.help-tip::after\s*\{[^}]*left:\s*-72px;[^}]*width:\s*min\(300px,/s);
   const activityBlocks = [...styles.matchAll(/--activity-1:\s*(#[0-9a-f]{6})[\s\S]*?--activity-4:\s*(#[0-9a-f]{6})/gi)];
   assert.equal(activityBlocks.length, 5);
   for (const [, low, high] of activityBlocks) {
@@ -133,10 +274,26 @@ test('compact settings copy and activity colors follow the current UI specificat
   }
 });
 
+test('warehouse selection and search recovery update in place without rebuilding the result list', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+
+  assert.match(app, /function syncCatalogItemState\(\)/);
+  assert.match(app, /activeCatalogId = recordId;\s*syncCatalogItemState\(\);/);
+  assert.doesNotMatch(app, /activeCatalogId = recordId;\s*renderCatalog\(currentCatalogResults\);/);
+  assert.match(app, /catalogSearch\.addEventListener\('search', runCatalogSearchNow\)/);
+  assert.match(app, /selectAllCatalog\.addEventListener\('change',[\s\S]*?syncCatalogItemState\(\);/);
+  assert.match(html, /class="brand-icon" src="\.\.\/\.\.\/assets\/app-icon\.ico" width="32" height="32"/);
+  assert.match(styles, /\.catalog-detail \.archive-heading\s*\{\s*background:\s*var\(--panel\)/);
+  assert.match(styles, /\.compression-options-row\s*\{[^}]*border-top:\s*1px dashed var\(--line-strong\)/s);
+  assert.doesNotMatch(styles, /\.archive-password-setting\s*\{[^}]*border-top:/s);
+});
+
 test('catalog detail rendering ignores stale rapid-selection responses', () => {
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
   assert.match(app, /let catalogDetailRequest = 0/);
-  assert.match(app, /requestId === catalogDetailRequest && activeCatalogId === recordId/);
+  assert.match(app, /requestId !== catalogDetailRequest \|\| activeCatalogId !== recordId\) return/);
   assert.match(app, /record\.id !== activeCatalogId\) return/);
 });
 
@@ -146,18 +303,60 @@ test('catalog tag filter always includes the possible-duplicate virtual option',
   assert.match(app, /possibleDuplicateFilter = '__possible_duplicate__'/);
 });
 
+test('catalog single and bulk tag editors share comma-aware autocomplete', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+
+  assert.match(html, /<script src="tag-autocomplete\.js"><\/script>/);
+  assert.match(html, /id="bulk-tags-input"[^>]*>/);
+  assert.match(app, /function tagAutocompleteOptions\(\)/);
+  assert.match(app, /label: t\('标签自动补全'\)/);
+  assert.match(app, /acceptHint: t\('按 Tab 补全'\)/);
+  assert.match(app, /bindTagAutocomplete\(elements\.bulkTagsInput, tagAutocompleteOptions\(\)\)/);
+  assert.match(app, /bindTagAutocomplete\(tagsInput, tagAutocompleteOptions\(\)\)/);
+});
+
+test('queue settings lock and roll back while processing is active', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+
+  assert.match(app, /function setConfigControlsLocked\(locked\)/);
+  assert.match(app, /setConfigControlsLocked\(state\.running\)/);
+  assert.match(app, /if \(currentState\?\.running\) \{[\s\S]*?renderConfig\(currentState\.config\)[\s\S]*?return null;/);
+  assert.match(app, /else if \(currentState\?\.config\) \{[\s\S]*?renderConfig\(currentState\.config\)/);
+});
+
+test('recent native dialogs follow the selected interface language', () => {
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+
+  for (const englishLabel of [
+    'Archive tasks are still running',
+    'Choose the 7-Zip program',
+    'Choose warehouse location (saves)',
+    'Export warehouse as an archive',
+    'Choose an external warehouse archive',
+    'Video files'
+  ]) {
+    assert.match(main, new RegExp(`english \\? '${englishLabel.replace(/[()]/g, '\\$&')}'`));
+  }
+});
+
 test('name-similarity highlights expose a guarded one-click whitelist action', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
   const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
 
   assert.match(app, /match\.reason === '目录名相似' \|\| match\.reason === '文件名相似'/);
   assert.match(app, /mark\.dataset\.whitelistTerm = mark\.textContent/);
+  assert.match(app, /similarityWhitelistInput\.value = term/);
   assert.match(app, /window\.archiveApp\.addSimilarityIgnoreTerm\(term\)/);
   assert.match(app, /event\.key !== 'Enter' && event\.key !== ' '/);
-  assert.match(main, /加入白名单的词语会在相似度计算中排除，您可以在相似度设置中手动编辑白名单/);
-  assert.match(main, /checkboxLabel: isEnglish \? 'Do not remind me again' : '下次不再提醒'/);
+  assert.match(html, /id="similarity-whitelist-dialog"/);
+  assert.match(html, /以下词汇在相似度计算中将被忽略/);
+  assert.match(html, /id="similarity-whitelist-input"[^>]*required/);
+  assert.doesNotMatch(main, /checkboxLabel: isEnglish \? 'Do not remind me again' : '下次不再提醒'/);
   assert.match(styles, /\.similarity-whitelist-action\s*\{[^}]*position:\s*fixed;[^}]*z-index:\s*1000;/s);
+  assert.match(styles, /\.similarity-whitelist-dialog \.dialog-help\s*\{/);
 });
 
 test('warehouse browsing keeps compact controls, root folders, backup locations and keyboard paging visible', () => {

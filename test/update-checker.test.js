@@ -16,11 +16,16 @@ test('manual update check reports a newer GitHub release', async () => {
     fetchImpl: async () => ({
       ok: true,
       status: 200,
-      json: async () => ({ tag_name: 'v2.0.0', html_url: 'https://example.test/release' })
+      json: async () => ({
+        tag_name: 'v2.0.0',
+        html_url: 'https://example.test/release',
+        body: '- 新增更新说明。'
+      })
     })
   });
   assert.equal(result.updateAvailable, true);
   assert.equal(result.latestVersion, '2.0.0');
+  assert.equal(result.releaseNotes, '- 新增更新说明。');
 });
 
 test('4.2.0-era clients recognize v-prefixed 4.4.x releases', async () => {

@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('archiveApp', {
   scanSource: (intakeDirectory) => ipcRenderer.invoke('source:scan', intakeDirectory),
   addSingle: (sourcePath) => ipcRenderer.invoke('task:add-single', sourcePath),
   openTaskSource: (jobId) => ipcRenderer.invoke('task:open-source', jobId),
+  getQueueSimilarityReport: (jobId) => ipcRenderer.invoke('task:similarity-report', jobId),
   getDroppedPath: (file) => webUtils.getPathForFile(file),
   confirmTask: (jobId) => ipcRenderer.invoke('task:confirm', jobId),
   confirmAnomaly: (jobId) => ipcRenderer.invoke('task:confirm-anomaly', jobId),

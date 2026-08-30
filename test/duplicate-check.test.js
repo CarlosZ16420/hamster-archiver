@@ -5,6 +5,8 @@ const test = require('node:test');
 const {
   documentTerms,
   findExactFileMatches,
+  findExactProjectMatches,
+  findExactProjectShapeMatches,
   findSimilarEntryMatches,
   findSimilarProjects,
   findTaskNameMatches,
@@ -39,6 +41,38 @@ test('exact duplicate check uses file size and MD5 together', () => {
   }]);
   assert.equal(matches.length, 1);
   assert.equal(matches[0].previous[0].relativePath, 'old/video.mp4');
+});
+
+test('exact project matching requires the complete file set, names, sizes and content', () => {
+  const manifest = [
+    { relativePath: 'Photos/Cover.JPG', size: 10, md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    { relativePath: 'video.mp4', size: 20, md5: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }
+  ];
+  const catalog = [
+    { id: 'exact', displayName: '完全一致', manifest: [...manifest].reverse() },
+    { id: 'renamed', displayName: '文件改名', manifest: manifest.map((file, index) => index === 0 ? { ...file, relativePath: 'Photos/Other.JPG' } : file) },
+    { id: 'partial', displayName: '缺少文件', manifest: manifest.slice(0, 1) },
+    { id: 'changed', displayName: '内容不同', manifest: manifest.map((file, index) => index === 1 ? { ...file, md5: 'cccccccccccccccccccccccccccccccc' } : file) }
+  ];
+
+  assert.deepEqual(findExactProjectMatches(manifest, catalog).map((record) => record.id), ['exact']);
+  assert.deepEqual(findExactProjectMatches(manifest, catalog, 'exact'), []);
+  assert.deepEqual(findExactProjectMatches(manifest.map((file, index) => index === 0 ? { ...file, md5: undefined } : file), catalog), []);
+  assert.deepEqual(findExactProjectShapeMatches(manifest, catalog).map((record) => record.id), ['exact', 'changed']);
+});
+
+test('files outside a representative MD5 sample still enter name and path similarity diagnostics', () => {
+  const subject = {
+    id: 'new', displayName: '当前项目', sourceType: 'directory',
+    manifest: [{ relativePath: 'ignored/same-video.mp4', name: 'same-video.mp4', extension: '.mp4', size: 123, similarityEligible: false }]
+  };
+  const candidate = {
+    id: 'old', displayName: '历史项目', sourceType: 'directory',
+    manifest: [{ relativePath: 'same-video.mp4', name: 'same-video.mp4', extension: '.mp4', size: 123 }]
+  };
+  const matches = findSimilarEntryMatches(subject, [candidate]);
+  assert.equal(matches.length, 1);
+  assert.ok(matches[0].matches.some((match) => match.reason === '视频大小完全一致'));
 });
 
 test('local title similarity detects reordered Chinese meaning but ignores generic titles', () => {
@@ -145,6 +179,52 @@ test('similar directory entries report exact paths and highlight ranges', () => 
     entry.matches.some((match) => match.reason === '文件内容完全一致')));
 });
 
+test('exact file evidence has separate gold ranges and can come from outside linked similarity candidates', () => {
+  const subject = {
+    directories: [],
+    manifest: [{
+      relativePath: '资料/完全相同.txt', name: '完全相同.txt', extension: '.txt', size: 12,
+      md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    }]
+  };
+  const exactRecord = {
+    id: 'exact-record', title: '另一个仓库项目', directories: [],
+    manifest: [{
+      relativePath: '备份/完全相同.txt', name: '完全相同.txt', extension: '.txt', size: 12,
+      md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    }]
+  };
+
+  const matches = findSimilarEntryMatches(subject, [], [], { exactCandidates: [exactRecord] });
+  const file = matches.find((entry) => entry.relativePath === '资料/完全相同.txt');
+  assert.ok(file);
+  assert.deepEqual(file.similarRanges, []);
+  assert.deepEqual(file.exactRanges, [[0, '完全相同.txt'.length]]);
+  assert.ok(file.matches.some((match) => match.recordId === 'exact-record' && match.reason === '文件内容完全一致'));
+});
+
+test('every file in an exact duplicate project receives a full gold range', () => {
+  const manifest = [
+    { relativePath: '资料/图片.jpg', name: '图片.jpg', extension: '.jpg', size: 12, md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' },
+    { relativePath: '视频/正片.mp4', name: '正片.mp4', extension: '.mp4', size: 34, md5: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }
+  ];
+  const exactRecord = {
+    id: 'exact-project', title: '仓库中的相同项目', directories: ['资料', '视频'], manifest
+  };
+
+  const matches = findSimilarEntryMatches({ directories: ['资料', '视频'], manifest }, [], [], {
+    exactCandidates: [exactRecord]
+  });
+
+  const files = matches.filter((entry) => entry.kind === 'file');
+  assert.equal(files.length, manifest.length);
+  for (const file of files) {
+    const expectedName = manifest.find((entry) => entry.relativePath === file.relativePath).name;
+    assert.deepEqual(file.exactRanges, [[0, expectedName.length]]);
+    assert.ok(file.matches.some((match) => match.reason === '文件内容完全一致'));
+  }
+});
+
 test('original root folder names expose highlight ranges for the one-click whitelist action', () => {
   const matches = findSimilarEntryMatches({
     sourceType: 'directory',
@@ -163,6 +243,21 @@ test('original root folder names expose highlight ranges for the one-click white
   const root = matches.find((entry) => entry.kind === 'directory' && entry.relativePath === '');
   assert.ok(root?.ranges.length > 0);
   assert.ok(root.matches.some((match) => match.reason === '目录名相似' && match.relativePath === ''));
+});
+
+test('identical root and nested folder names receive gold ranges even when the term is ignored', () => {
+  const matches = findSimilarEntryMatches({
+    sourceType: 'directory', displayName: 'かすみ', directories: ['下载'], manifest: []
+  }, [{
+    id: 'other', title: '仓库项目', sourceType: 'directory', displayName: 'かすみ', directories: ['下载'], manifest: []
+  }], ['下载']);
+
+  const root = matches.find((entry) => entry.kind === 'directory' && entry.relativePath === '');
+  const nested = matches.find((entry) => entry.kind === 'directory' && entry.relativePath === '下载');
+  assert.deepEqual(root.exactRanges, [[0, 'かすみ'.length]]);
+  assert.deepEqual(nested.exactRanges, [[0, '下载'.length]]);
+  assert.ok(root.matches.some((match) => match.reason === '目录名完全一致'));
+  assert.ok(nested.matches.some((match) => match.reason === '目录名完全一致'));
 });
 
 test('a short title or one shared boilerplate term cannot mark unrelated projects as duplicates', () => {

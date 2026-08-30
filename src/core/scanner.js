@@ -60,7 +60,7 @@ async function scanIntakeDirectory(intakeDirectory, options = {}) {
   const minimumBytes = options.minimumBytes > 0 ? Number(options.minimumBytes) : 0;
   const stats = await fs.stat(intakeDirectory);
   if (!stats.isDirectory()) {
-    throw new Error('所选主目录不是文件夹。');
+    throw new Error('所选目录不是文件夹。');
   }
 
   const entries = await fs.readdir(intakeDirectory, { withFileTypes: true });

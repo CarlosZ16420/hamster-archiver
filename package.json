@@ -1,7 +1,8 @@
 {
   "name": "hamster-archiver",
-  "version": "4.5.9",
+  "version": "4.5.13",
   "private": true,
+  "author": "CarlosZ16420",
   "license": "MIT",
   "description": "Hamster Archiver：本地优先的归档与备份管理工具",
   "repository": {
@@ -24,6 +25,7 @@
     "migrate:portable": "node scripts/migrate-to-portable-userdata.js",
     "icon:build": "electron scripts/generate-app-icon.js",
     "build:release": "node scripts/build-release.js",
+    "build:installer": "node scripts/build-installer.js",
     "check:layout": "node scripts/verify-workspace-layout.js",
     "verify:version": "node scripts/verify-version.js",
     "release:local": "node scripts/release-local.js",
@@ -35,6 +37,7 @@
   },
   "devDependencies": {
     "electron": "43.4.0",
+    "electron-builder": "26.15.7",
     "resedit": "3.0.2"
   }
 }

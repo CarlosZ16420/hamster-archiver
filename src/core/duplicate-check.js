@@ -151,6 +151,67 @@ function findExactFileMatches(manifest, catalog) {
   return matches;
 }
 
+function exactProjectManifestKey(manifest) {
+  if (!Array.isArray(manifest) || manifest.length === 0) return '';
+  const entries = [];
+  for (const file of manifest) {
+    const relativePath = normalizeEntryPath(file?.relativePath || file?.name)
+      .normalize('NFKC')
+      .toLocaleLowerCase('zh-CN');
+    const size = Number(file?.size);
+    const md5 = String(file?.md5 || '').trim().toLocaleLowerCase('en-US');
+    if (!relativePath || !Number.isFinite(size) || size < 0 || !/^[a-f0-9]{32}$/.test(md5)) return '';
+    entries.push(`${relativePath}\u0000${size}\u0000${md5}`);
+  }
+  return entries.sort((left, right) => left.localeCompare(right, 'zh-CN')).join('\n');
+}
+
+function exactProjectShapeKey(manifest) {
+  if (!Array.isArray(manifest) || manifest.length === 0) return '';
+  const entries = [];
+  for (const file of manifest) {
+    const relativePath = normalizeEntryPath(file?.relativePath || file?.name)
+      .normalize('NFKC')
+      .toLocaleLowerCase('zh-CN');
+    const size = Number(file?.size);
+    if (!relativePath || !Number.isFinite(size) || size < 0) return '';
+    entries.push(`${relativePath}\u0000${size}`);
+  }
+  return entries.sort((left, right) => left.localeCompare(right, 'zh-CN')).join('\n');
+}
+
+function findExactProjectShapeMatches(manifest, catalog, excludedRecordId = '') {
+  const targetKey = exactProjectShapeKey(manifest);
+  if (!targetKey) return [];
+  return (catalog || []).filter((record) =>
+    record?.id !== excludedRecordId &&
+    Array.isArray(record?.manifest) &&
+    record.manifest.length === manifest.length &&
+    exactProjectShapeKey(record.manifest) === targetKey
+  ).map((record) => ({
+    id: record.id,
+    title: record.title || record.displayName || '',
+    displayName: record.displayName || record.title || '',
+    fileCount: record.manifest.length
+  })).slice(0, 20);
+}
+
+function findExactProjectMatches(manifest, catalog, excludedRecordId = '') {
+  const targetKey = exactProjectManifestKey(manifest);
+  if (!targetKey) return [];
+  return (catalog || []).filter((record) =>
+    record?.id !== excludedRecordId &&
+    Array.isArray(record?.manifest) &&
+    record.manifest.length === manifest.length &&
+    exactProjectManifestKey(record.manifest) === targetKey
+  ).map((record) => ({
+    id: record.id,
+    title: record.title || record.displayName || '',
+    displayName: record.displayName || record.title || '',
+    fileCount: record.manifest.length
+  })).slice(0, 20);
+}
+
 const GENERIC_TITLES = new Set([
   '新建文件夹', '未命名文件夹', '视频', '照片', '图片', '相册', 'video', 'videos', 'image', 'images', 'photo', 'photos', 'img',
   'sample', 'making', 'menu', 'bonus', 'trailer', '预告', '花絮', '正片'
@@ -576,7 +637,16 @@ function entryName(relativePath) {
   return parts.at(-1) || '';
 }
 
-function findSimilarEntryMatches(subject, candidates, ignoreTerms = []) {
+function exactEntryNameKey(value) {
+  return String(value || '').trim().normalize('NFKC').toLocaleLowerCase('zh-CN');
+}
+
+function isMeaningfulExactEntryName(value) {
+  const compact = exactEntryNameKey(value).replace(/[^\p{L}\p{N}]+/gu, '');
+  return compact.length >= 2 && !/^\d+$/u.test(compact);
+}
+
+function findSimilarEntryMatches(subject, candidates, ignoreTerms = [], options = {}) {
   const matches = new Map();
   const subjectDirectories = (subject.directories || []).map((relativePath) => ({
     kind: 'directory', relativePath: normalizeEntryPath(relativePath), name: entryName(relativePath)
@@ -593,6 +663,7 @@ function findSimilarEntryMatches(subject, candidates, ignoreTerms = []) {
   }));
 
   const textIndex = new Map();
+  const exactDirectoryNameIndex = new Map();
   const exactFileIndex = new Map();
   const videoSizeIndex = new Map();
   const addIndex = (index, key, entry) => {
@@ -605,17 +676,35 @@ function findSimilarEntryMatches(subject, candidates, ignoreTerms = []) {
     if (candidate.sourceType === 'directory' && String(candidate.displayName || '').trim()) {
       const entry = { ...common, kind: 'directory', relativePath: '', name: String(candidate.displayName).trim() };
       for (const key of similarityCandidateKeys({ title: entry.name }, ignoreTerms)) addIndex(textIndex, `directory:${key}`, entry);
+      if (isMeaningfulExactEntryName(entry.name)) addIndex(exactDirectoryNameIndex, exactEntryNameKey(entry.name), entry);
     }
     for (const relativePath of candidate.directories || []) {
       const entry = { ...common, kind: 'directory', relativePath: normalizeEntryPath(relativePath), name: entryName(relativePath) };
       for (const key of similarityCandidateKeys({ title: entry.name }, ignoreTerms)) addIndex(textIndex, `directory:${key}`, entry);
+      if (isMeaningfulExactEntryName(entry.name)) addIndex(exactDirectoryNameIndex, exactEntryNameKey(entry.name), entry);
     }
     for (const file of candidate.manifest || []) {
       const entry = { ...common, kind: 'file', relativePath: normalizeEntryPath(file.relativePath), name: file.name || entryName(file.relativePath), file };
       for (const key of similarityCandidateKeys({ title: entry.name }, ignoreTerms)) addIndex(textIndex, `file:${key}`, entry);
-      if (file.md5 && Number(file.size) >= 0) addIndex(exactFileIndex, `${Number(file.size)}:${String(file.md5).toLocaleLowerCase()}`, entry);
       if (VIDEO_EXTENSIONS.has(String(file.extension || path.extname(entry.name)).toLocaleLowerCase()) && Number(file.size) > 0) {
         addIndex(videoSizeIndex, String(Number(file.size)), entry);
+      }
+    }
+  }
+  const exactCandidates = Array.isArray(options.exactCandidates) ? options.exactCandidates : candidates;
+  for (const candidate of exactCandidates || []) {
+    const common = { recordId: candidate.id, title: candidate.title || candidate.displayName || '' };
+    for (const file of candidate.manifest || []) {
+      if (!file?.md5) continue;
+      const entry = {
+        ...common,
+        kind: 'file',
+        relativePath: normalizeEntryPath(file.relativePath),
+        name: file.name || entryName(file.relativePath),
+        file
+      };
+      if (Number(file.size) >= 0) {
+        addIndex(exactFileIndex, `${Number(file.size)}:${String(file.md5).toLocaleLowerCase()}`, entry);
       }
     }
   }
@@ -623,13 +712,24 @@ function findSimilarEntryMatches(subject, candidates, ignoreTerms = []) {
   for (const sourceDirectory of subjectDirectories) {
     const targets = new Set(similarityCandidateKeys({ title: sourceDirectory.name }, ignoreTerms)
       .flatMap((key) => textIndex.get(`directory:${key}`) || []));
+    for (const target of exactDirectoryNameIndex.get(exactEntryNameKey(sourceDirectory.name)) || []) targets.add(target);
     for (const targetDirectory of targets) {
-      const ranges = textMatchRanges(sourceDirectory.name, targetDirectory.name, ignoreTerms);
+      const exactName = exactEntryNameKey(sourceDirectory.name) === exactEntryNameKey(targetDirectory.name);
+      const ranges = exactName
+        ? [[0, sourceDirectory.name.length]]
+        : textMatchRanges(sourceDirectory.name, targetDirectory.name, ignoreTerms);
       if (ranges.length === 0) continue;
       const key = `directory:${sourceDirectory.relativePath}`;
-      const current = matches.get(key) || { kind: 'directory', relativePath: sourceDirectory.relativePath, ranges: [], matches: [] };
-      current.ranges.push(...ranges);
-      current.matches.push({ recordId: targetDirectory.recordId, title: targetDirectory.title, relativePath: targetDirectory.relativePath, reason: '目录名相似' });
+      const current = matches.get(key) || {
+        kind: 'directory', relativePath: sourceDirectory.relativePath, similarRanges: [], exactRanges: [], matches: []
+      };
+      (exactName ? current.exactRanges : current.similarRanges).push(...ranges);
+      current.matches.push({
+        recordId: targetDirectory.recordId,
+        title: targetDirectory.title,
+        relativePath: targetDirectory.relativePath,
+        reason: exactName ? '目录名完全一致' : '目录名相似'
+      });
       matches.set(key, current);
     }
   }
@@ -655,8 +755,10 @@ function findSimilarEntryMatches(subject, candidates, ignoreTerms = []) {
           : textMatchRanges(sourceFile.name, targetFile.name, ignoreTerms);
         if (ranges.length === 0) continue;
         const key = `file:${sourceFile.relativePath}`;
-        const current = matches.get(key) || { kind: 'file', relativePath: sourceFile.relativePath, ranges: [], matches: [] };
-        current.ranges.push(...ranges);
+        const current = matches.get(key) || {
+          kind: 'file', relativePath: sourceFile.relativePath, similarRanges: [], exactRanges: [], matches: []
+        };
+        (exactContent ? current.exactRanges : current.similarRanges).push(...ranges);
         current.matches.push({
           recordId: targetFile.recordId,
           title: targetFile.title,
@@ -667,16 +769,23 @@ function findSimilarEntryMatches(subject, candidates, ignoreTerms = []) {
     }
   }
 
-  return [...matches.values()].map((entry) => {
+  const mergeRanges = (ranges) => {
     const merged = [];
-    for (const range of entry.ranges.sort((left, right) => left[0] - right[0])) {
+    for (const range of ranges.sort((left, right) => left[0] - right[0])) {
       const previous = merged.at(-1);
       if (previous && range[0] <= previous[1]) previous[1] = Math.max(previous[1], range[1]);
       else merged.push([...range]);
     }
+    return merged;
+  };
+  return [...matches.values()].map((entry) => {
+    const similarRanges = mergeRanges(entry.similarRanges || []);
+    const exactRanges = mergeRanges(entry.exactRanges || []);
     return {
       ...entry,
-      ranges: merged,
+      similarRanges,
+      exactRanges,
+      ranges: mergeRanges([...similarRanges, ...exactRanges]),
       matches: entry.matches.filter((match, index, items) => items.findIndex((candidate) =>
         candidate.recordId === match.recordId && candidate.relativePath === match.relativePath && candidate.reason === match.reason
       ) === index).slice(0, 20)
@@ -712,6 +821,8 @@ module.exports = {
   createSimilarityScorer,
   documentTerms,
   findExactFileMatches,
+  findExactProjectMatches,
+  findExactProjectShapeMatches,
   findSimilarEntryMatches,
   findSimilarProjects,
   findTaskNameMatches,

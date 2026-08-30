@@ -56,7 +56,7 @@ test('source selection can be queued before an output directory is configured', 
   }, 'E:\\incoming\\tiny-folder'));
   assert.throws(() => validateSourceSelection({
     archiveOutputDirectory: 'E:\\incoming\\tiny-folder\\packed'
-  }, 'E:\\incoming\\tiny-folder'), /打包后文件存放点/);
+  }, 'E:\\incoming\\tiny-folder'), /压缩包存储点/);
   assert.throws(() => validateSourceSelection({
     repositoryDirectory: 'E:\\portable-app\\userdata\\warehouse'
   }, 'E:\\portable-app\\userdata\\warehouse\\accidental-source'), /仓库位置/);

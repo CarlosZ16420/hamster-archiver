@@ -28,6 +28,24 @@ const releaseNotes = path.join(projectRoot, 'docs', 'releases', `release-notes-v
 if (!fs.existsSync(releaseNotes)) {
   errors.push(`缺少 docs/releases/release-notes-v${version}.md`);
 }
+const releaseSummaryPath = path.join(projectRoot, 'docs', 'releases', `release-summary-v${version}.json`);
+if (!fs.existsSync(releaseSummaryPath)) {
+  errors.push(`缺少 docs/releases/release-summary-v${version}.json`);
+} else {
+  try {
+    const releaseSummary = JSON.parse(fs.readFileSync(releaseSummaryPath, 'utf8'));
+    if (releaseSummary.schemaVersion !== 1 || releaseSummary.version !== version) {
+      errors.push(`release-summary-v${version}.json 的结构版本或产品版本不一致`);
+    }
+    for (const locale of ['zh-CN', 'en-US']) {
+      if (!Array.isArray(releaseSummary.notes?.[locale]) || releaseSummary.notes[locale].length === 0) {
+        errors.push(`release-summary-v${version}.json 缺少 ${locale} 更新内容`);
+      }
+    }
+  } catch (error) {
+    errors.push(`release-summary-v${version}.json 无法解析：${error.message}`);
+  }
+}
 if (process.argv.includes('--tag')) {
   const tag = execFileSync('git', ['describe', '--tags', '--exact-match', 'HEAD'], {
     cwd: projectRoot,

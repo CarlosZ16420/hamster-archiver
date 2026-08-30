@@ -29,6 +29,8 @@ function makeLocalLayout(projectRoot = path.resolve(__dirname, '..', '..'), env 
     stagingRoot: path.join(root, 'builds', 'staging'),
     currentBuild: path.join(root, 'builds', 'current'),
     packageRoot: path.join(root, 'builds', 'packages'),
+    installerRoot: path.join(root, 'builds', 'installers'),
+    installerStagingRoot: path.join(root, 'builds', 'installer-staging'),
     historyRoot: path.join(root, 'builds', 'history'),
     productionData: path.join(root, 'data', 'production'),
     developmentData: path.join(root, 'data', 'development'),
