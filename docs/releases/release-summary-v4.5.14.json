@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "version": "4.5.14",
+  "notes": {
+    "zh-CN": [
+      "修复黑夜与暮光主题下主题选择菜单白底浅色文字、选项难以辨认的问题。",
+      "主题下拉选项现在同时使用当前主题的字段背景和正文色，浅色主题也保持一致。"
+    ],
+    "en-US": [
+      "Fixes low-contrast theme menu options that appeared as light text on a white popup in Night and Twilight.",
+      "Theme options now use the active theme's field background and primary text color across both dark and light themes."
+    ]
+  }
+}

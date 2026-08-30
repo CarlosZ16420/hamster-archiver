@@ -290,6 +290,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .hero-actions { display: flex; align-items: center; gap: 10px; }
 .theme-picker { display: flex; align-items: center; gap: 6px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); background: var(--panel); font-size: 11px; font-weight: 750; }
 .theme-picker select { padding: 2px 20px 2px 3px; border: 0; color: var(--ink); background: transparent; font-size: 11px; font-weight: 750; }
+.theme-picker option { color: var(--ink); background: var(--field); }
 .language-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 999px; color: var(--ink); background: var(--panel); font: inherit; font-size: 11px; font-weight: 800; letter-spacing: .04em; cursor: pointer; }
 .language-toggle:hover { border-color: var(--accent); color: var(--accent-dark); background: var(--accent-soft); }
 .language-toggle:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 35%, transparent); outline-offset: 2px; }

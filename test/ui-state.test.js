@@ -140,6 +140,7 @@ test('theme picker exposes Forest and Twilight, migrates old values and keeps se
       .map((name) => variables[name])).size, 5, `${theme} prompt colors must remain distinct`);
   }
   assert.match(styles, /\.language-toggle:hover\s*\{[^}]*background:\s*var\(--accent-soft\)/s);
+  assert.match(styles, /\.theme-picker option\s*\{[^}]*color:\s*var\(--ink\)[^}]*background:\s*var\(--field\)/s);
   assert.doesNotMatch(styles, /var\(--(?:panel-strong|input-bg)\)/);
 });
 
