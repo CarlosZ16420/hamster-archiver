@@ -10,7 +10,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 Local-first · Batch archiving · Media previews · Portable data
 
-![Version](https://img.shields.io/badge/version-4.5.16-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.5.17-d45f3c?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
@@ -60,7 +60,7 @@ Hamster Archiver first scans folders and videos into a queue, then lets you choo
   Each project contains thumbnails from images and videos as well as the complete directory structure. Every preview is stored as a thumbnail so the warehouse preserves useful context without growing unnecessarily large.
 
 - Customize compression parameters, sampled video frames, per-project thumbnail limits and other settings.
-- Name similarity is a non-blocking candidate hint. Once the queue starts, complete content fingerprints can auto-skip exact duplicates according to your setting, while genuine similarity needs only one review.
+- Name similarity is a non-blocking candidate hint. Once the queue starts, complete content fingerprints can auto-skip complete project duplicates according to your setting, while genuine similarity needs only one review.
 - Pause for human confirmation when an unusually large task or abnormal compression ratio is detected.
 - Keep, move or recycle original files only after compression, integrity verification and warehouse registration all succeed.
 
@@ -85,7 +85,7 @@ Hamster Archiver first scans folders and videos into a queue, then lets you choo
 ### Search, duplicates and similarity
 
 - SQLite + FTS5 provides persistent indexes. Chinese search uses character and bigram candidates; Latin text is indexed by word.
-- A project fingerprint index narrows candidates before complete relative paths, sizes and MD5 values strictly confirm an exact duplicate. Similarity analysis stays entirely local.
+- A project fingerprint index narrows candidates before complete relative paths, sizes and MD5 values strictly confirm a complete project duplicate. Similarity analysis stays entirely local.
 - File-level duplicate evidence uses batched SQLite lookups, and older warehouses backfill project fingerprints automatically instead of repeatedly scanning the whole catalog.
 - Similarity can be recalculated for one project, and a relationship can be dismissed manually; dismissals are saved symmetrically.
 - The similarity whitelist is editable, and highlighted repeated terms in project details can be added to it with one click.
@@ -109,18 +109,18 @@ Hamster Archiver first scans folders and videos into a queue, then lets you choo
 
 ### Use a release directly
 
-1. Download the Windows x64 ZIP from [Releases](../../releases).
-2. Extract the complete package and run `HamsterArchiver.exe`.
+1. Download either the Windows x64 ZIP (portable) or Setup EXE (installed) from [Releases](../../releases).
+2. Extract the complete portable package and run `HamsterArchiver.exe`, or run Setup and choose the installation directory and desktop-shortcut option.
 3. Optionally set Directory to back up, or click Scan directory and choose it then. Scanning only fills the queue; review any warnings and choose compressed or uncompressed intake explicitly.
 
 Keep the complete release directory. Do not copy only the EXE: Electron, 7-Zip and FFmpeg depend on the complete package. The user data area defaults to the adjacent `userdata` directory and can be safely copied or switched under More settings.
 
 ### Manual update when automatic update is unavailable
 
-Update details are shown before replacement and once more when the new version first starts. Background checks remain silent and never force an update.
+Update details are shown before replacement and once more when the new version first starts. Choose a newer ZIP for the portable edition or a newer Setup EXE for the installed edition. Background checks remain silent and never force an update.
 
-1. Download the latest Windows x64 ZIP from [Releases](../../releases) without extracting it.
-2. In the old app, select Check for updates, choose Manual update and select the new release ZIP.
+1. Download the matching Windows x64 ZIP or Setup EXE from [Releases](../../releases); do not extract the ZIP.
+2. In the old app, select Check for updates, choose Manual update and select the downloaded release file.
 3. After updating, confirm that the version, warehouse records and thumbnails are correct.
 
 ### Move a warehouse
@@ -151,7 +151,7 @@ The source repository does not commit the large `ffmpeg.exe`. `dependency-lock.j
 ## Portable data layout
 
 ```text
-HamsterArchiver-v4.5.16-win-x64/
+HamsterArchiver-v4.5.17-win-x64/
 ├─ HamsterArchiver.exe
 ├─ tools/
 │  ├─ 7zip/
@@ -180,7 +180,7 @@ The user data area can contain passwords, paths, thumbnails and warehouse indexe
 | Performance | Warehouse pagination, virtualized directory trees, persistent search and similarity candidate indexes |
 | Privacy | User data stays on the local machine; warehouse data, media and passwords are not uploaded |
 
-The app does not upload files. It contacts GitHub only when you select Check for updates or open a GitHub link. Update packages are downloaded to a temporary area under `userdata`, verified and then applied by an independent update helper. Uploading archives remains the responsibility of your cloud-storage client or manual workflow.
+The app does not upload files. It contacts GitHub only when you select Check for updates or open a GitHub link. Portable ZIPs and installed-edition Setup packages are downloaded to a temporary user-data area and verified before the independent updater or installer applies them. Uploading archives remains the responsibility of your cloud-storage client or manual workflow.
 
 ## Development and contribution
 

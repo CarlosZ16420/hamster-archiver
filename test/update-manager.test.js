@@ -14,13 +14,16 @@ const {
   UPDATE_LAUNCHER_SCRIPT,
   consumeUpdateFailure,
   hashFile,
+  installedPackageVersion,
+  launchInstalledUpdate,
   validateUpdatePackage,
   launchUpdate,
   manualUpdateInstructions,
   normalizeDigest,
   normalizeVersion,
   readUpdateSuccessNotice,
-  resolvePowerShellExecutable
+  resolvePowerShellExecutable,
+  validateInstalledPackageVersion
 } = require('../src/core/update-manager');
 const { createFileIntegrityEntries } = require('../src/core/tool-integrity');
 
@@ -182,6 +185,19 @@ test('update launch waits for updater handshake before returning', async (t) => 
   assert.deepEqual(notice.releaseNotes['en-US'], ['Fixed updates.']);
 });
 
+test('installed update accepts only a strictly named newer Setup package', () => {
+  assert.equal(installedPackageVersion('D:\\Downloads\\HamsterArchiver-Setup-v4.5.17-win-x64.exe'), '4.5.17');
+  assert.equal(validateInstalledPackageVersion(
+    'D:\\Downloads\\HamsterArchiver-Setup-v4.5.17-win-x64.exe', '4.5.16', 'v4.5.17'
+  ), '4.5.17');
+  assert.throws(() => validateInstalledPackageVersion(
+    'D:\\Downloads\\HamsterArchiver-v4.5.17-win-x64.zip', '4.5.16'
+  ), /安装程序/);
+  assert.throws(() => validateInstalledPackageVersion(
+    'D:\\Downloads\\HamsterArchiver-Setup-v4.5.16-win-x64.exe', '4.5.16'
+  ), /不高于当前版本/);
+});
+
 test('new version reads an updater notice only from its trusted updates directory', async (t) => {
   const userDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-update-success-'));
   t.after(() => fs.rm(userDataRoot, { recursive: true, force: true }));
@@ -203,6 +219,12 @@ test('new version reads an updater notice only from its trusted updates director
   assert.equal(notice.fromVersion, '4.5.12');
   assert.equal(notice.toVersion, '4.5.13');
   assert.deepEqual(notice.releaseNotes['zh-CN'], ['显示本次更新。']);
+  const discovered = await readUpdateSuccessNotice({
+    userDataDirectory: userDataRoot,
+    currentVersion: '4.5.13'
+  });
+  assert.equal(discovered.noticeFile, noticeFile);
+  assert.equal(discovered.runRoot, runRoot);
   assert.equal(await readUpdateSuccessNotice({
     userDataDirectory: userDataRoot,
     noticeFile,
@@ -215,6 +237,44 @@ test('new version reads an updater notice only from its trusted updates director
     noticeFile: outsideNotice,
     currentVersion: '4.5.13'
   }), /不在受信任/);
+});
+
+test('installed update launches the verified installer visibly and leaves a release-note notice', async (t) => {
+  const userDataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-installed-update-'));
+  t.after(() => fs.rm(userDataRoot, { recursive: true, force: true }));
+  const runRoot = path.join(userDataRoot, 'updates', 'installer-4.5.17-test');
+  await fs.mkdir(runRoot, { recursive: true });
+  const installerPath = path.join(runRoot, 'HamsterArchiver-Setup-v4.5.17-win-x64.exe');
+  await fs.writeFile(installerPath, 'installer');
+  const child = new EventEmitter();
+  child.pid = 4321;
+  child.unref = () => { child.unreferenced = true; };
+  let launch;
+  const result = await launchInstalledUpdate({
+    prepared: {
+      runRoot,
+      installerPath,
+      currentVersion: '4.5.16',
+      version: '4.5.17',
+      source: 'automatic',
+      releaseNotes: { 'zh-CN': ['安装版更新。'], 'en-US': ['Installed update.'] }
+    }
+  }, {
+    spawnImpl: (file, args, options) => {
+      launch = { file, args, options };
+      queueMicrotask(() => child.emit('spawn'));
+      return child;
+    }
+  });
+  assert.equal(launch.file, installerPath);
+  assert.deepEqual(launch.args, []);
+  assert.equal(launch.options.windowsHide, false);
+  assert.equal(launch.options.detached, true);
+  assert.equal(child.unreferenced, true);
+  assert.equal(result.installerPid, 4321);
+  const notice = JSON.parse(await fs.readFile(result.noticeFile, 'utf8'));
+  assert.equal(notice.toVersion, '4.5.17');
+  assert.deepEqual(notice.releaseNotes['en-US'], ['Installed update.']);
 });
 
 test('update launch reports a PowerShell spawn failure and keeps diagnostics', async (t) => {
@@ -266,6 +326,14 @@ test('manual update guide recommends warehouse export and import instead of copy
   const englishGuide = manualUpdateInstructions('en-US');
   assert.match(englishGuide, /Import external warehouse/i);
   assert.doesNotMatch(englishGuide, /copy.*userdata/i);
+});
+
+test('installed manual update guide uses the newer Setup package and stable app identity', () => {
+  const guide = manualUpdateInstructions('zh-CN', 'installed');
+  assert.match(guide, /HamsterArchiver-Setup-vX\.Y\.Z-win-x64\.exe/);
+  assert.match(guide, /升级当前用户下的已有安装/);
+  assert.match(guide, /保留用户数据/);
+  assert.doesNotMatch(guide, /导出仓库/);
 });
 
 test('Windows updater completes a real PowerShell handshake and writes failure diagnostics', {

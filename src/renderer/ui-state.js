@@ -14,12 +14,30 @@
     if (job.sourceCatalogRecordId || job.exactDuplicateOverrideAt) return false;
     if (job.status === 'awaiting_duplicate_confirmation') return true;
     if (job.status === 'queued' && (job.automaticDuplicateCheckPending === true ||
-      (job.stageText === '等待精确重复核验' && (job.confirmationReasons || []).some((reason) =>
+      (job.stageText === '等待内容完全一致核验' && (job.confirmationReasons || []).some((reason) =>
         ['name_match', 'similar_title', 'same_video_size'].includes(reason))))) return true;
     if (job.similarityPreflightBlocking === false || job.status !== 'awaiting_confirmation' ||
         (job.confirmationReasons || []).includes('large_task')) return false;
     return (job.confirmationReasons || []).some((reason) =>
       ['name_match', 'similar_title', 'same_video_size'].includes(reason));
+  },
+  shouldApplyTaskProgress(job = {}, progress = {}) {
+    const runningStages = new Set(['inventorying', 'compressing', 'verifying', 'moving']);
+    return runningStages.has(job.status) && job.status === progress.stage;
+  },
+  queueSimilarityEvidenceText(project = {}) {
+    if ((project.reasons || []).includes('项目完全重复')) return '项目完全重复';
+    const details = [];
+    if (project.exactFileCount > 0) details.push(`${project.exactFileCount} 个文件内容完全一致`);
+    if (project.exactDirectoryCount > 0) details.push(`${project.exactDirectoryCount} 个目录名称完全一致`);
+    if (project.similarFileCount > 0) details.push(`${project.similarFileCount} 个文件名称相似`);
+    if (project.similarDirectoryCount > 0) details.push(`${project.similarDirectoryCount} 个目录名称相似`);
+    for (const reason of project.reasons || []) {
+      if (!['项目完全重复', '文件内容完全一致', '文件名相似', '目录名相似', '目录名完全一致'].includes(reason)) {
+        details.push(reason);
+      }
+    }
+    return [...new Set(details)].join(' · ') || '项目存在相似证据';
   },
   summarizeScanSkips(items = []) {
     const summary = {

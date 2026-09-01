@@ -50,6 +50,7 @@ async function main() {
     '--config.nsis.oneClick=false',
     '--config.nsis.perMachine=false',
     '--config.nsis.allowToChangeInstallationDirectory=true',
+    '--config.nsis.include=scripts/installer-custom.nsh',
     '--config.nsis.createDesktopShortcut=true',
     '--config.nsis.createStartMenuShortcut=true',
     '--config.nsis.shortcutName=Hamster Archiver',

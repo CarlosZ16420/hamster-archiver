@@ -39,7 +39,6 @@ const {
   completeManifestMd5,
   collectDirectories,
   collectFiles,
-  createFingerprintPlan,
   verifyManifestMd5AgainstCompleteCandidates,
   verifyManifestMd5AgainstReference,
   validateManifestUnchanged
@@ -151,7 +150,7 @@ function hasDuplicateConfirmationReason(job) {
 function hasPendingAutomaticDuplicateCheck(job) {
   return !job?.exactDuplicateOverrideAt && (
     job?.automaticDuplicateCheckPending === true ||
-    (job?.stageText === '等待精确重复核验' && hasDuplicateConfirmationReason(job))
+    (job?.stageText === '等待内容完全一致核验' && hasDuplicateConfirmationReason(job))
   );
 }
 
@@ -484,12 +483,12 @@ class QueueManager extends EventEmitter {
       archiveVolumeBytes: LARGE_TASK_BYTES,
       smallItemFilter: true,
       minimumTaskBytes: 100 * MIB,
-      largeFolderSimplification: false,
+      largeFolderSimplification: true,
       largeFolderFileThreshold: DEFAULT_LARGE_FOLDER_FILE_THRESHOLD,
       largeFolderMd5SampleLimit: DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT,
-      skipTinyMd5Files: false,
+      skipTinyMd5Files: true,
       tinyFileMd5ThresholdBytes: DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES,
-      autoSkipExactDuplicates: false,
+      autoSkipExactDuplicates: true,
       autoSkipExactDuplicateAction: 'keep',
       similarityReportEnabled: true,
       scheduleEnabled: false,
@@ -1736,17 +1735,14 @@ class QueueManager extends EventEmitter {
         manifest = completedRecord.manifest;
       } else {
         const files = await collectFiles(job.sourcePath, job.sourceType);
-        const plan = createFingerprintPlan(files, job.sourceType, {
-          largeFolderSimplification: job.largeFolderSimplification ?? this.config.largeFolderSimplification,
-          largeFolderFileThreshold: job.largeFolderFileThreshold ?? this.config.largeFolderFileThreshold,
-          largeFolderMd5SampleLimit: job.largeFolderMd5SampleLimit ?? this.config.largeFolderMd5SampleLimit,
-          skipTinyMd5Files: job.skipTinyMd5Files ?? this.config.skipTinyMd5Files,
-          tinyFileMd5ThresholdBytes: job.tinyFileMd5ThresholdBytes ?? this.config.tinyFileMd5ThresholdBytes
-        });
         manifest = files.map(({ absolutePath: _absolutePath, ...file }) => {
           return { ...file };
         });
-        fingerprintPending = plan.selectedFiles.length > 0;
+        // The performance safeguard may intentionally skip tiny or unsampled MD5
+        // values in the ordinary manifest. That must never make the report claim
+        // content verification is complete: project-duplicate verification uses
+        // its own full candidate pass when needed.
+        fingerprintPending = manifest.some((file) => !/^[a-f0-9]{32}$/i.test(String(file.md5 || '')));
       }
     }
     const directories = Array.isArray(completedRecord?.directories)
@@ -1800,7 +1796,7 @@ class QueueManager extends EventEmitter {
       for (const reason of match.reasons || []) evidence.reasons.add(reason);
     }
     for (const match of job.exactProjectMatches || []) {
-      ensureEvidence(match.id)?.reasons.add('完整项目精确重复');
+      ensureEvidence(match.id)?.reasons.add('项目完全重复');
     }
     const indexedExactProjectCandidates = this.findIndexedProjectCandidates(
       manifest,
@@ -1808,7 +1804,7 @@ class QueueManager extends EventEmitter {
       subjectCatalogRecordId
     );
     for (const match of findExactProjectMatches(manifest, indexedExactProjectCandidates, subjectCatalogRecordId)) {
-      ensureEvidence(match.id)?.reasons.add('完整项目精确重复');
+      ensureEvidence(match.id)?.reasons.add('项目完全重复');
     }
     for (const entry of similarEntryMatches) {
       for (const match of entry.matches || []) {
@@ -1881,6 +1877,15 @@ class QueueManager extends EventEmitter {
       if (progress) this.emit('progress', progress);
     }, delayMs);
     this.progressEmissionTimer.unref?.();
+  }
+
+  discardPendingProgress(jobId) {
+    if (this.pendingProgress?.jobId !== jobId) return;
+    this.pendingProgress = null;
+    if (this.progressEmissionTimer) {
+      clearTimeout(this.progressEmissionTimer);
+      this.progressEmissionTimer = null;
+    }
   }
 
   resolveProgramPath(configuredPath) {
@@ -2116,6 +2121,7 @@ class QueueManager extends EventEmitter {
       errorCode: null,
       errorMessage: null
     });
+    this.discardPendingProgress(job.id);
     if (removeFromQueue) await this.store.deletePendingManifest(this.config.repositoryDirectory, job.id);
     else if (Array.isArray(manifest)) {
       await this.store.savePendingManifest(this.config.repositoryDirectory, job.id, manifest);
@@ -2126,7 +2132,7 @@ class QueueManager extends EventEmitter {
     if (removeFromQueue) this.jobs = this.jobs.filter((candidate) => candidate.id !== job.id);
     await this.persistJobs();
     const targetSummary = matchedTitles.length > 0 ? `：${matchedTitles.join('、')}` : '';
-    await this.log('info', `自动跳过精确重复项目“${job.displayName}”${targetSummary}；源文件和仓库均未修改，${removeFromQueue ? '队列项已删除' : '队列项已保留'}。`, job.id);
+    await this.log('info', `自动跳过项目完全重复的任务“${job.displayName}”${targetSummary}；源文件和仓库均未修改，${removeFromQueue ? '队列项已删除' : '队列项已保留'}。`, job.id);
   }
 
   async verifyExactProjectMatches(job, manifest) {
@@ -2147,7 +2153,7 @@ class QueueManager extends EventEmitter {
           signal: this.abortController?.signal,
           pauseController: this.pauseController,
           onProgress: (progress) => {
-            job.stageText = `正在筛选精确重复候选：${progress.processedFiles}/${progress.totalFiles} · ${progress.currentFile}`;
+            job.stageText = `正在筛选内容完全一致候选：${progress.processedFiles}/${progress.totalFiles} · ${progress.currentFile}`;
             job.progress = progress.percent;
             this.emitProgressThrottled(job);
           }
@@ -2163,7 +2169,7 @@ class QueueManager extends EventEmitter {
         return { manifest: verificationManifest, matches: candidateMatches, verificationIncomplete: false };
       }
       if (candidateResult.hashedFiles > 0 && candidateResult.matches.length === 0) {
-        await this.log('info', `精确重复候选已提前排除；读取 ${candidateResult.hashedFiles} 个文件后停止完整核验。`, job.id);
+        await this.log('info', `内容完全一致候选已提前排除；读取 ${candidateResult.hashedFiles} 个文件后停止完整核验。`, job.id);
       }
     }
 
@@ -2180,14 +2186,14 @@ class QueueManager extends EventEmitter {
           signal: this.abortController?.signal,
           pauseController: this.pauseController,
           onProgress: (progress) => {
-            job.stageText = `正在核验精确重复：${progress.processedFiles}/${progress.totalFiles} · ${progress.currentFile}`;
+            job.stageText = `正在核验内容完全一致：${progress.processedFiles}/${progress.totalFiles} · ${progress.currentFile}`;
             job.progress = progress.percent;
             this.emitProgressThrottled(job);
           }
         });
     } catch (error) {
       if (error instanceof CancelledError || error.code === 'TASK_CANCELLED' || error.code === 'SOURCE_CHANGED') throw error;
-      await this.log('warning', `精确重复补充核验未完成，继续使用常规重复保护：${error.message}`, job.id);
+      await this.log('warning', `内容完全一致补充核验未完成，继续使用常规重复保护：${error.message}`, job.id);
       return { manifest, matches: [], verificationIncomplete: false };
     }
 
@@ -2251,7 +2257,7 @@ class QueueManager extends EventEmitter {
       }
     }
     if (verificationIncomplete) {
-      await this.log('warning', '精确重复候选核验达到读取预算，未完成的候选已转为人工复核；不会自动跳过。', job.id);
+      await this.log('warning', '内容完全一致候选核验达到读取预算，未完成的候选已转为人工复核；不会自动跳过。', job.id);
     }
     return {
       manifest: verificationManifest,
@@ -2950,9 +2956,9 @@ class QueueManager extends EventEmitter {
       confirmsExactDuplicateOverride
         ? job.duplicateReviewKind === 'similarity'
           ? '用户已确认相似报告，任务复用已生成清单并重新进入队列。'
-          : '用户已确认精确重复提示，任务复用已生成清单并重新进入队列。'
+          : '用户已确认内容完全一致提示，任务复用已生成清单并重新进入队列。'
         : confirmsPreflightSimilarity
-          ? '用户已确认名称或相似项目提示；精确重复核验仍将在生成完整 MD5 后执行。'
+          ? '用户已确认名称或相似项目提示；内容完全一致核验仍将在生成完整 MD5 后执行。'
           : `用户已确认任务风险；大任务将按 ${volumeLabel} 分卷。`,
       job.id
     );
@@ -3169,7 +3175,7 @@ class QueueManager extends EventEmitter {
     job.status = job.requiresConfirmation && !job.confirmedAt ? 'awaiting_confirmation' : 'queued';
     job.stageText = job.status === 'queued'
       ? !hasSelectedIntakeMode(job) ? '等待选择入库方式'
-        : hasPendingAutomaticDuplicateCheck(job) && !job.exactDuplicateOverrideAt ? '等待精确重复核验'
+        : hasPendingAutomaticDuplicateCheck(job) && !job.exactDuplicateOverrideAt ? '等待内容完全一致核验'
           : job.processingMode === 'inventory_only' ? '等待未压缩直接入库'
             : job.sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩'
       : '等待手动确认';
@@ -3180,6 +3186,7 @@ class QueueManager extends EventEmitter {
 
   async updateJob(job, updates) {
     Object.assign(job, updates);
+    if (updates.status && !RUNNING_STATUSES.has(updates.status)) this.discardPendingProgress(job.id);
     await this.persistJobs();
     this.emitState();
   }
@@ -3325,7 +3332,8 @@ class QueueManager extends EventEmitter {
   async removeExactDuplicateJobs() {
     const duplicateIds = this.jobs
       .filter((job) => !RUNNING_STATUSES.has(job.status) && job.status !== 'awaiting_anomaly_confirmation')
-      .filter((job) => (job.exactDuplicateMatches || []).length > 0)
+      .filter((job) => (job.exactDuplicateMatches || []).length > 0 ||
+        (job.exactProjectMatches || []).length > 0)
       .map((job) => job.id);
     if (duplicateIds.length === 0) return { state: this.getState(), removedCount: 0 };
     const state = await this.removeJobs(duplicateIds);
@@ -3599,7 +3607,7 @@ class QueueManager extends EventEmitter {
               exactMatches.length > 0 ? `${exactMatches.length} 个内容完全相同的文件` : null,
               hasNameDuplicate ? '名称可能重复' : null,
               combinedSimilarMatches.length > 0 ? `${combinedSimilarMatches.length} 个相似项目或视频` : null,
-              requiresVerificationReview ? '精确重复候选待人工核对' : null
+              requiresVerificationReview ? '内容完全一致候选待人工核对' : null
             ].filter(Boolean).join('，');
             const review = new Error(`发现${reasons}，需要确认后才能${inventoryOnly ? '直接入库' : '压缩'}。`);
             review.code = 'DUPLICATE_REVIEW_REQUIRED';
@@ -3684,7 +3692,7 @@ class QueueManager extends EventEmitter {
         duplicateReasons: [...new Set([
           ...((job.nameDuplicateMatches || []).length ? ['名称重复'] : []),
           ...(job.similarMatches || []).flatMap((match) => match.reasons || []),
-          ...((job.exactDuplicateMatches || []).length ? ['存在精确重复文件'] : [])
+          ...((job.exactDuplicateMatches || []).length ? ['存在内容完全一致的文件'] : [])
         ])],
         possibleDuplicate: false,
         recordType: 'archive',
@@ -3791,10 +3799,10 @@ class QueueManager extends EventEmitter {
         const exactCount = (error.matches || []).length;
         const similarCount = (error.similarMatches || []).length;
         const reasonText = [
-          projectCount > 0 ? `${projectCount} 个完整项目精确重复` : null,
-          exactCount > 0 ? `${exactCount} 个精确重复文件` : null,
+          projectCount > 0 ? '项目完全重复' : null,
+          exactCount > 0 ? `${exactCount} 个文件内容完全一致` : null,
           similarCount > 0 ? `${similarCount} 个相似项目或视频` : null,
-          error.verificationIncomplete ? '精确重复候选待人工核对' : null
+          error.verificationIncomplete ? '内容完全一致候选待人工核对' : null
         ].filter(Boolean).join('，') || '重复风险';
         await this.updateJob(job, {
           status: 'awaiting_duplicate_confirmation',

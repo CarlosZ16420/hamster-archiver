@@ -5,11 +5,52 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const {
+  queueSimilarityEvidenceText,
+  shouldApplyTaskProgress,
   shouldShowDuplicateConfirmation,
   similarityProgressPresentation,
   summarizeScanSkips,
   sourceDispositionPresentation
 } = require('../src/renderer/ui-state');
+
+test('late running progress cannot overwrite a duplicate-review or auto-skip terminal state', () => {
+  assert.equal(shouldApplyTaskProgress(
+    { status: 'inventorying' }, { stage: 'inventorying' }
+  ), true);
+  assert.equal(shouldApplyTaskProgress(
+    { status: 'awaiting_duplicate_confirmation' }, { stage: 'inventorying' }
+  ), false);
+  assert.equal(shouldApplyTaskProgress(
+    { status: 'skipped_duplicate' }, { stage: 'inventorying' }
+  ), false);
+  assert.equal(shouldApplyTaskProgress(
+    { status: 'compressing' }, { stage: 'inventorying' }
+  ), false);
+});
+
+test('similarity evidence distinguishes identical content from a complete project duplicate', () => {
+  assert.equal(queueSimilarityEvidenceText({
+    exactFileCount: 12,
+    exactDirectoryCount: 3,
+    similarFileCount: 1,
+    similarDirectoryCount: 2,
+    reasons: ['项目完全重复', '项目名称完全一致']
+  }), '项目完全重复');
+  assert.equal(queueSimilarityEvidenceText({
+    exactFileCount: 1,
+    exactDirectoryCount: 0,
+    similarFileCount: 0,
+    similarDirectoryCount: 1,
+    reasons: ['文件内容完全一致', '目录名相似']
+  }), '1 个文件内容完全一致 · 1 个目录名称相似');
+});
+
+test('identical file content marks both the file name and MD5 in the shared directory tree', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  assert.match(app, /hasIdenticalContent[\s\S]*match\.reason === '文件内容完全一致'/);
+  assert.match(app, /hasIdenticalContent && \/\^\[a-f0-9\]\{32\}\$\/i\.test\(md5\)/);
+  assert.match(app, /exact-duplicate-mark exact-content-md5/);
+});
 
 test('source disposition chip has exact text and color state for every selection', () => {
   assert.deepEqual(sourceDispositionPresentation(true, false), {
@@ -188,7 +229,7 @@ test('duplicate continuation appears in every actionable duplicate state but nev
     status: 'queued', automaticDuplicateCheckPending: true
   }), true);
   assert.equal(shouldShowDuplicateConfirmation({
-    status: 'queued', stageText: '等待精确重复核验', confirmationReasons: ['name_match']
+    status: 'queued', stageText: '等待内容完全一致核验', confirmationReasons: ['name_match']
   }), true);
   assert.equal(shouldShowDuplicateConfirmation({ status: 'awaiting_duplicate_confirmation' }), true);
   assert.equal(shouldShowDuplicateConfirmation({

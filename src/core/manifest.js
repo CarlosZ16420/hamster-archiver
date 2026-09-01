@@ -264,14 +264,14 @@ async function completeManifestMd5(sourcePath, sourceType, manifest, options = {
       : Date.parse(String(file.modifiedAt || ''));
     if (beforeStats.size !== Number(file.size) || !Number.isFinite(expectedModifiedAtMs) ||
         Math.abs(beforeStats.mtimeMs - expectedModifiedAtMs) >= 1) {
-      const changed = new Error(`精确重复核验前源文件发生变化：${file.relativePath}`);
+      const changed = new Error(`内容完全一致核验前源文件发生变化：${file.relativePath}`);
       changed.code = 'SOURCE_CHANGED';
       throw changed;
     }
     const md5 = await hashFileMd5(absolutePath, signal, pauseController);
     const afterStats = await fs.stat(absolutePath);
     if (afterStats.size !== beforeStats.size || Math.abs(afterStats.mtimeMs - beforeStats.mtimeMs) >= 1) {
-      const changed = new Error(`精确重复核验期间源文件发生变化：${file.relativePath}`);
+      const changed = new Error(`内容完全一致核验期间源文件发生变化：${file.relativePath}`);
       changed.code = 'SOURCE_CHANGED';
       throw changed;
     }
@@ -345,14 +345,14 @@ async function verifyManifestMd5AgainstCompleteCandidates(sourcePath, sourceType
       : Date.parse(String(file.modifiedAt || ''));
     if (beforeStats.size !== Number(file.size) || !Number.isFinite(expectedModifiedAtMs) ||
         Math.abs(beforeStats.mtimeMs - expectedModifiedAtMs) >= 1) {
-      const changed = new Error(`精确重复核验前源文件发生变化：${file.relativePath}`);
+      const changed = new Error(`内容完全一致核验前源文件发生变化：${file.relativePath}`);
       changed.code = 'SOURCE_CHANGED';
       throw changed;
     }
     const md5 = await hashFileMd5(absolutePath, signal, pauseController);
     const afterStats = await fs.stat(absolutePath);
     if (afterStats.size !== beforeStats.size || Math.abs(afterStats.mtimeMs - beforeStats.mtimeMs) >= 1) {
-      const changed = new Error(`精确重复核验期间源文件发生变化：${file.relativePath}`);
+      const changed = new Error(`内容完全一致核验期间源文件发生变化：${file.relativePath}`);
       changed.code = 'SOURCE_CHANGED';
       throw changed;
     }
@@ -459,7 +459,7 @@ async function verifyManifestMd5AgainstReference(sourcePath, sourceType, candida
       : Date.parse(String(file.modifiedAt || ''));
     if (beforeStats.size !== Number(file.size) || !Number.isFinite(expectedModifiedAtMs) ||
         Math.abs(beforeStats.mtimeMs - expectedModifiedAtMs) >= 1) {
-      const changed = new Error(`精确重复核验前源文件发生变化：${file.relativePath}`);
+      const changed = new Error(`内容完全一致核验前源文件发生变化：${file.relativePath}`);
       changed.code = 'SOURCE_CHANGED';
       throw changed;
     }
@@ -471,7 +471,7 @@ async function verifyManifestMd5AgainstReference(sourcePath, sourceType, candida
     const md5 = await hashFileMd5(absolutePath, signal, pauseController);
     const afterStats = await fs.stat(absolutePath);
     if (afterStats.size !== beforeStats.size || Math.abs(afterStats.mtimeMs - beforeStats.mtimeMs) >= 1) {
-      const changed = new Error(`精确重复核验期间源文件发生变化：${file.relativePath}`);
+      const changed = new Error(`内容完全一致核验期间源文件发生变化：${file.relativePath}`);
       changed.code = 'SOURCE_CHANGED';
       throw changed;
     }

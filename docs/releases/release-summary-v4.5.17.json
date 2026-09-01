@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.5.17",
+  "notes": {
+    "zh-CN": [
+      "修复自动跳过和重复待确认状态被延迟清单进度覆盖的问题；点击队列不再让确认请求消失。",
+      "统一使用“内容完全一致”和“项目完全重复”，并在相似报告与完整目录结构中同时用金色标出一致文件的文件名和 MD5。",
+      "超大文件夹简化处理、极小文件 MD5 跳过和自动跳过改为默认开启，完成后移动默认关闭。",
+      "安装版新增 GitHub 自动更新与离线手动更新；安装器规范 Hamster Archiver 子目录、提供桌面快捷方式选项并修复完成页启动。"
+    ],
+    "en-US": [
+      "Fixed delayed manifest progress overwriting auto-skipped or duplicate-review states, so clicking the queue no longer dismisses a pending review.",
+      "Standardized the terms Identical content and Complete project duplicate, while gold-highlighting both file names and MD5 values in similarity reports and directory details.",
+      "Large-folder simplification, tiny-file MD5 skipping and automatic duplicate skipping now default to on, while moving completed sources defaults to off.",
+      "The installed edition now supports verified GitHub and offline manual updates; the installer normalizes the Hamster Archiver subfolder, offers a desktop-shortcut option and fixes finish-page launch."
+    ]
+  }
+}

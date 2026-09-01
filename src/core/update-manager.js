@@ -128,7 +128,23 @@ catch {
 }
 `;
 
-function manualUpdateInstructions(language = 'zh-CN') {
+function manualUpdateInstructions(language = 'zh-CN', distributionMode = 'portable') {
+  if (distributionMode === 'installed') {
+    if (language === 'en-US') {
+      return [
+        '1. Exit Hamster Archiver completely.',
+        '2. Download the newer HamsterArchiver-Setup-vX.Y.Z-win-x64.exe from GitHub Releases.',
+        '3. Run the installer. Its stable app identity upgrades the existing per-user installation and keeps user data.',
+        '4. On first launch, verify the displayed version and update notes.'
+      ].join('\n');
+    }
+    return [
+      '1. 完全退出 Hamster Archiver。',
+      '2. 从 GitHub Releases 下载更高版本的 HamsterArchiver-Setup-vX.Y.Z-win-x64.exe。',
+      '3. 运行安装程序；稳定的应用标识会升级当前用户下的已有安装，并保留用户数据。',
+      '4. 首次启动后核对显示的版本号和更新内容。'
+    ].join('\n');
+  }
   if (language === 'en-US') {
     return [
       '1. In the old version, use Export warehouse to create a warehouse ZIP, then exit Hamster Archiver completely.',
@@ -179,9 +195,39 @@ async function writeUpdateSuccessNotice(prepared) {
 }
 
 async function readUpdateSuccessNotice({ userDataDirectory, noticeFile, currentVersion }) {
-  if (!noticeFile) return null;
   const updatesRoot = path.join(path.resolve(userDataDirectory), 'updates');
-  const resolvedNoticeFile = path.resolve(String(noticeFile));
+  let resolvedNoticeFile = noticeFile ? path.resolve(String(noticeFile)) : '';
+  if (!resolvedNoticeFile) {
+    let entries;
+    try {
+      entries = await fsp.readdir(updatesRoot, { withFileTypes: true });
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    }
+    const candidates = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(updatesRoot, entry.name, 'update-notice.json');
+      try {
+        const stats = await fsp.stat(candidate);
+        candidates.push({ candidate, modifiedAt: stats.mtimeMs });
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+    candidates.sort((left, right) => right.modifiedAt - left.modifiedAt);
+    for (const candidate of candidates) {
+      try {
+        const notice = JSON.parse((await fsp.readFile(candidate.candidate, 'utf8')).replace(/^\uFEFF/, ''));
+        if (normalizeVersion(notice.toVersion) === normalizeVersion(currentVersion)) {
+          resolvedNoticeFile = candidate.candidate;
+          break;
+        }
+      } catch { /* malformed notices are handled only when selected explicitly */ }
+    }
+    if (!resolvedNoticeFile) return null;
+  }
   const relative = path.relative(updatesRoot, resolvedNoticeFile);
   if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new Error('更新完成提示文件不在受信任的用户数据更新目录中。');
@@ -201,7 +247,9 @@ async function readUpdateSuccessNotice({ userDataDirectory, noticeFile, currentV
     toVersion,
     source: notice.source === 'package' ? 'package' : 'automatic',
     releaseUrl: String(notice.releaseUrl || '').slice(0, 2_000),
-    releaseNotes: compactReleaseNotesPayload(notice.releaseNotes)
+    releaseNotes: compactReleaseNotesPayload(notice.releaseNotes),
+    noticeFile: resolvedNoticeFile,
+    runRoot: path.dirname(resolvedNoticeFile)
   };
 }
 
@@ -339,6 +387,114 @@ async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath,
     await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
+}
+
+function installedPackageVersion(packagePath) {
+  const match = path.basename(String(packagePath || '')).match(/^HamsterArchiver-Setup-v(\d+\.\d+\.\d+)-win-x64\.exe$/i);
+  return match ? match[1] : '';
+}
+
+function validateInstalledPackageVersion(packagePath, currentVersion, expectedVersion = '') {
+  const version = installedPackageVersion(packagePath);
+  if (!version) throw new Error('请选择名称符合 HamsterArchiver-Setup-vX.Y.Z-win-x64.exe 的安装程序。');
+  if (expectedVersion && version !== normalizeVersion(expectedVersion)) {
+    throw new Error('安装程序版本与 Release 标签不一致。');
+  }
+  if (currentVersion && compareVersions(version, normalizeVersion(currentVersion)) <= 0) {
+    throw new Error(`所选安装程序版本 ${version} 不高于当前版本 ${normalizeVersion(currentVersion)}。`);
+  }
+  return version;
+}
+
+async function prepareInstalledUpdate({ userDataDirectory, currentVersion, release, fetchImpl, onProgress = () => {} }) {
+  if (process.platform !== 'win32') throw new Error('安装版自动更新目前仅支持 Windows。');
+  if (!release?.asset?.downloadUrl) throw new Error('这个 Release 没有可用的 Windows 安装程序。');
+  const version = validateInstalledPackageVersion(release.asset.name, currentVersion, release.latestVersion);
+  const expectedDigest = normalizeDigest(release.asset.digest) ||
+    await fetchDigestSidecar(release.asset.digestDownloadUrl, fetchImpl);
+  if (!expectedDigest) throw new Error('Release 缺少安装程序 SHA256 摘要，已停止更新。');
+  const runRoot = path.join(
+    path.resolve(userDataDirectory),
+    'updates',
+    `installer-${version}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
+  );
+  const installerPath = path.join(runRoot, path.basename(release.asset.name));
+  try {
+    await fsp.mkdir(runRoot, { recursive: true });
+    await downloadFile(release.asset.downloadUrl, installerPath, fetchImpl, onProgress);
+    onProgress({ stage: 'verifying', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
+    const actualDigest = await hashFile(installerPath);
+    if (actualDigest !== expectedDigest) throw new Error('安装程序 SHA256 校验失败，文件可能已损坏。');
+    onProgress({ stage: 'prepared', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
+    return {
+      runRoot,
+      installerPath,
+      version,
+      currentVersion,
+      source: 'automatic',
+      releaseUrl: release.releaseUrl,
+      releaseNotes: compactReleaseNotesPayload(release.releaseNotes)
+    };
+  } catch (error) {
+    await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function prepareLocalInstalledUpdate({ userDataDirectory, currentVersion, packagePath, release = null, onProgress = () => {} }) {
+  if (process.platform !== 'win32') throw new Error('从安装程序更新目前仅支持 Windows。');
+  const sourcePath = path.resolve(String(packagePath || '').trim());
+  const version = validateInstalledPackageVersion(sourcePath, currentVersion);
+  let sourceStats;
+  try {
+    sourceStats = await fsp.stat(sourcePath);
+  } catch (error) {
+    if (error.code === 'ENOENT') throw new Error('所选安装程序已经不存在。');
+    throw error;
+  }
+  if (!sourceStats.isFile()) throw new Error('所选安装程序不是文件。');
+  const runRoot = path.join(
+    path.resolve(userDataDirectory),
+    'updates',
+    `installer-local-${version}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
+  );
+  const installerPath = path.join(runRoot, path.basename(sourcePath));
+  try {
+    await fsp.mkdir(runRoot, { recursive: true });
+    onProgress({ stage: 'copying', downloadedBytes: 0, totalBytes: sourceStats.size, percentage: 0 });
+    await fsp.copyFile(sourcePath, installerPath);
+    onProgress({ stage: 'verifying', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
+    validateInstalledPackageVersion(installerPath, currentVersion, version);
+    onProgress({ stage: 'prepared', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
+    return {
+      runRoot,
+      installerPath,
+      version,
+      currentVersion,
+      source: 'package',
+      releaseUrl: release?.releaseUrl || '',
+      releaseNotes: compactReleaseNotesPayload(release?.releaseNotes)
+    };
+  } catch (error) {
+    await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function launchInstalledUpdate({ prepared }, { spawnImpl = spawn } = {}) {
+  const noticeFile = await writeUpdateSuccessNotice(prepared);
+  const child = spawnImpl(prepared.installerPath, [], {
+    cwd: path.dirname(prepared.installerPath),
+    detached: true,
+    windowsHide: false,
+    stdio: 'ignore'
+  });
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve);
+    child.once('error', reject);
+  });
+  child.unref();
+  return { installerPid: child.pid, noticeFile, runRoot: prepared.runRoot };
 }
 
 
@@ -577,6 +733,11 @@ module.exports = {
   hashFile,
   prepareUpdate,
   prepareLocalUpdate,
+  prepareInstalledUpdate,
+  prepareLocalInstalledUpdate,
+  launchInstalledUpdate,
+  installedPackageVersion,
+  validateInstalledPackageVersion,
   validateUpdatePackage,
   launchUpdate,
   cleanupSuccessfulUpdateRuns,

@@ -684,6 +684,7 @@ tr.selected td { background: var(--selected); }
 .virtual-tree-row.exact-entry { z-index: 1; background: var(--warn-bg); }
 .similar-name-mark { padding: 0 1px; border-radius: 3px; color: var(--danger-fg); background: color-mix(in srgb, var(--danger-fg) 14%, transparent); font-weight: 800; }
 .exact-duplicate-mark { padding: 0 3px; border: 1px solid var(--amber); border-radius: 4px; color: var(--warn-fg); background: color-mix(in srgb, var(--amber) 24%, transparent); box-decoration-break: clone; font-weight: 850; }
+.exact-content-md5 { border: 0; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; }
 .similar-name-mark.whitelistable { cursor: pointer; }
 .similar-name-mark.whitelistable:hover, .similar-name-mark.whitelistable:focus-visible { outline: 2px solid color-mix(in srgb, var(--danger-fg) 54%, transparent); outline-offset: 1px; }
 .similarity-whitelist-action { position: fixed; z-index: 1000; min-height: 30px; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--paper); background: var(--accent-dark); box-shadow: var(--shadow-lg); font-size: 11px; font-weight: 800; cursor: pointer; }

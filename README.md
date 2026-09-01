@@ -10,7 +10,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 本地优先 · 批量归档 · 媒体预览 · 便携数据
 
-![Version](https://img.shields.io/badge/version-4.5.16-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.5.17-d45f3c?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
@@ -59,7 +59,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 - 项目设置可高度自定义。压缩参数、视频截取帧数、项目保存缩略图个数等参数均自由可调。
 
-- 名称相似只做非阻塞候选提示；启动队列后再以完整内容指纹核验，精确重复可按设置自动跳过，真正的相似项目只确认一次。
+- 名称相似只做非阻塞候选提示；启动队列后再以完整内容指纹核验，项目完全重复可按设置自动跳过，真正的相似项目只确认一次。
 - 大任务和体积异常会停下来等待人工确认。
 
 - 只有压缩、验证和入库完成后，才会按设置保留、移动或回收原文件，保证文件的绝对安全。
@@ -87,7 +87,7 @@ Local-first batch archiver and searchable media vault for Windows.
 ### 搜索、重复与相似关系
 
 - SQLite + FTS5 持久化索引，中文采用单字与 bigram 候选词，拉丁文字按词索引。
-- 项目指纹索引会先缩小候选范围，再以完整相对路径、大小和 MD5 严格确认精确重复；相似判断完全在本地完成。
+- 项目指纹索引会先缩小候选范围，再以完整相对路径、大小和 MD5 严格确认项目完全重复；相似判断完全在本地完成。
 - 文件级重复查询采用 SQLite 批量索引，旧仓库会自动补齐项目指纹，避免仓库变大后逐项全库比对。
 - 相似关系可针对单个项目重新计算，也可手动解除；解除关系会双向保存。
 - 相似度排除词表可自行维护，项目详情中可一键将重复词加入白名单。
@@ -113,18 +113,18 @@ Local-first batch archiver and searchable media vault for Windows.
 
 ### 直接使用发行版
 
-1. 在 [Releases](../../releases) 下载 Windows x64 压缩包。
-2. 完整解压后运行 `HamsterArchiver.exe`。
+1. 在 [Releases](../../releases) 下载 Windows x64 压缩包（便携版），或下载 Setup EXE（安装版）。
+2. 便携版完整解压后运行 `HamsterArchiver.exe`；安装版运行 Setup 并按提示选择安装位置与桌面快捷方式。
 3. 可先填写“需备份目录”，也可直接点击“扫描目录”再选择；扫描只会把项目加入队列，检查提示后再选择“开始压缩入库”或“不压缩直接入库”。
 
 请保留发行包的目录结构，不要只复制 EXE。Electron、7-Zip 与 FFmpeg 依赖完整发行目录；用户数据区默认是旁边的 `userdata`，也可以在“更多设置”中安全复制或切换到其他目录。
 
 ### 自动更新失败时手动更新
 
-点击应用左上角的“检查更新”，选择手动更新，导入最新版本的压缩包。应用会在替换前显示包内更新内容，并在新版本首次启动后再次提示；后台检查不会强制更新或主动弹窗。
+点击应用左上角的“检查更新”，选择手动更新：便携版选择最新 ZIP，安装版选择最新 Setup EXE。应用会在更新前显示新版内容，并在新版本首次启动后再次提示；后台检查不会强制更新或主动弹窗。
 
-1. 从 [Releases](../../releases) 下载最新 Windows x64 压缩包，无需解压。
-2. 在旧应用中，点击应用左上角的“检查更新”，选择手动更新，选择最新版本的压缩包。
+1. 从 [Releases](../../releases) 下载对应形态的最新 Windows x64 ZIP 或 Setup EXE；ZIP 无需解压。
+2. 在旧应用中点击“检查更新”，选择“手动更新”，再选择刚下载的发行文件。
 3. 确认版本号、仓库记录和缩略图正常，更新完成。
 
 ### 搬迁仓库
@@ -157,7 +157,7 @@ npm start
 ## 便携数据布局
 
 ```text
-HamsterArchiver-v4.5.16-win-x64/
+HamsterArchiver-v4.5.17-win-x64/
 ├─ HamsterArchiver.exe
 ├─ tools/
 │  ├─ 7zip/
@@ -186,7 +186,7 @@ HamsterArchiver-v4.5.16-win-x64/
 | 性能 | 仓库分页、目录虚拟化、持久化搜索与相似候选索引 |
 | 隐私 | 用户数据留在本机；不上传仓库、媒体或密码 |
 
-应用不会主动上传文件。只有在你点击“检查更新”或打开 GitHub 链接时，才会访问 GitHub；更新包会先下载到 userdata 的临时区，校验后由独立更新助手替换程序文件；压缩包上传仍由你的云盘客户端或手动操作完成。
+应用不会主动上传文件。只有在你点击“检查更新”或打开 GitHub 链接时，才会访问 GitHub；便携版 ZIP 与安装版 Setup 都会先下载到用户数据区的临时目录并校验，随后分别由独立更新助手或安装程序升级；压缩包上传仍由你的云盘客户端或手动操作完成。
 
 ## 开发与贡献
 

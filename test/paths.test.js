@@ -93,7 +93,7 @@ test('new installs keep source/output user-selected and default processed inside
   assert.equal(config.archiveOutputDirectory, '');
   assert.equal(config.processedSourceDirectory, 'C:\\user-data\\processed');
   assert.equal(config.archivePassword, '');
-  assert.equal(config.moveCompleted, true);
+  assert.equal(config.moveCompleted, false);
   assert.equal(config.recordArchivePassword, true);
   assert.equal(config.repositoryDirectory, 'C:\\user-data\\warehouse');
   assert.equal(config.archiveStagingDirectory, '');
@@ -105,6 +105,11 @@ test('new installs keep source/output user-selected and default processed inside
   assert.equal(config.archiveVolumeEnabled, true);
   assert.equal(config.archiveVolumeBytes, LARGE_TASK_BYTES);
   assert.equal(config.largeFolderMd5SampleLimit, 200);
+  assert.equal(config.largeFolderFileThreshold, 500);
+  assert.equal(config.tinyFileMd5ThresholdBytes, 5 * 1024);
+  assert.equal(config.largeFolderSimplification, true);
+  assert.equal(config.skipTinyMd5Files, true);
+  assert.equal(config.autoSkipExactDuplicates, true);
 });
 
 test('portable tools remain relative and owned user-data paths rebase after moving the app', () => {

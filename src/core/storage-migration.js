@@ -137,7 +137,7 @@ async function migrateToUserData(config, workspaceRoot, layout) {
       normalizeForComparison(config.processedSourceDirectory) === normalizeForComparison(legacyProcessedDirectory)) {
     await movePathIfMissing(legacyProcessedDirectory, layout.processedSourceDirectory);
     config.processedSourceDirectory = layout.processedSourceDirectory;
-    if (config.moveCompleted === undefined) config.moveCompleted = true;
+    if (config.moveCompleted === undefined) config.moveCompleted = false;
     changed = true;
   }
 

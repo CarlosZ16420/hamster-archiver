@@ -238,6 +238,25 @@ test('exact duplicate tasks can be cleared separately', async () => {
   assert.deepEqual(manager.jobs.map((job) => job.id), ['possible']);
 });
 
+test('terminal duplicate states discard delayed inventory progress', async () => {
+  const manager = new QueueManager(new FakeStore(), { repositoryDirectory: 'E:\\warehouse' });
+  const job = { ...queuedJob('late-progress'), status: 'inventorying', progress: 45 };
+  manager.jobs = [job];
+  const progressEvents = [];
+  manager.on('progress', (progress) => progressEvents.push(progress));
+
+  manager.emitProgressThrottled(job, 20);
+  await manager.updateJob(job, {
+    status: 'awaiting_duplicate_confirmation',
+    stageText: '发现项目完全重复，已延后等待确认',
+    progress: 0
+  });
+  await new Promise((resolve) => setTimeout(resolve, 40));
+
+  assert.deepEqual(progressEvents, []);
+  assert.equal(job.status, 'awaiting_duplicate_confirmation');
+});
+
 test('name and similarity evidence is a nonblocking notice before MD5 work', () => {
   const manager = new QueueManager(new FakeStore(), {
     libraryDir: 'E:\\library',
@@ -564,7 +583,7 @@ test('cross-directory exact verification stops at one-project read budget and fa
   await idle;
 
   assert.equal(manager.jobs[0].status, 'awaiting_duplicate_confirmation');
-  assert.match(manager.jobs[0].stageText, /精确重复候选待人工核对/);
+  assert.match(manager.jobs[0].stageText, /内容完全一致候选待人工核对/);
   assert.ok(manager.logs.some((entry) => /达到读取预算/.test(entry.message)));
   const savedManifest = await manager.store.loadPendingManifest(manager.config.repositoryDirectory, 'incoming-job');
   assert.ok(savedManifest.every((file) => /^[a-f0-9]{32}$/.test(String(file.md5 || ''))));
@@ -614,7 +633,8 @@ test('queue similarity report asks once after fingerprinting and reuses the conf
     archiveOutputDirectory: path.join(root, 'output'),
     archiveStagingDirectory: path.join(root, 'staging'),
     repositoryDirectory: path.join(root, 'warehouse'),
-    similarityReportEnabled: true
+    similarityReportEnabled: true,
+    autoSkipExactDuplicates: false
   }, {
     archiveRunner: async (_job, _config, hooks) => {
       await hooks.onManifestReady(manifest);
@@ -670,7 +690,7 @@ test('queue similarity report asks once after fingerprinting and reuses the conf
     reportAfterInventory.similarEntryMatches.find((entry) => entry.kind === 'file').exactRanges,
     [[0, 'same.txt'.length]]
   );
-  assert.ok(reportAfterInventory.similarProjects[0].reasons.includes('完整项目精确重复'));
+  assert.ok(reportAfterInventory.similarProjects[0].reasons.includes('项目完全重复'));
   assert.ok(reportAfterInventory.similarProjects[0].reasons.includes('项目名称完全一致'));
   assert.ok(!reportAfterInventory.similarProjects[0].reasons.includes('标题相似'));
   assert.ok(!reportAfterInventory.similarProjects[0].reasons.includes('标题一致'));
@@ -703,7 +723,7 @@ test('queue similarity report waits for current-task MD5 even when an unchanged 
   assert.equal(unchangedReport.reusedFingerprintCount, 0);
   assert.equal(unchangedReport.manifest[0].md5, undefined);
   assert.equal(unchangedReport.similarProjects[0].exactFileCount, 0);
-  assert.ok(!unchangedReport.similarProjects[0].reasons.includes('完整项目精确重复'));
+  assert.ok(!unchangedReport.similarProjects[0].reasons.includes('项目完全重复'));
 
   await fs.writeFile(sourceFile, 'changed-content-is-longer');
   const changedReport = await manager.getQueueSimilarityReport(job.id);
@@ -1238,7 +1258,7 @@ test('similarity rebuild clears every stale possible-duplicate label without a c
     },
     {
       id: 'exact', title: '银河深处冬眠', displayName: '乙', tags: [], manifest: [], directories: [],
-      duplicateEvidence: true, duplicateReasons: ['存在精确重复文件'], possibleDuplicate: true,
+      duplicateEvidence: true, duplicateReasons: ['存在内容完全一致的文件'], possibleDuplicate: true,
       similarRecords: [], dismissedSimilarRecordIds: []
     }
   ];

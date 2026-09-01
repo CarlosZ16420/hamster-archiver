@@ -20,7 +20,12 @@ function compareVersions(left, right) {
   return 0;
 }
 
-async function checkForUpdates({ currentVersion, fetchImpl = globalThis.fetch, timeoutMs = 8_000 } = {}) {
+async function checkForUpdates({
+  currentVersion,
+  distributionMode = 'portable',
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 8_000
+} = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('当前运行环境不支持联网检查更新。');
   let response;
   try {
@@ -41,7 +46,10 @@ async function checkForUpdates({ currentVersion, fetchImpl = globalThis.fetch, t
   const release = await response.json();
   const latestVersion = String(release.tag_name || '').replace(/^v/i, '');
   const assets = Array.isArray(release.assets) ? release.assets : [];
-  const expectedAssetName = `hamsterarchiver-v${latestVersion}-win-x64.zip`.toLowerCase();
+  const normalizedDistributionMode = distributionMode === 'installed' ? 'installed' : 'portable';
+  const expectedAssetName = (normalizedDistributionMode === 'installed'
+    ? `HamsterArchiver-Setup-v${latestVersion}-win-x64.exe`
+    : `HamsterArchiver-v${latestVersion}-win-x64.zip`).toLowerCase();
   const archiveAsset = assets.find((asset) => String(asset.name || '').toLowerCase() === expectedAssetName);
   const archiveName = String(archiveAsset?.name || '').toLowerCase();
   const digestAsset = archiveAsset && assets.find((asset) => {
@@ -54,6 +62,7 @@ async function checkForUpdates({ currentVersion, fetchImpl = globalThis.fetch, t
     updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
     releaseUrl: release.html_url || RELEASES_URL,
     releaseNotes: compactReleaseNotesPayload(release.body),
+    distributionMode: normalizedDistributionMode,
     installable: Boolean(archiveAsset?.browser_download_url),
     asset: archiveAsset ? {
       name: String(archiveAsset.name || ''),

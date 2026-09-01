@@ -997,7 +997,7 @@ function renderJobs(jobs) {
     }
     if (uiState?.shouldShowDuplicateConfirmation(job)) {
       actionCell.append(actionButton(
-        job.duplicateReviewKind === 'similarity' ? '确认相似并继续' : '确认重复并继续',
+        job.duplicateReviewKind === 'similarity' ? '确认相似并继续' : '确认内容一致并继续',
         'confirm',
         job.id,
         'confirm'
@@ -1728,6 +1728,8 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
         match.reason === '目录名相似' || match.reason === '文件名相似'));
       const hasExactDuplicate = Boolean(similarity?.matches?.some((match) =>
         match.reason === '文件内容完全一致' || match.reason === '目录名完全一致'));
+      const hasIdenticalContent = Boolean(similarity?.matches?.some((match) =>
+        match.reason === '文件内容完全一致'));
       if (similarity) {
         row.classList.add('similar-entry');
         row.classList.toggle('exact-entry', hasExactDuplicate);
@@ -1757,10 +1759,18 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
           whitelistable,
           exactRanges: similarity?.exactRanges || []
         });
+        const metadata = make('small', 'virtual-tree-metadata');
+        metadata.append(document.createTextNode(`${formatBytes(item.file.size)} · `));
+        const md5 = String(item.file.md5 || '无 MD5');
+        if (hasIdenticalContent && /^[a-f0-9]{32}$/i.test(md5)) {
+          metadata.append(make('mark', 'exact-duplicate-mark exact-content-md5', md5));
+        } else {
+          metadata.append(document.createTextNode(md5));
+        }
         row.append(
           make('span', 'virtual-tree-icon file', (item.file.extension || 'FILE').replace('.', '').slice(0, 4).toUpperCase()),
           name,
-          make('small', '', `${formatBytes(item.file.size)} · ${item.file.md5 || '无 MD5'}`)
+          metadata
         );
       }
       fragment.append(row);
@@ -1797,15 +1807,7 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
 }
 
 function queueSimilarityEvidenceText(project) {
-  const details = [];
-  if (project.exactFileCount > 0) details.push(`${project.exactFileCount} 个精确重复文件`);
-  if (project.exactDirectoryCount > 0) details.push(`${project.exactDirectoryCount} 个同名目录`);
-  if (project.similarFileCount > 0) details.push(`${project.similarFileCount} 个相似文件`);
-  if (project.similarDirectoryCount > 0) details.push(`${project.similarDirectoryCount} 个相似目录`);
-  for (const reason of project.reasons || []) {
-    if (!['文件内容完全一致', '文件名相似', '目录名相似', '目录名完全一致'].includes(reason)) details.push(reason);
-  }
-  return [...new Set(details)].join(' · ') || '项目存在相似证据';
+  return uiState.queueSimilarityEvidenceText(project);
 }
 
 function renderQueueSimilarityReport(report) {
@@ -1828,8 +1830,8 @@ function renderQueueSimilarityReport(report) {
   overview.append(legend);
   if (report.fingerprintPending) {
     overview.append(make('p', 'similarity-report-pending muted', report.reusedFingerprintCount > 0
-      ? '其余文件的精确重复会在队列生成 MD5 后显示；当前已复用仓库中同一源项目未变化文件的已有 MD5。'
-      : '精确重复会在队列生成 MD5 后显示；当前报告只显示名称和大小证据。'));
+      ? '其余内容完全一致的文件会在队列生成 MD5 后显示；当前已复用仓库中同一源项目未变化文件的已有 MD5。'
+      : '内容完全一致的文件会在队列生成 MD5 后显示；当前报告只显示名称和大小证据。'));
   } else if (report.reusedFingerprintCount > 0) {
     overview.append(make('p', 'similarity-report-pending muted', '已复用仓库中同一源项目的已有 MD5；未重新读取文件内容。'));
   }
@@ -2365,7 +2367,7 @@ function renderSummary(state) {
   document.querySelector('#clear-duplicates').disabled = !jobs.some((job) =>
     (job.nameDuplicateMatches || []).length > 0 || (job.similarMatches || []).length > 0);
   document.querySelector('#clear-exact-duplicates').disabled = !jobs.some((job) =>
-    (job.exactDuplicateMatches || []).length > 0);
+    (job.exactDuplicateMatches || []).length > 0 || (job.exactProjectMatches || []).length > 0);
   document.querySelector('#confirm-all-duplicates').disabled = !jobs.some((job) =>
     job.status === 'awaiting_duplicate_confirmation' ||
     (job.similarityPreflightBlocking !== false && job.status === 'awaiting_confirmation' && (job.confirmationReasons || []).some((reason) =>
@@ -2944,12 +2946,12 @@ document.querySelector('#clear-duplicates').addEventListener('click', async () =
 });
 
 document.querySelector('#clear-exact-duplicates').addEventListener('click', async () => {
-  if (!await confirmUser('从任务列表清除所有已确认存在内容完全相同文件的项目？已入库档案和源文件不会删除。')) return;
+  if (!await confirmUser('从任务列表清除所有完全重复项（项目完全重复或含内容完全一致的文件）？已入库档案和源文件不会删除。')) return;
   const result = await safely(() => window.archiveApp.clearExactDuplicates());
   if (!result) return;
   selectedJobIds.clear();
   render(result.state);
-  showToast(result.removedCount > 0 ? `已清除 ${result.removedCount} 个精确重复任务` : '没有发现可清除的精确重复任务');
+  showToast(result.removedCount > 0 ? `已清除 ${result.removedCount} 个完全重复任务` : '没有发现可清除的完全重复任务');
 });
 
 document.querySelector('#confirm-all-duplicates').addEventListener('click', async () => {
@@ -3621,6 +3623,7 @@ window.archiveApp.onTaskProgress((progress) => {
   if (!currentState) return;
   const job = currentState.jobs.find((candidate) => candidate.id === progress.jobId);
   if (!job) return;
+  if (!uiState.shouldApplyTaskProgress(job, progress)) return;
   job.status = progress.stage;
   job.stageText = progress.stageText || job.stageText;
   job.progress = progress.percentage;

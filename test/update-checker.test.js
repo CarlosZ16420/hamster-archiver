@@ -77,6 +77,37 @@ test('update metadata exposes a matching Windows asset for installation', async 
   assert.match(result.asset.digestDownloadUrl, /\.zip\.sha256$/);
 });
 
+test('installed distribution selects the matching Setup executable and digest', async () => {
+  const result = await checkForUpdates({
+    currentVersion: '4.5.16',
+    distributionMode: 'installed',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        tag_name: 'v4.5.17',
+        assets: [{
+          name: 'HamsterArchiver-v4.5.17-win-x64.zip',
+          browser_download_url: 'https://github.com/example/portable.zip'
+        }, {
+          name: 'HamsterArchiver-Setup-v4.5.17-win-x64.exe',
+          browser_download_url: 'https://github.com/CarlosZ16420/hamster-archiver/releases/download/v4.5.17/HamsterArchiver-Setup-v4.5.17-win-x64.exe',
+          size: 456,
+          digest: 'sha256:' + 'c'.repeat(64)
+        }, {
+          name: 'HamsterArchiver-Setup-v4.5.17-win-x64.exe.sha256',
+          browser_download_url: 'https://github.com/CarlosZ16420/hamster-archiver/releases/download/v4.5.17/HamsterArchiver-Setup-v4.5.17-win-x64.exe.sha256'
+        }]
+      })
+    })
+  });
+  assert.equal(result.distributionMode, 'installed');
+  assert.equal(result.installable, true);
+  assert.equal(result.asset.name, 'HamsterArchiver-Setup-v4.5.17-win-x64.exe');
+  assert.equal(result.asset.size, 456);
+  assert.match(result.asset.digestDownloadUrl, /\.exe\.sha256$/);
+});
+
 test('update metadata can provide a sidecar digest when GitHub omits asset.digest', async () => {
   const result = await checkForUpdates({
     currentVersion: '4.0.0',
