@@ -62,6 +62,7 @@ if (!rendererDir) {
       i18n.translate('与仓库内项目完全一致，已自动跳过'),
       'Identical to a warehouse project; auto-skipped'
     );
+    assert.equal(i18n.translate('2 个低于 100 MB 的小项目'), '2 small items below 100 MB');
     assert.equal(
       i18n.translate('“PRESTIGE”已加入相似度白名单；已有关系不会自动重算'),
       '“PRESTIGE” added to the similarity whitelist; existing relations were not recalculated'
@@ -96,6 +97,9 @@ if (!rendererDir) {
       i18n.translateStage('发现 3 个相似项目 · 等待手动确认'),
       'Found 3 similar items · Awaiting manual confirmation'
     );
+    assert.ok(!CJK.test(i18n.translateStage(
+      '名称存在仓库候选 · 发现 2 个相似候选 · 等待选择入库方式'
+    )));
     assert.equal(
       i18n.translateStage('2 个精确重复文件 · 1 个相似文件 · 项目名称完全一致'),
       '2 exact duplicate files · 1 similar files · Identical project name'
@@ -173,6 +177,14 @@ if (!rendererDir) {
       '用户删除了大小异常成品；源项目未移动、未删除。',
       '用户已确认回收站安全警告；队列仍保持停止，后续任务需手动重新开始。',
       '卡顿规避：已跳过 17 个小于 128 KB 的极小文件，不计算 MD5。',
+      '精确重复候选核验达到读取预算，未完成的候选已转为人工复核；不会自动跳过。',
+      '精确重复候选已提前排除；读取 3 个文件后停止完整核验。',
+      '用户已确认相似报告，任务复用已生成清单并重新进入队列。',
+      '用户已确认精确重复提示，任务复用已生成清单并重新进入队列。',
+      '发现 精确重复候选待人工核对，已延后等待确认',
+      '已选择压缩入库，共 3 个任务。',
+      '当前不在定时运行时段；已记录入库方式，队列将在计划开始时间自动运行。',
+      '队列已进入定时等待。',
       '运行中的任务已安全取消。'
     ];
     for (const message of messages) {

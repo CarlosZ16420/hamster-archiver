@@ -7,6 +7,7 @@ const test = require('node:test');
 const {
   shouldShowDuplicateConfirmation,
   similarityProgressPresentation,
+  summarizeScanSkips,
   sourceDispositionPresentation
 } = require('../src/renderer/ui-state');
 
@@ -57,13 +58,45 @@ test('maintenance paths are selectable and usage guide is the final footer actio
   assert.match(html, /欢迎反馈<\/button>[\s\S]*id="open-usage-guide"[^>]*>使用说明<\/button>[\s\S]*<\/footer>/);
 });
 
-test('run history keeps log messages in the list instead of duplicating the latest message in the header', () => {
+test('run log keeps messages in the list instead of duplicating the latest message in the header', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
 
   assert.doesNotMatch(html, /id="digest-log"/);
   assert.doesNotMatch(app, /digest\.textContent\s*=\s*`\$\{latestTime\}/);
   assert.match(app, /for \(const entry of \[\.\.\.logs\]\.reverse\(\)\)/);
+  assert.match(html, /03 · 运行日志/);
+  assert.doesNotMatch(html, /03 · 运行记录/);
+});
+
+test('scan skip summary separates filtering, root files, links and unreadable items', () => {
+  assert.deepEqual(summarizeScanSkips([
+    { reason: '低于过滤阈值 100 MB' },
+    { reason: '低于过滤阈值 100 MB' },
+    { reason: '根级非视频文件' },
+    { reason: '已跳过链接或重解析点' },
+    { reason: '无法读取：access denied', code: 'EACCES' },
+    { reason: '未知类型' }
+  ]), {
+    total: 6,
+    smallItems: 2,
+    smallItemThresholdMb: '100',
+    rootNonVideoFiles: 1,
+    links: 1,
+    unreadable: 1,
+    other: 1
+  });
+});
+
+test('scan progress ignores late events after the matching scan request completes', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+
+  assert.match(app, /activeScanToken = scanToken;[\s\S]*scanSource\([^\n]+scanToken\)[\s\S]*activeScanToken = null/);
+  assert.match(app, /if \(!activeScanToken \|\| String\(progress\.scanToken \|\| ''\) !== activeScanToken\) return/);
+  assert.match(preload, /scanSource: \(intakeDirectory, scanToken\).*'source:scan', intakeDirectory, scanToken/);
+  assert.match(main, /queueManager\.scanSource\(intakeDirectory, scanToken\)/);
 });
 
 test('similarity rebuild completion advances stale chunk progress to 100 percent', () => {
@@ -149,6 +182,9 @@ test('duplicate continuation appears in every actionable duplicate state but nev
     status: 'awaiting_confirmation', confirmationReasons: ['name_match']
   }), true);
   assert.equal(shouldShowDuplicateConfirmation({
+    status: 'queued', confirmationReasons: ['name_match'], similarityPreflightBlocking: false
+  }), false);
+  assert.equal(shouldShowDuplicateConfirmation({
     status: 'queued', automaticDuplicateCheckPending: true
   }), true);
   assert.equal(shouldShowDuplicateConfirmation({
@@ -163,7 +199,21 @@ test('duplicate continuation appears in every actionable duplicate state but nev
   }), false);
   assert.equal(shouldShowDuplicateConfirmation({
     status: 'queued', automaticDuplicateCheckPending: true, duplicateConfirmedAt: '2026-08-30T00:00:00.000Z'
+  }), true);
+  assert.equal(shouldShowDuplicateConfirmation({
+    status: 'queued', automaticDuplicateCheckPending: true, exactDuplicateOverrideAt: '2026-08-30T00:00:00.000Z'
   }), false);
+});
+
+test('paused work exposes a toolbar cancel action and large-folder sampling is user configurable', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+
+  assert.match(html, /id="cancel-current"[^>]*hidden>取消当前任务<\/button>/);
+  assert.match(app, /#cancel-current'\)\.hidden = !\(state\.paused && currentJob\)/);
+  assert.match(app, /window\.archiveApp\.cancelTask\(jobId\)/);
+  assert.match(html, /id="large-folder-md5-sample-limit"[^>]*value="200"/);
+  assert.match(app, /largeFolderMd5SampleLimit: Number\(elements\.largeFolderMd5SampleLimit\.value\)/);
 });
 
 test('manual package update is offered from check for updates instead of a separate header button', () => {
@@ -229,7 +279,7 @@ test('compact settings copy and activity colors follow the current UI specificat
   assert.match(html, /id="auto-skip-exact-duplicates"/);
   assert.match(html, /id="similarity-report-enabled"[^>]*checked/);
   assert.match(html, /id="queue-similarity-report-dialog"/);
-  assert.match(html, /文件数量、相对文件名、文件大小和内容核验全部一致/);
+  assert.match(html, /每个文件都有有效 MD5[^<]*文件数量、相对路径、大小和 MD5 全部一致/);
   assert.match(html, /class="queue-threshold-clause"[\s\S]*?id="large-folder-file-threshold"[\s\S]*?>的文件夹，<\/span><\/span>/);
   assert.match(app, /actionButton\('相似报告', 'similarity-report'/);
   assert.doesNotMatch(app, /Ctrl.*多选/);

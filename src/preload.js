@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('archiveApp', {
   copyText: (value) => ipcRenderer.invoke('system:copy-text', value),
   chooseSingle: (kind) => ipcRenderer.invoke('dialog:choose-single', kind),
   saveConfig: (config) => ipcRenderer.invoke('config:save', config),
-  scanSource: (intakeDirectory) => ipcRenderer.invoke('source:scan', intakeDirectory),
+  scanSource: (intakeDirectory, scanToken) => ipcRenderer.invoke('source:scan', intakeDirectory, scanToken),
   addSingle: (sourcePath) => ipcRenderer.invoke('task:add-single', sourcePath),
   openTaskSource: (jobId) => ipcRenderer.invoke('task:open-source', jobId),
   getQueueSimilarityReport: (jobId) => ipcRenderer.invoke('task:similarity-report', jobId),

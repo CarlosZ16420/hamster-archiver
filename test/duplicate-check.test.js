@@ -27,20 +27,27 @@ test('name normalization supports simple suspected duplicate checks', () => {
   assert.equal(matches.length, 1);
 });
 
-test('exact duplicate check uses file size and MD5 together', () => {
+test('exact duplicate check requires a valid matching MD5 and matching size', () => {
+  const md5 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   const matches = findExactFileMatches([{
-    relativePath: 'new/video.mp4', size: 99, md5: 'abc'
+    relativePath: 'new/video.mp4', size: 99, md5
   }], [{
     id: 'archive-1',
     displayName: 'old',
     archiveBaseName: 'old.7z',
     manifest: [
-      { relativePath: 'old/video.mp4', size: 99, md5: 'abc' },
-      { relativePath: 'other.mp4', size: 100, md5: 'abc' }
+      { relativePath: 'old/video.mp4', size: 99, md5 },
+      { relativePath: 'other.mp4', size: 100, md5 }
     ]
   }]);
   assert.equal(matches.length, 1);
   assert.equal(matches[0].previous[0].relativePath, 'old/video.mp4');
+  assert.deepEqual(findExactFileMatches([{ relativePath: 'new.bin', size: 99, md5: 'not-an-md5' }], [{
+    id: 'invalid', manifest: [{ relativePath: 'old.bin', size: 99, md5: 'not-an-md5' }]
+  }]), []);
+  assert.deepEqual(findExactFileMatches([{ relativePath: 'new.bin', size: 99 }], [{
+    id: 'size-only', manifest: [{ relativePath: 'old.bin', size: 99 }]
+  }]), []);
 });
 
 test('exact project matching requires the complete file set, names, sizes and content', () => {
@@ -167,11 +174,11 @@ test('similarity ignore terms are case-insensitive', () => {
 test('similar directory entries report exact paths and highlight ranges', () => {
   const subject = {
     directories: ['旅行/王佳乐北京学习'],
-    manifest: [{ relativePath: '旅行/台湾旅行记录.mp4', name: '台湾旅行记录.mp4', extension: '.mp4', size: 20, md5: 'abc' }]
+    manifest: [{ relativePath: '旅行/台湾旅行记录.mp4', name: '台湾旅行记录.mp4', extension: '.mp4', size: 20, md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }]
   };
   const candidate = {
     id: 'other', title: '另一项目', directories: ['整理/北京王佳乐学习生活'],
-    manifest: [{ relativePath: '整理/台湾旅行记录-备份.mp4', name: '台湾旅行记录-备份.mp4', extension: '.mp4', size: 20, md5: 'abc' }]
+    manifest: [{ relativePath: '整理/台湾旅行记录-备份.mp4', name: '台湾旅行记录-备份.mp4', extension: '.mp4', size: 20, md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }]
   };
   const matches = findSimilarEntryMatches(subject, [candidate], []);
   assert.ok(matches.some((entry) => entry.kind === 'directory' && entry.relativePath === '旅行/王佳乐北京学习' && entry.ranges.length > 0));

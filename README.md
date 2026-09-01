@@ -10,7 +10,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 本地优先 · 批量归档 · 媒体预览 · 便携数据
 
-![Version](https://img.shields.io/badge/version-4.5.14-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.5.16-d45f3c?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
@@ -35,7 +35,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 ## 它做什么
 
-把下载目录里堆成山的文件夹和视频，逐个压缩、校验、登记到一个可搜索的本地仓库。普通压缩工具只生成压缩包；Hamster Archiver 同时告诉你**里面是什么、放到了哪里、是否已经收过**。
+把下载目录里堆成山的文件夹和视频先扫描进队列，再由你选择压缩入库或不压缩直接入库，校验后登记到可搜索的本地仓库。普通压缩工具只生成压缩包；Hamster Archiver 同时告诉你**里面是什么、放到了哪里、是否已经收过**。
 
 - 快速将选中的文件夹变成可视化的仓库
 
@@ -59,7 +59,8 @@ Local-first batch archiver and searchable media vault for Windows.
 
 - 项目设置可高度自定义。压缩参数、视频截取帧数、项目保存缩略图个数等参数均自由可调。
 
-- 疑似重复、大任务和体积异常会停下来等待人工确认。
+- 名称相似只做非阻塞候选提示；启动队列后再以完整内容指纹核验，精确重复可按设置自动跳过，真正的相似项目只确认一次。
+- 大任务和体积异常会停下来等待人工确认。
 
 - 只有压缩、验证和入库完成后，才会按设置保留、移动或回收原文件，保证文件的绝对安全。
 
@@ -86,7 +87,8 @@ Local-first batch archiver and searchable media vault for Windows.
 ### 搜索、重复与相似关系
 
 - SQLite + FTS5 持久化索引，中文采用单字与 bigram 候选词，拉丁文字按词索引。
-- 精确指纹、标题和视频大小参与重复提示；相似判断完全在本地完成。
+- 项目指纹索引会先缩小候选范围，再以完整相对路径、大小和 MD5 严格确认精确重复；相似判断完全在本地完成。
+- 文件级重复查询采用 SQLite 批量索引，旧仓库会自动补齐项目指纹，避免仓库变大后逐项全库比对。
 - 相似关系可针对单个项目重新计算，也可手动解除；解除关系会双向保存。
 - 相似度排除词表可自行维护，项目详情中可一键将重复词加入白名单。
 
@@ -113,7 +115,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 1. 在 [Releases](../../releases) 下载 Windows x64 压缩包。
 2. 完整解压后运行 `HamsterArchiver.exe`。
-3. 可先填写“需备份目录”，也可直接点击“扫描目录”再选择；填写必需的“压缩后保存在”，确认任务后开始压缩入库。
+3. 可先填写“需备份目录”，也可直接点击“扫描目录”再选择；扫描只会把项目加入队列，检查提示后再选择“开始压缩入库”或“不压缩直接入库”。
 
 请保留发行包的目录结构，不要只复制 EXE。Electron、7-Zip 与 FFmpeg 依赖完整发行目录；用户数据区默认是旁边的 `userdata`，也可以在“更多设置”中安全复制或切换到其他目录。
 
@@ -155,7 +157,7 @@ npm start
 ## 便携数据布局
 
 ```text
-HamsterArchiver-v4.5.14-win-x64/
+HamsterArchiver-v4.5.16-win-x64/
 ├─ HamsterArchiver.exe
 ├─ tools/
 │  ├─ 7zip/

@@ -10,7 +10,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 Local-first · Batch archiving · Media previews · Portable data
 
-![Version](https://img.shields.io/badge/version-4.5.14-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.5.16-d45f3c?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
@@ -35,7 +35,7 @@ Hamster Archiver is made for you if any of these sound familiar:
 
 ## What it does
 
-Hamster Archiver takes folders and videos piled up in a download directory, then compresses, verifies and registers them one by one in a searchable local warehouse. A normal compression tool only creates archives; Hamster Archiver also tells you **what is inside, where it is stored and whether you have already archived something similar**.
+Hamster Archiver first scans folders and videos into a queue, then lets you choose compressed or uncompressed intake before verification and registration in a searchable local warehouse. A normal compression tool only creates archives; Hamster Archiver also tells you **what is inside, where it is stored and whether you have already archived something similar**.
 
 - Quickly turn selected folders into a visual warehouse.
 
@@ -60,7 +60,8 @@ Hamster Archiver takes folders and videos piled up in a download directory, then
   Each project contains thumbnails from images and videos as well as the complete directory structure. Every preview is stored as a thumbnail so the warehouse preserves useful context without growing unnecessarily large.
 
 - Customize compression parameters, sampled video frames, per-project thumbnail limits and other settings.
-- Pause for human confirmation when a possible duplicate, unusually large task or abnormal compression ratio is detected.
+- Name similarity is a non-blocking candidate hint. Once the queue starts, complete content fingerprints can auto-skip exact duplicates according to your setting, while genuine similarity needs only one review.
+- Pause for human confirmation when an unusually large task or abnormal compression ratio is detected.
 - Keep, move or recycle original files only after compression, integrity verification and warehouse registration all succeed.
 
 ## Core capabilities
@@ -84,7 +85,8 @@ Hamster Archiver takes folders and videos piled up in a download directory, then
 ### Search, duplicates and similarity
 
 - SQLite + FTS5 provides persistent indexes. Chinese search uses character and bigram candidates; Latin text is indexed by word.
-- Exact fingerprints, titles and video sizes contribute separate duplicate evidence. Similarity analysis stays entirely local.
+- A project fingerprint index narrows candidates before complete relative paths, sizes and MD5 values strictly confirm an exact duplicate. Similarity analysis stays entirely local.
+- File-level duplicate evidence uses batched SQLite lookups, and older warehouses backfill project fingerprints automatically instead of repeatedly scanning the whole catalog.
 - Similarity can be recalculated for one project, and a relationship can be dismissed manually; dismissals are saved symmetrically.
 - The similarity whitelist is editable, and highlighted repeated terms in project details can be added to it with one click.
 
@@ -109,7 +111,7 @@ Hamster Archiver takes folders and videos piled up in a download directory, then
 
 1. Download the Windows x64 ZIP from [Releases](../../releases).
 2. Extract the complete package and run `HamsterArchiver.exe`.
-3. Optionally set Directory to back up, or click Scan directory and choose it then. Set the required Save archives to location, review the tasks and start archiving.
+3. Optionally set Directory to back up, or click Scan directory and choose it then. Scanning only fills the queue; review any warnings and choose compressed or uncompressed intake explicitly.
 
 Keep the complete release directory. Do not copy only the EXE: Electron, 7-Zip and FFmpeg depend on the complete package. The user data area defaults to the adjacent `userdata` directory and can be safely copied or switched under More settings.
 
@@ -149,7 +151,7 @@ The source repository does not commit the large `ffmpeg.exe`. `dependency-lock.j
 ## Portable data layout
 
 ```text
-HamsterArchiver-v4.5.14-win-x64/
+HamsterArchiver-v4.5.16-win-x64/
 ├─ HamsterArchiver.exe
 ├─ tools/
 │  ├─ 7zip/

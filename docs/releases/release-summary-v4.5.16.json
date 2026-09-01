@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.5.16",
+  "notes": {
+    "zh-CN": [
+      "扫描或拖入阶段的名称相似改为非阻塞候选提示；开始处理后，精确重复可按设置直接自动跳过，真正的相似项目只确认一次。",
+      "新增 SQLite 项目形状与内容指纹索引，旧仓库会自动补齐；最终精确重复仍严格复核完整相对路径、文件大小和有效 MD5。",
+      "跨目录候选会按区分度逐步核验并在全部排除后立即停止，相似报告中的精确文件证据改为批量索引查询。",
+      "相似确认与本次完整清单绑定并在继续时复用；暂停任务可从工具栏直接取消，超大文件夹代表文件数量可设置。"
+    ],
+    "en-US": [
+      "Name similarity during scanning or drag-and-drop is now a non-blocking candidate hint; exact duplicates can auto-skip after processing starts, while genuine similarity requires only one review.",
+      "New SQLite project-shape and content-fingerprint indexes are backfilled for older warehouses; final exact-duplicate decisions still verify complete relative paths, file sizes and valid MD5 values.",
+      "Cross-directory candidates are verified incrementally and stop as soon as all candidates are eliminated, while exact-file evidence in similarity reports uses batched indexed queries.",
+      "Similarity approval is bound to and reuses the current complete manifest; paused tasks can be cancelled from the toolbar, and the representative-file count for huge folders is configurable."
+    ]
+  }
+}

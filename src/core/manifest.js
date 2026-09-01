@@ -8,7 +8,11 @@ const { CancelledError } = require('./archive-engine-errors');
 const { isImageFile, isVideoFile } = require('./constants');
 
 const DEFAULT_LARGE_FOLDER_FILE_THRESHOLD = 500;
-const LARGE_FOLDER_MD5_SAMPLE_LIMIT = 200;
+const DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT = 200;
+const MIN_LARGE_FOLDER_MD5_SAMPLE_LIMIT = 1;
+const MAX_LARGE_FOLDER_MD5_SAMPLE_LIMIT = 100000;
+// 保留旧导出名，避免仍在使用固定默认值的外部调用立即失效。
+const LARGE_FOLDER_MD5_SAMPLE_LIMIT = DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT;
 const DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES = 5 * 1024;
 const MIN_TINY_FILE_MD5_THRESHOLD_BYTES = 1024;
 const MAX_TINY_FILE_MD5_THRESHOLD_BYTES = 1024 ** 3;
@@ -43,17 +47,23 @@ function createFingerprintPlan(files, sourceType, options = {}) {
       Number(options.tinyFileMd5ThresholdBytes) <= MAX_TINY_FILE_MD5_THRESHOLD_BYTES
     ? Number(options.tinyFileMd5ThresholdBytes)
     : DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES;
+  const sampleLimit = Number.isInteger(Number(options.largeFolderMd5SampleLimit)) &&
+      Number(options.largeFolderMd5SampleLimit) >= MIN_LARGE_FOLDER_MD5_SAMPLE_LIMIT &&
+      Number(options.largeFolderMd5SampleLimit) <= MAX_LARGE_FOLDER_MD5_SAMPLE_LIMIT
+    ? Number(options.largeFolderMd5SampleLimit)
+    : DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT;
   const skipTinyMd5Files = options.skipTinyMd5Files === true;
   const simplified = sourceType === 'directory' && options.largeFolderSimplification === true && files.length > threshold;
   const md5Candidates = files.filter((file) => !skipTinyMd5Files || file.size >= tinyFileMd5ThresholdBytes);
   const selectedFiles = simplified
-    ? selectRepresentativeFiles(md5Candidates, LARGE_FOLDER_MD5_SAMPLE_LIMIT)
+    ? selectRepresentativeFiles(md5Candidates, sampleLimit)
     : md5Candidates;
   return {
     md5Candidates,
     selectedFiles,
     selectedPaths: new Set(selectedFiles.map((file) => file.relativePath)),
     simplified,
+    sampleLimit,
     tinyFileMd5ThresholdBytes,
     threshold
   };
@@ -157,7 +167,7 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
   const files = await collectFiles(sourcePath, sourceType, { signal, pauseController, onSkippedFile: recordSkipped });
   const skipTinyMd5Files = options.skipTinyMd5Files === true;
   const plan = createFingerprintPlan(files, sourceType, options);
-  const { md5Candidates, selectedFiles, selectedPaths, simplified, tinyFileMd5ThresholdBytes, threshold } = plan;
+  const { md5Candidates, selectedFiles, selectedPaths, simplified, sampleLimit, tinyFileMd5ThresholdBytes, threshold } = plan;
   const totalBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0);
   let processedBytes = 0;
   let processedFiles = 0;
@@ -167,7 +177,7 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
     totalFiles: files.length,
     md5Files: selectedFiles.length,
     tinyFilesSkipped: files.length - md5Candidates.length,
-    sampleLimit: LARGE_FOLDER_MD5_SAMPLE_LIMIT,
+    sampleLimit,
     tinyFileMd5ThresholdBytes,
     threshold,
     simplified
@@ -241,7 +251,8 @@ async function completeManifestMd5(sourcePath, sourceType, manifest, options = {
     await pauseController?.waitIfPaused(signal);
     if (signal?.aborted) throw new CancelledError();
     if (/^[a-f0-9]{32}$/i.test(String(file?.md5 || ''))) {
-      completed.push({ ...file, md5: String(file.md5).toLocaleLowerCase('en-US') });
+      const { md5SkippedReason: _md5SkippedReason, similarityEligible: _similarityEligible, ...entry } = file;
+      completed.push({ ...entry, md5: String(file.md5).toLocaleLowerCase('en-US') });
       continue;
     }
     const absolutePath = sourceType === 'video'
@@ -275,6 +286,208 @@ async function completeManifestMd5(sourcePath, sourceType, manifest, options = {
     });
   }
   return completed;
+}
+
+async function verifyManifestMd5AgainstCompleteCandidates(sourcePath, sourceType, manifest, candidates, options = {}) {
+  const { signal, pauseController, onProgress = () => {} } = options;
+  const normalizePath = (value) => String(value || '').replace(/\\/g, '/')
+    .normalize('NFKC')
+    .toLocaleLowerCase('zh-CN');
+  const workingManifest = (manifest || []).map((file) => ({ ...file }));
+  let remaining = (candidates || []).map((record) => {
+    const files = new Map();
+    for (const file of record?.manifest || []) {
+      const relativePath = normalizePath(file?.relativePath || file?.name);
+      const md5 = String(file?.md5 || '').trim().toLocaleLowerCase('en-US');
+      if (!relativePath || files.has(relativePath) || !/^[a-f0-9]{32}$/.test(md5)) return null;
+      files.set(relativePath, { size: Number(file?.size), md5 });
+    }
+    return files.size === workingManifest.length ? { record, files } : null;
+  }).filter(Boolean);
+  if (remaining.length === 0) {
+    return { manifest: workingManifest, matches: [], hashedFiles: 0, hashedBytes: 0 };
+  }
+
+  const knownFiles = workingManifest.filter((file) => /^[a-f0-9]{32}$/i.test(String(file?.md5 || '')));
+  for (const file of knownFiles) {
+    const relativePath = normalizePath(file.relativePath || file.name);
+    const md5 = String(file.md5).toLocaleLowerCase('en-US');
+    remaining = remaining.filter(({ files }) => {
+      const candidate = files.get(relativePath);
+      return candidate && candidate.size === Number(file.size) && candidate.md5 === md5;
+    });
+    if (remaining.length === 0) return { manifest: workingManifest, matches: [], hashedFiles: 0, hashedBytes: 0 };
+  }
+
+  const missing = workingManifest.filter((file) => !/^[a-f0-9]{32}$/i.test(String(file?.md5 || '')));
+  missing.sort((left, right) => {
+    const distinctMd5Count = (file) => {
+      const relativePath = normalizePath(file.relativePath || file.name);
+      return new Set(remaining.map(({ files }) => files.get(relativePath)?.md5).filter(Boolean)).size;
+    };
+    return distinctMd5Count(right) - distinctMd5Count(left) ||
+      Number(left.size) - Number(right.size) ||
+      String(left.relativePath).localeCompare(String(right.relativePath), 'zh-CN');
+  });
+
+  let hashedFiles = 0;
+  let hashedBytes = 0;
+  const totalBytes = missing.reduce((sum, file) => sum + Number(file.size || 0), 0);
+  for (const file of missing) {
+    await pauseController?.waitIfPaused(signal);
+    if (signal?.aborted) throw new CancelledError();
+    const absolutePath = sourceType === 'video'
+      ? sourcePath
+      : path.join(sourcePath, ...String(file.relativePath || '').split('/'));
+    const beforeStats = await fs.stat(absolutePath);
+    const expectedModifiedAtMs = Number.isFinite(Number(file.modifiedAtMs))
+      ? Number(file.modifiedAtMs)
+      : Date.parse(String(file.modifiedAt || ''));
+    if (beforeStats.size !== Number(file.size) || !Number.isFinite(expectedModifiedAtMs) ||
+        Math.abs(beforeStats.mtimeMs - expectedModifiedAtMs) >= 1) {
+      const changed = new Error(`精确重复核验前源文件发生变化：${file.relativePath}`);
+      changed.code = 'SOURCE_CHANGED';
+      throw changed;
+    }
+    const md5 = await hashFileMd5(absolutePath, signal, pauseController);
+    const afterStats = await fs.stat(absolutePath);
+    if (afterStats.size !== beforeStats.size || Math.abs(afterStats.mtimeMs - beforeStats.mtimeMs) >= 1) {
+      const changed = new Error(`精确重复核验期间源文件发生变化：${file.relativePath}`);
+      changed.code = 'SOURCE_CHANGED';
+      throw changed;
+    }
+    delete file.md5SkippedReason;
+    delete file.similarityEligible;
+    file.md5 = md5;
+    hashedFiles += 1;
+    hashedBytes += Number(file.size || 0);
+    const relativePath = normalizePath(file.relativePath || file.name);
+    remaining = remaining.filter(({ files }) => {
+      const candidate = files.get(relativePath);
+      return candidate && candidate.size === Number(file.size) && candidate.md5 === md5;
+    });
+    onProgress({
+      currentFile: file.relativePath,
+      processedFiles: hashedFiles,
+      totalFiles: missing.length,
+      processedBytes: hashedBytes,
+      totalBytes,
+      percent: totalBytes === 0 ? 100 : Math.round((hashedBytes / totalBytes) * 100)
+    });
+    if (remaining.length === 0) break;
+  }
+  return {
+    manifest: workingManifest,
+    matches: remaining.map(({ record }) => record),
+    hashedFiles,
+    hashedBytes
+  };
+}
+
+// Verify a partial historical manifest without materializing every candidate MD5.
+// The caller owns one shared budget, so several shape-only candidates cannot each
+// trigger an unbounded full-tree read.
+async function verifyManifestMd5AgainstReference(sourcePath, sourceType, candidateManifest, referenceManifest, options = {}) {
+  const { signal, pauseController, onProgress = () => {}, budget = {} } = options;
+  if (!Array.isArray(candidateManifest) || !Array.isArray(referenceManifest) ||
+      candidateManifest.length !== referenceManifest.length || candidateManifest.length === 0) {
+    return { matches: false, budgetExceeded: false, hashedFiles: 0, hashedBytes: 0 };
+  }
+
+  const referenceFiles = new Map();
+  for (const file of referenceManifest) {
+    const relativePath = String(file?.relativePath || '').replace(/\\/g, '/').toLocaleLowerCase('en-US');
+    const md5 = String(file?.md5 || '').toLocaleLowerCase('en-US');
+    if (!relativePath || referenceFiles.has(relativePath) || !/^[a-f0-9]{32}$/.test(md5)) {
+      return { matches: false, budgetExceeded: false, hashedFiles: 0, hashedBytes: 0 };
+    }
+    referenceFiles.set(relativePath, { ...file, md5 });
+  }
+
+  const missing = [];
+  const seenPaths = new Set();
+  for (const file of candidateManifest) {
+    const relativePath = String(file?.relativePath || '').replace(/\\/g, '/').toLocaleLowerCase('en-US');
+    const reference = referenceFiles.get(relativePath);
+    if (!relativePath || seenPaths.has(relativePath) || !reference || Number(file?.size) !== Number(reference.size)) {
+      return { matches: false, budgetExceeded: false, hashedFiles: 0, hashedBytes: 0 };
+    }
+    seenPaths.add(relativePath);
+    const md5 = String(file?.md5 || '').toLocaleLowerCase('en-US');
+    if (/^[a-f0-9]{32}$/.test(md5)) {
+      if (md5 !== reference.md5) {
+        return { matches: false, budgetExceeded: false, hashedFiles: 0, hashedBytes: 0 };
+      }
+    } else {
+      missing.push({ file, reference });
+    }
+  }
+
+  missing.sort((left, right) =>
+    Number(left.file.size) - Number(right.file.size) ||
+    String(left.file.relativePath).localeCompare(String(right.file.relativePath), 'zh-CN'));
+  const requiredFiles = missing.length;
+  const requiredBytes = missing.reduce((sum, item) => sum + Number(item.file.size || 0), 0);
+  const remainingFiles = Number.isFinite(Number(budget.remainingFiles))
+    ? Math.max(0, Number(budget.remainingFiles))
+    : Number.POSITIVE_INFINITY;
+  const remainingBytes = Number.isFinite(Number(budget.remainingBytes))
+    ? Math.max(0, Number(budget.remainingBytes))
+    : Number.POSITIVE_INFINITY;
+  if (requiredFiles > remainingFiles || requiredBytes > remainingBytes) {
+    return {
+      matches: false,
+      budgetExceeded: true,
+      requiredFiles,
+      requiredBytes,
+      hashedFiles: 0,
+      hashedBytes: 0
+    };
+  }
+
+  let hashedFiles = 0;
+  let hashedBytes = 0;
+  for (const { file, reference } of missing) {
+    await pauseController?.waitIfPaused(signal);
+    if (signal?.aborted) throw new CancelledError();
+    const absolutePath = sourceType === 'video'
+      ? sourcePath
+      : path.join(sourcePath, ...String(file.relativePath || '').split('/'));
+    const beforeStats = await fs.stat(absolutePath);
+    const expectedModifiedAtMs = Number.isFinite(Number(file.modifiedAtMs))
+      ? Number(file.modifiedAtMs)
+      : Date.parse(String(file.modifiedAt || ''));
+    if (beforeStats.size !== Number(file.size) || !Number.isFinite(expectedModifiedAtMs) ||
+        Math.abs(beforeStats.mtimeMs - expectedModifiedAtMs) >= 1) {
+      const changed = new Error(`精确重复核验前源文件发生变化：${file.relativePath}`);
+      changed.code = 'SOURCE_CHANGED';
+      throw changed;
+    }
+
+    if (Number.isFinite(remainingFiles)) budget.remainingFiles = Math.max(0, Number(budget.remainingFiles) - 1);
+    if (Number.isFinite(remainingBytes)) budget.remainingBytes = Math.max(0, Number(budget.remainingBytes) - Number(file.size));
+    hashedFiles += 1;
+    hashedBytes += Number(file.size);
+    const md5 = await hashFileMd5(absolutePath, signal, pauseController);
+    const afterStats = await fs.stat(absolutePath);
+    if (afterStats.size !== beforeStats.size || Math.abs(afterStats.mtimeMs - beforeStats.mtimeMs) >= 1) {
+      const changed = new Error(`精确重复核验期间源文件发生变化：${file.relativePath}`);
+      changed.code = 'SOURCE_CHANGED';
+      throw changed;
+    }
+    onProgress({
+      currentFile: file.relativePath,
+      processedFiles: hashedFiles,
+      totalFiles: missing.length,
+      processedBytes: hashedBytes,
+      totalBytes: requiredBytes,
+      percent: requiredBytes === 0 ? 100 : Math.round((hashedBytes / requiredBytes) * 100)
+    });
+    if (md5 !== reference.md5) {
+      return { matches: false, budgetExceeded: false, hashedFiles, hashedBytes };
+    }
+  }
+  return { matches: true, budgetExceeded: false, hashedFiles, hashedBytes };
 }
 
 async function validateManifestUnchanged(sourcePath, sourceType, manifest, signal, pauseController) {
@@ -331,9 +544,12 @@ async function collectDirectories(sourcePath, sourceType, options = {}) {
 
 module.exports = {
   DEFAULT_LARGE_FOLDER_FILE_THRESHOLD,
+  DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT,
   DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES,
   LARGE_FOLDER_MD5_SAMPLE_LIMIT,
+  MAX_LARGE_FOLDER_MD5_SAMPLE_LIMIT,
   MAX_TINY_FILE_MD5_THRESHOLD_BYTES,
+  MIN_LARGE_FOLDER_MD5_SAMPLE_LIMIT,
   MIN_TINY_FILE_MD5_THRESHOLD_BYTES,
   TINY_FILE_MD5_MIN_BYTES,
   buildManifest,
@@ -343,5 +559,7 @@ module.exports = {
   createFingerprintPlan,
   hashFileMd5,
   selectRepresentativeFiles,
-  validateManifestUnchanged
+  validateManifestUnchanged,
+  verifyManifestMd5AgainstCompleteCandidates,
+  verifyManifestMd5AgainstReference
 };

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.5.15",
+  "notes": {
+    "zh-CN": [
+      "扫描和拖入阶段只做低成本相似预检，不读取文件内容或计算 MD5；疑似相似项目会先等待人工确认。",
+      "精确重复只接受完整相对路径、文件大小和有效 MD5 全部一致，并按设置保留为可审计的已跳过项或从队列移除。",
+      "当前任务的精确核验 MD5 会在确认后继续、库内未压缩项目压缩和后续相似报告中复用。",
+      "跨目录旧候选使用单项目读取预算，证据不足时转为人工确认；扫描、定时等待和跳过原因统一写入运行日志。"
+    ],
+    "en-US": [
+      "Scanning and drag-and-drop use low-cost similarity metadata without reading file contents or calculating MD5; possible matches wait for confirmation.",
+      "An exact duplicate requires complete relative paths, file sizes and valid MD5 values, then remains as an auditable skipped item or is removed according to the setting.",
+      "Current-task MD5 verification is reused after confirmation, for compressing unarchived catalog items and in later similarity reports.",
+      "Cross-directory historical candidates use a one-project read budget and fall back to manual review when evidence is incomplete; scan, schedule and skip reasons are recorded in the run log."
+    ]
+  }
+}

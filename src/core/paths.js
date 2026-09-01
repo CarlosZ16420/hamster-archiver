@@ -133,6 +133,7 @@ function makeDefaultConfig(workspaceRoot, userDataLayout = {}) {
     minimumTaskBytes: 100 * MIB,
     largeFolderSimplification: false,
     largeFolderFileThreshold: 500,
+    largeFolderMd5SampleLimit: 200,
     skipTinyMd5Files: false,
     tinyFileMd5ThresholdBytes: 5 * 1024,
     autoSkipExactDuplicates: false,

@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const path = require('node:path');
 
 // ---------------------------------------------------------------------------
@@ -120,12 +121,80 @@ function findTaskNameMatches(task, catalog) {
   return matches.slice(0, 20);
 }
 
+function normalizeMd5(value) {
+  const md5 = String(value || '').trim().toLocaleLowerCase('en-US');
+  return /^[a-f0-9]{32}$/.test(md5) ? md5 : '';
+}
+
+function normalizedProjectManifestEntries(manifest) {
+  if (!Array.isArray(manifest) || manifest.length === 0) return null;
+  const entries = [];
+  const seenPaths = new Set();
+  for (const file of manifest) {
+    const relativePath = normalizeEntryPath(file?.relativePath || file?.name)
+      .normalize('NFKC')
+      .toLocaleLowerCase('zh-CN');
+    const size = Number(file?.size);
+    if (!relativePath || seenPaths.has(relativePath) || !Number.isFinite(size) || size < 0) return null;
+    seenPaths.add(relativePath);
+    entries.push({
+      relativePath,
+      size,
+      md5: normalizeMd5(file?.md5),
+      modifiedAtMs: Number.isFinite(Number(file?.modifiedAtMs))
+        ? Number(file.modifiedAtMs)
+        : Date.parse(String(file?.modifiedAt || ''))
+    });
+  }
+  return entries.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN'));
+}
+
+function hashManifestEntries(entries, includeContent, includeObservation = false) {
+  const hash = crypto.createHash('sha256');
+  for (const entry of entries) {
+    hash.update(entry.relativePath);
+    hash.update('\0');
+    hash.update(String(entry.size));
+    hash.update('\0');
+    if (includeContent) hash.update(entry.md5);
+    if (includeObservation) {
+      hash.update('\0');
+      hash.update(Number.isFinite(entry.modifiedAtMs) ? String(entry.modifiedAtMs) : '');
+    }
+    hash.update('\n');
+  }
+  return hash.digest('hex');
+}
+
+function createProjectFingerprint(manifest) {
+  const entries = normalizedProjectManifestEntries(manifest);
+  if (!entries) {
+    return { valid: false, fileCount: 0, totalBytes: 0, shapeHash: '', contentHash: '', completeMd5: false };
+  }
+  const completeMd5 = entries.every((entry) => Boolean(entry.md5));
+  return {
+    valid: true,
+    fileCount: entries.length,
+    totalBytes: entries.reduce((sum, entry) => sum + entry.size, 0),
+    shapeHash: hashManifestEntries(entries, false),
+    contentHash: completeMd5 ? hashManifestEntries(entries, true) : '',
+    completeMd5
+  };
+}
+
+function createManifestReviewFingerprint(manifest) {
+  const entries = normalizedProjectManifestEntries(manifest);
+  if (!entries) return '';
+  return hashManifestEntries(entries, true, true);
+}
+
 function findExactFileMatches(manifest, catalog) {
   const index = new Map();
   for (const record of catalog) {
     for (const file of record.manifest || []) {
-      if (!file.md5) continue;
-      const key = `${file.size}:${file.md5}`;
+      const md5 = normalizeMd5(file.md5);
+      if (!md5) continue;
+      const key = `${file.size}:${md5}`;
       if (!index.has(key)) index.set(key, []);
       index.get(key).push({
         archiveId: record.id,
@@ -138,11 +207,13 @@ function findExactFileMatches(manifest, catalog) {
 
   const matches = [];
   for (const file of manifest) {
-    const previous = index.get(`${file.size}:${file.md5}`);
+    const md5 = normalizeMd5(file.md5);
+    if (!md5) continue;
+    const previous = index.get(`${file.size}:${md5}`);
     if (!previous) continue;
     matches.push({
       sourceRelativePath: file.relativePath,
-      md5: file.md5,
+      md5,
       size: file.size,
       previous: previous.slice(0, 5)
     });
@@ -152,32 +223,24 @@ function findExactFileMatches(manifest, catalog) {
 }
 
 function exactProjectManifestKey(manifest) {
-  if (!Array.isArray(manifest) || manifest.length === 0) return '';
-  const entries = [];
-  for (const file of manifest) {
-    const relativePath = normalizeEntryPath(file?.relativePath || file?.name)
-      .normalize('NFKC')
-      .toLocaleLowerCase('zh-CN');
-    const size = Number(file?.size);
-    const md5 = String(file?.md5 || '').trim().toLocaleLowerCase('en-US');
-    if (!relativePath || !Number.isFinite(size) || size < 0 || !/^[a-f0-9]{32}$/.test(md5)) return '';
-    entries.push(`${relativePath}\u0000${size}\u0000${md5}`);
-  }
-  return entries.sort((left, right) => left.localeCompare(right, 'zh-CN')).join('\n');
+  const fingerprint = createProjectFingerprint(manifest);
+  return fingerprint.completeMd5 ? fingerprint.contentHash : '';
 }
 
 function exactProjectShapeKey(manifest) {
-  if (!Array.isArray(manifest) || manifest.length === 0) return '';
-  const entries = [];
-  for (const file of manifest) {
-    const relativePath = normalizeEntryPath(file?.relativePath || file?.name)
-      .normalize('NFKC')
-      .toLocaleLowerCase('zh-CN');
-    const size = Number(file?.size);
-    if (!relativePath || !Number.isFinite(size) || size < 0) return '';
-    entries.push(`${relativePath}\u0000${size}`);
-  }
-  return entries.sort((left, right) => left.localeCompare(right, 'zh-CN')).join('\n');
+  const fingerprint = createProjectFingerprint(manifest);
+  return fingerprint.valid ? fingerprint.shapeHash : '';
+}
+
+function projectManifestEntriesEqual(leftManifest, rightManifest, includeMd5) {
+  const left = normalizedProjectManifestEntries(leftManifest);
+  const right = normalizedProjectManifestEntries(rightManifest);
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((entry, index) => {
+    const candidate = right[index];
+    return candidate && entry.relativePath === candidate.relativePath && entry.size === candidate.size &&
+      (!includeMd5 || (Boolean(entry.md5) && entry.md5 === candidate.md5));
+  });
 }
 
 function findExactProjectShapeMatches(manifest, catalog, excludedRecordId = '') {
@@ -187,7 +250,8 @@ function findExactProjectShapeMatches(manifest, catalog, excludedRecordId = '') 
     record?.id !== excludedRecordId &&
     Array.isArray(record?.manifest) &&
     record.manifest.length === manifest.length &&
-    exactProjectShapeKey(record.manifest) === targetKey
+    exactProjectShapeKey(record.manifest) === targetKey &&
+    projectManifestEntriesEqual(manifest, record.manifest, false)
   ).map((record) => ({
     id: record.id,
     title: record.title || record.displayName || '',
@@ -203,7 +267,8 @@ function findExactProjectMatches(manifest, catalog, excludedRecordId = '') {
     record?.id !== excludedRecordId &&
     Array.isArray(record?.manifest) &&
     record.manifest.length === manifest.length &&
-    exactProjectManifestKey(record.manifest) === targetKey
+    exactProjectManifestKey(record.manifest) === targetKey &&
+    projectManifestEntriesEqual(manifest, record.manifest, true)
   ).map((record) => ({
     id: record.id,
     title: record.title || record.displayName || '',
@@ -691,20 +756,39 @@ function findSimilarEntryMatches(subject, candidates, ignoreTerms = [], options 
       }
     }
   }
-  const exactCandidates = Array.isArray(options.exactCandidates) ? options.exactCandidates : candidates;
-  for (const candidate of exactCandidates || []) {
-    const common = { recordId: candidate.id, title: candidate.title || candidate.displayName || '' };
-    for (const file of candidate.manifest || []) {
-      if (!file?.md5) continue;
-      const entry = {
-        ...common,
-        kind: 'file',
-        relativePath: normalizeEntryPath(file.relativePath),
-        name: file.name || entryName(file.relativePath),
-        file
-      };
-      if (Number(file.size) >= 0) {
-        addIndex(exactFileIndex, `${Number(file.size)}:${String(file.md5).toLocaleLowerCase()}`, entry);
+  if (Array.isArray(options.exactFileMatches)) {
+    for (const match of options.exactFileMatches) {
+      const md5 = normalizeMd5(match?.md5);
+      if (!md5 || !(Number(match?.size) >= 0)) continue;
+      for (const previous of match.previous || []) {
+        const relativePath = normalizeEntryPath(previous.relativePath);
+        addIndex(exactFileIndex, `${Number(match.size)}:${md5}`, {
+          recordId: previous.archiveId,
+          title: previous.archivedTask || '',
+          kind: 'file',
+          relativePath,
+          name: entryName(relativePath),
+          file: { relativePath, size: Number(match.size), md5 }
+        });
+      }
+    }
+  } else {
+    const exactCandidates = Array.isArray(options.exactCandidates) ? options.exactCandidates : candidates;
+    for (const candidate of exactCandidates || []) {
+      const common = { recordId: candidate.id, title: candidate.title || candidate.displayName || '' };
+      for (const file of candidate.manifest || []) {
+        const md5 = normalizeMd5(file?.md5);
+        if (!md5) continue;
+        const entry = {
+          ...common,
+          kind: 'file',
+          relativePath: normalizeEntryPath(file.relativePath),
+          name: file.name || entryName(file.relativePath),
+          file
+        };
+        if (Number(file.size) >= 0) {
+          addIndex(exactFileIndex, `${Number(file.size)}:${md5}`, entry);
+        }
       }
     }
   }
@@ -737,15 +821,15 @@ function findSimilarEntryMatches(subject, candidates, ignoreTerms = [], options 
   for (const sourceFile of subjectFiles) {
     const targets = new Set(similarityCandidateKeys({ title: sourceFile.name }, ignoreTerms)
       .flatMap((key) => textIndex.get(`file:${key}`) || []));
-    if (sourceFile.file.md5) {
-      for (const target of exactFileIndex.get(`${Number(sourceFile.file.size)}:${String(sourceFile.file.md5).toLocaleLowerCase()}`) || []) targets.add(target);
+    const sourceMd5 = normalizeMd5(sourceFile.file.md5);
+    if (sourceMd5) {
+      for (const target of exactFileIndex.get(`${Number(sourceFile.file.size)}:${sourceMd5}`) || []) targets.add(target);
     }
     if (VIDEO_EXTENSIONS.has(String(sourceFile.file.extension || path.extname(sourceFile.name)).toLocaleLowerCase()) && Number(sourceFile.file.size) > 0) {
       for (const target of videoSizeIndex.get(String(Number(sourceFile.file.size))) || []) targets.add(target);
     }
     for (const targetFile of targets) {
-        const exactContent = sourceFile.file.md5 && targetFile.file.md5 &&
-          String(sourceFile.file.md5).toLocaleLowerCase() === String(targetFile.file.md5).toLocaleLowerCase() &&
+        const exactContent = Boolean(sourceMd5) && sourceMd5 === normalizeMd5(targetFile.file.md5) &&
           Number(sourceFile.file.size) === Number(targetFile.file.size);
         const sameVideoSize = VIDEO_EXTENSIONS.has(String(sourceFile.file.extension || path.extname(sourceFile.name)).toLocaleLowerCase()) &&
           VIDEO_EXTENSIONS.has(String(targetFile.file.extension || path.extname(targetFile.name)).toLocaleLowerCase()) &&
@@ -818,6 +902,8 @@ module.exports = {
   DEFAULT_SIMILARITY_STRENGTH,
   SIMILARITY_STRENGTHS,
   STRENGTH_PRESETS,
+  createManifestReviewFingerprint,
+  createProjectFingerprint,
   createSimilarityScorer,
   documentTerms,
   findExactFileMatches,

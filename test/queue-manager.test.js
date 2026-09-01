@@ -238,7 +238,7 @@ test('exact duplicate tasks can be cleared separately', async () => {
   assert.deepEqual(manager.jobs.map((job) => job.id), ['possible']);
 });
 
-test('automatic exact-duplicate checking inventories name matches instead of blocking before MD5', () => {
+test('name and similarity evidence is a nonblocking notice before MD5 work', () => {
   const manager = new QueueManager(new FakeStore(), {
     libraryDir: 'E:\\library',
     autoSkipExactDuplicates: true
@@ -253,13 +253,15 @@ test('automatic exact-duplicate checking inventories name matches instead of blo
   });
 
   assert.equal(normal.status, 'queued');
-  assert.equal(normal.stageText, '等待精确重复核验');
-  assert.equal(normal.automaticDuplicateCheckPending, true);
+  assert.match(normal.stageText, /名称存在仓库候选.*等待选择入库方式/);
+  assert.equal(normal.similarityPreflightBlocking, false);
+  assert.equal(normal.automaticDuplicateCheckPending, false);
   assert.equal(large.status, 'awaiting_confirmation');
   assert.ok(large.confirmationReasons.includes('large_task'));
+  assert.match(large.stageText, /名称存在仓库候选.*等待手动确认/);
 });
 
-test('queued automatic duplicate checking can be manually confirmed and continued', async () => {
+test('nonblocking preflight similarity notice still waits for the user to select an intake mode', async () => {
   const manager = new QueueManager(new FakeStore(), {
     libraryDir: 'E:\\library',
     autoSkipExactDuplicates: true
@@ -270,11 +272,13 @@ test('queued automatic duplicate checking can be manually confirmed and continue
   });
   manager.jobs = [job];
 
-  await manager.confirmJob(job.id);
-
   assert.equal(job.status, 'queued');
   assert.equal(job.automaticDuplicateCheckPending, false);
-  assert.ok(job.duplicateConfirmedAt);
+  assert.equal(job.duplicateConfirmedAt, null);
+  assert.equal(job.exactDuplicateOverrideAt, null);
+  assert.equal(job.intakeModeSelected, false);
+  assert.match(job.stageText, /名称存在仓库候选.*等待选择入库方式/);
+  await assert.rejects(() => manager.confirmJob(job.id), /不处于等待确认状态/);
 });
 
 test('automatic exact-duplicate checking can keep the skipped queue item and persistent log', async (t) => {
@@ -302,7 +306,41 @@ test('automatic exact-duplicate checking can keep the skipped queue item and per
   assert.ok(manager.logs.some((entry) => /源文件和仓库均未修改，队列项已保留/.test(entry.message)));
 });
 
-test('automatic exact-duplicate checking immediately reuses unchanged kept sources for compressed and uncompressed records', async (t) => {
+test('a name warning does not require preflight confirmation before automatic exact-duplicate skipping', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-after-name-confirm-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, '第3位女主角？（１８歲）');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, '1.jpg'), 'same-content');
+  const manifest = await buildManifest(sourcePath, 'directory');
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    archiveStagingDirectory: path.join(root, 'staging'),
+    smallItemFilter: false,
+    autoSkipExactDuplicates: true,
+    autoSkipExactDuplicateAction: 'keep'
+  });
+  manager.catalog = [{
+    id: 'existing', title: '第3位女主角？（１８歲）', displayName: '第3位女主角？（１８歲）',
+    sourceType: 'directory', manifest
+  }];
+
+  await manager.addSingle(sourcePath);
+  const job = manager.jobs[0];
+  assert.equal(job.status, 'queued');
+  assert.match(job.stageText, /名称存在仓库候选/);
+  assert.equal(job.duplicateConfirmedAt, null);
+  assert.equal(job.exactDuplicateOverrideAt, null);
+
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startInventoryOnlyQueue();
+  await idle;
+
+  assert.equal(job.status, 'skipped_duplicate');
+  assert.equal(job.stageText, '与仓库内项目完全一致，已自动跳过');
+});
+
+test('scanning never auto-skips from historical metadata even when the source path is unchanged', async (t) => {
   for (const archiveState of ['uncompressed', 'compressed']) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), `hamster-auto-skip-reuse-${archiveState}-`));
     t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -325,14 +363,15 @@ test('automatic exact-duplicate checking immediately reuses unchanged kept sourc
 
     await manager.addSingle(sourcePath);
 
-    assert.equal(manager.jobs[0].status, 'skipped_duplicate', archiveState);
+    assert.equal(manager.jobs[0].status, 'queued', archiveState);
+    assert.match(manager.jobs[0].stageText, /名称存在仓库候选/, archiveState);
     assert.equal(manager.jobs[0].automaticDuplicateCheckPending, false, archiveState);
-    assert.deepEqual(manager.jobs[0].exactProjectMatches.map((match) => match.id), [`${archiveState}-existing`]);
-    assert.ok(await manager.store.loadPendingManifest(manager.config.repositoryDirectory, manager.jobs[0].id));
+    assert.equal(manager.jobs[0].exactProjectMatches, undefined);
+    assert.equal(await manager.store.loadPendingManifest(manager.config.repositoryDirectory, manager.jobs[0].id), null);
   }
 });
 
-test('automatic exact-duplicate checking immediately reuses unchanged sources with sampled MD5 gaps', async (t) => {
+test('same-source metadata without complete MD5 never reports an exact duplicate', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-partial-reuse-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const sourcePath = path.join(root, 'same-project');
@@ -358,9 +397,49 @@ test('automatic exact-duplicate checking immediately reuses unchanged sources wi
 
   await manager.addSingle(sourcePath);
 
-  assert.equal(manager.jobs[0].status, 'skipped_duplicate');
-  assert.equal(manager.jobs[0].stageText, '与仓库内项目完全一致，已自动跳过');
-  assert.deepEqual(manager.jobs[0].exactProjectMatches.map((match) => match.id), ['partial-existing']);
+  assert.equal(manager.jobs[0].status, 'queued');
+  assert.match(manager.jobs[0].stageText, /名称存在仓库候选/);
+  assert.equal(manager.jobs[0].exactProjectMatches, undefined);
+});
+
+test('historical MD5 coverage is not reused as the current task fingerprint during scanning', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-best-snapshot-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'same-project');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'a.txt'), 'same-a');
+  await fs.writeFile(path.join(sourcePath, 'b.txt'), 'same-b');
+  const completeManifest = await buildManifest(sourcePath, 'directory');
+  const partialManifest = completeManifest.map(({ md5: _md5, ...file }) => ({
+    ...file,
+    md5SkippedReason: 'tiny-file'
+  }));
+  const store = new FakeStore();
+  const manager = new QueueManager(store, {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    smallItemFilter: false,
+    autoSkipExactDuplicates: true,
+    autoSkipExactDuplicateAction: 'keep'
+  });
+  manager.catalog = [
+    {
+      id: 'partial-first', title: 'same-project', displayName: 'same-project',
+      archiveState: 'compressed', sourceDisposition: 'kept', sourceType: 'directory',
+      sourcePath, originalSourcePath: sourcePath, manifest: partialManifest
+    },
+    {
+      id: 'complete-later', title: 'same-project', displayName: 'same-project',
+      archiveState: 'compressed', sourceDisposition: 'kept', sourceType: 'directory',
+      sourcePath, originalSourcePath: sourcePath, manifest: completeManifest
+    }
+  ];
+
+  await manager.addSingle(sourcePath);
+
+  assert.equal(manager.jobs[0].status, 'queued');
+  assert.match(manager.jobs[0].stageText, /名称存在仓库候选/);
+  const savedManifest = await store.loadPendingManifest(manager.config.repositoryDirectory, manager.jobs[0].id);
+  assert.equal(savedManifest, null);
 });
 
 test('automatic exact verification fills safeguard MD5 gaps for a copied source when the original is available', async (t) => {
@@ -394,8 +473,9 @@ test('automatic exact verification fills safeguard MD5 gaps for a copied source 
   }];
 
   await manager.addSingle(incomingSource);
-  manager.jobs[0].processingMode = 'inventory_only';
-  await manager.startQueue();
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startInventoryOnlyQueue();
+  await idle;
 
   assert.equal(manager.jobs[0].status, 'skipped_duplicate');
   assert.equal(manager.jobs[0].stageText, '与仓库内项目完全一致，已自动跳过');
@@ -426,12 +506,68 @@ test('automatic exact-duplicate checking hashes copied sources and skips matches
 
     await manager.addSingle(incomingSource);
     assert.equal(manager.jobs[0].status, 'queued', archiveState);
-    manager.jobs[0].processingMode = 'inventory_only';
-    await manager.startQueue();
+    const idle = new Promise((resolve) => manager.once('idle', resolve));
+    await manager.startInventoryOnlyQueue();
+    await idle;
 
     assert.equal(manager.jobs[0].status, 'skipped_duplicate', archiveState);
     assert.deepEqual(manager.jobs[0].exactProjectMatches.map((match) => match.id), [`${archiveState}-existing`]);
   }
+});
+
+test('cross-directory exact verification stops at one-project read budget and falls back to manual review', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-exact-budget-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const incomingSource = path.join(root, 'incoming');
+  const mismatchingSource = path.join(root, 'candidate-mismatch');
+  const matchingSource = path.join(root, 'candidate-match');
+  for (const directory of [incomingSource, mismatchingSource, matchingSource]) await fs.mkdir(directory);
+  await fs.writeFile(path.join(incomingSource, 'a.bin'), 'same-a');
+  await fs.writeFile(path.join(incomingSource, 'b.bin'), 'same-b');
+  await fs.writeFile(path.join(mismatchingSource, 'a.bin'), 'same-a');
+  await fs.writeFile(path.join(mismatchingSource, 'b.bin'), 'other!');
+  await fs.copyFile(path.join(incomingSource, 'a.bin'), path.join(matchingSource, 'a.bin'));
+  await fs.copyFile(path.join(incomingSource, 'b.bin'), path.join(matchingSource, 'b.bin'));
+
+  const incomingManifest = await buildManifest(incomingSource, 'directory');
+  const partialOptions = { skipTinyMd5Files: true, tinyFileMd5ThresholdBytes: 5 * 1024 };
+  const mismatchingManifest = await buildManifest(mismatchingSource, 'directory', partialOptions);
+  const matchingManifest = await buildManifest(matchingSource, 'directory', partialOptions);
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    autoSkipExactDuplicates: true,
+    autoSkipExactDuplicateAction: 'keep'
+  }, {
+    archiveRunner: async (_job, _config, hooks) => hooks.onManifestReady(incomingManifest)
+  });
+  manager.catalog = [
+    {
+      id: 'mismatch-first', title: 'mismatch', displayName: 'mismatch', sourceType: 'directory',
+      sourcePath: mismatchingSource, originalSourcePath: mismatchingSource, manifest: mismatchingManifest
+    },
+    {
+      id: 'match-second', title: 'match', displayName: 'match', sourceType: 'directory',
+      sourcePath: matchingSource, originalSourcePath: matchingSource, manifest: matchingManifest
+    }
+  ];
+
+  manager.jobs = [{
+    ...queuedJob('incoming-job'),
+    sourcePath: incomingSource,
+    sourceType: 'directory',
+    fileCount: incomingManifest.length,
+    totalBytes: incomingManifest.reduce((sum, file) => sum + file.size, 0)
+  }];
+
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startArchiveQueue();
+  await idle;
+
+  assert.equal(manager.jobs[0].status, 'awaiting_duplicate_confirmation');
+  assert.match(manager.jobs[0].stageText, /精确重复候选待人工核对/);
+  assert.ok(manager.logs.some((entry) => /达到读取预算/.test(entry.message)));
+  const savedManifest = await manager.store.loadPendingManifest(manager.config.repositoryDirectory, 'incoming-job');
+  assert.ok(savedManifest.every((file) => /^[a-f0-9]{32}$/.test(String(file.md5 || ''))));
 });
 
 test('queue similarity report summarizes exact files and linked warehouse projects', async () => {
@@ -466,7 +602,7 @@ test('queue similarity report summarizes exact files and linked warehouse projec
   await assert.rejects(() => manager.getQueueSimilarityReport('report-job'), /相似报告已关闭/);
 });
 
-test('queue similarity report stays fast before inventory and one explicit duplicate confirmation continues the task', async (t) => {
+test('queue similarity report asks once after fingerprinting and reuses the confirmed manifest', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-report-exact-flow-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const sourcePath = path.join(root, '相同项目');
@@ -510,10 +646,21 @@ test('queue similarity report stays fast before inventory and one explicit dupli
   assert.equal(reportBeforeInventory.similarProjects[0].exactFileCount, 0);
   assert.equal(await store.loadPendingManifest(manager.config.repositoryDirectory, job.id), null);
 
+  assert.equal(job.status, 'queued');
+  assert.equal(job.duplicateConfirmedAt, null);
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startArchiveQueue();
+  await idle;
+
+  assert.equal(job.status, 'awaiting_duplicate_confirmation');
+  assert.equal(job.exactDuplicateOverrideAt, null);
+  assert.ok(job.duplicateReviewFingerprint);
   await manager.confirmJob(job.id);
-  assert.ok(job.confirmedAt);
-  assert.ok(job.duplicateConfirmedAt);
-  await manager.startQueue();
+  assert.ok(job.exactDuplicateOverrideAt);
+  assert.equal(job.duplicateConfirmedManifestFingerprint, job.duplicateReviewFingerprint);
+  const resumedIdle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startArchiveQueue();
+  await resumedIdle;
 
   assert.equal(job.status, 'completed');
   const reportAfterInventory = await manager.getQueueSimilarityReport(job.id);
@@ -529,7 +676,7 @@ test('queue similarity report stays fast before inventory and one explicit dupli
   assert.ok(!reportAfterInventory.similarProjects[0].reasons.includes('标题一致'));
 });
 
-test('queue similarity report reuses unchanged MD5 values from the same uncompressed source', async (t) => {
+test('queue similarity report waits for current-task MD5 even when an unchanged source has historical fingerprints', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-report-uncompressed-cache-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const sourcePath = path.join(root, '未压缩项目');
@@ -552,11 +699,11 @@ test('queue similarity report reuses unchanged MD5 values from the same uncompre
   manager.jobs = [job];
 
   const unchangedReport = await manager.getQueueSimilarityReport(job.id);
-  assert.equal(unchangedReport.fingerprintPending, false);
-  assert.equal(unchangedReport.reusedFingerprintCount, 1);
-  assert.equal(unchangedReport.manifest[0].md5, manifest[0].md5);
-  assert.equal(unchangedReport.similarProjects[0].exactFileCount, 1);
-  assert.ok(unchangedReport.similarProjects[0].reasons.includes('完整项目精确重复'));
+  assert.equal(unchangedReport.fingerprintPending, true);
+  assert.equal(unchangedReport.reusedFingerprintCount, 0);
+  assert.equal(unchangedReport.manifest[0].md5, undefined);
+  assert.equal(unchangedReport.similarProjects[0].exactFileCount, 0);
+  assert.ok(!unchangedReport.similarProjects[0].reasons.includes('完整项目精确重复'));
 
   await fs.writeFile(sourceFile, 'changed-content-is-longer');
   const changedReport = await manager.getQueueSimilarityReport(job.id);
@@ -613,7 +760,7 @@ test('automatic exact-duplicate checking can remove only the queue item while re
   assert.ok(manager.logs.some((entry) => /源文件和仓库均未修改，队列项已删除/.test(entry.message)));
 });
 
-test('automatic exact-duplicate checking restores duplicate review when the complete project differs', async (t) => {
+test('name matches remain nonblocking until one post-fingerprint similarity review', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-review-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const manager = new QueueManager(new FakeStore(), {
@@ -635,10 +782,16 @@ test('automatic exact-duplicate checking restores duplicate review when the comp
     displayName: '相同项目', fileCount: 1, totalBytes: 4
   })];
 
-  await manager.startQueue();
+  assert.equal(manager.jobs[0].status, 'queued');
+  assert.match(manager.jobs[0].stageText, /名称存在仓库候选.*等待选择入库方式/);
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startArchiveQueue();
+  await idle;
 
   assert.equal(manager.jobs[0].status, 'awaiting_duplicate_confirmation');
-  assert.match(manager.jobs[0].stageText, /已延后等待确认/);
+  assert.equal(manager.jobs[0].duplicateReviewKind, 'similarity');
+  assert.match(manager.jobs[0].stageText, /相似项目或视频.*延后等待确认/);
+  assert.ok(await manager.store.loadPendingManifest(manager.config.repositoryDirectory, manager.jobs[0].id));
   assert.equal(manager.catalog.length, 1);
 });
 
@@ -1000,6 +1153,7 @@ test('each queued task snapshots performance safeguard settings', async () => {
     libraryDir: 'E:\\library',
     largeFolderSimplification: true,
     largeFolderFileThreshold: 800,
+    largeFolderMd5SampleLimit: 240,
     skipTinyMd5Files: true,
     tinyFileMd5ThresholdBytes: 128 * 1024
   });
@@ -1014,14 +1168,17 @@ test('each queued task snapshots performance safeguard settings', async () => {
   await manager.updateConfig({
     largeFolderSimplification: false,
     largeFolderFileThreshold: 1200,
+    largeFolderMd5SampleLimit: 320,
     skipTinyMd5Files: false,
     tinyFileMd5ThresholdBytes: 256 * 1024
   });
   assert.equal(job.largeFolderSimplification, true);
   assert.equal(job.largeFolderFileThreshold, 800);
+  assert.equal(job.largeFolderMd5SampleLimit, 240);
   assert.equal(job.skipTinyMd5Files, true);
   assert.equal(job.tinyFileMd5ThresholdBytes, 128 * 1024);
   await assert.rejects(manager.updateConfig({ largeFolderFileThreshold: 0 }), /1—100000/);
+  await assert.rejects(manager.updateConfig({ largeFolderMd5SampleLimit: 0 }), /1—100000/);
   await assert.rejects(manager.updateConfig({ tinyFileMd5ThresholdBytes: 0 }), /1 KB—1 GB/);
 });
 
@@ -1212,6 +1369,53 @@ test('schedule refuses a task whose estimate exceeds the remaining window', () =
   const decision = manager.canStartScheduledJob({ totalBytes: 20 * 1024 ** 3 }, new Date(2026, 7, 15, 10, 5));
   assert.equal(decision.allowed, false);
   assert.ok(decision.estimatedMs > decision.remainingMs);
+});
+
+test('a scanned task waits for an explicit intake mode and is ignored by the scheduler', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-scan-mode-selection-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const item = path.join(root, '待入库项目');
+  await fs.mkdir(item);
+  await fs.writeFile(path.join(item, 'one.txt'), 'one');
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library',
+    smallItemFilter: false,
+    scheduleEnabled: true,
+    scheduleStart: '00:00',
+    scheduleEnd: '23:59'
+  });
+
+  await manager.scanSource(root, 'scan-1');
+
+  assert.equal(manager.jobs.length, 1);
+  assert.equal(manager.jobs[0].status, 'queued');
+  assert.equal(manager.jobs[0].intakeModeSelected, false);
+  assert.equal(manager.jobs[0].stageText, '等待选择入库方式');
+  let starts = 0;
+  manager.startQueue = async () => { starts += 1; };
+  await manager.handleScheduleTick(new Date(2026, 7, 15, 12, 0));
+  assert.equal(starts, 0);
+});
+
+test('manual compressed-intake selection outside the schedule is recorded in the run log', async () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.jobs = [{
+    ...queuedJob('scheduled'),
+    intakeModeSelected: false,
+    stageText: '等待选择入库方式'
+  }];
+  manager.canStartScheduledJob = () => ({ allowed: false, estimatedMs: 60_000, remainingMs: 0 });
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+
+  await manager.startArchiveQueue();
+  await idle;
+
+  assert.equal(manager.jobs[0].processingMode, 'archive');
+  assert.equal(manager.jobs[0].intakeModeSelected, true);
+  assert.equal(manager.scheduleWaiting, true);
+  assert.ok(manager.logs.some((entry) => /已选择压缩入库/.test(entry.message)));
+  assert.ok(manager.logs.some((entry) => /不在定时运行时段；已记录入库方式/.test(entry.message)));
+  assert.ok(manager.logs.some((entry) => entry.message === '队列已进入定时等待。'));
 });
 
 test('compression estimates use persisted recent speed samples', async () => {

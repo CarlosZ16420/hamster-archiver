@@ -8,7 +8,9 @@ const path = require('node:path');
 const test = require('node:test');
 const {
   buildManifest,
-  createFingerprintPlan
+  completeManifestMd5,
+  createFingerprintPlan,
+  verifyManifestMd5AgainstCompleteCandidates
 } = require('../src/core/manifest');
 
 test('large-folder planning selects a stable representative set of 200 files', () => {
@@ -25,6 +27,22 @@ test('large-folder planning selects a stable representative set of 200 files', (
   assert.equal(plan.selectedFiles.length, 200);
   assert.ok(files.slice(0, 100).every((file) => plan.selectedPaths.has(file.relativePath)));
   assert.ok(plan.selectedPaths.has(files[995].relativePath), 'the spread sample should cover the end of the directory');
+});
+
+test('large-folder planning uses the user-selected representative file count', () => {
+  const files = Array.from({ length: 1000 }, (_, index) => ({
+    relativePath: `group-${String(index).padStart(4, '0')}/file.bin`,
+    size: index + 1
+  }));
+  const plan = createFingerprintPlan(files, 'directory', {
+    largeFolderSimplification: true,
+    largeFolderFileThreshold: 500,
+    largeFolderMd5SampleLimit: 37
+  });
+
+  assert.equal(plan.simplified, true);
+  assert.equal(plan.sampleLimit, 37);
+  assert.equal(plan.selectedFiles.length, 37);
 });
 
 test('tiny files are removed before filling representative sample slots', () => {
@@ -60,6 +78,44 @@ test('skipping tiny MD5 keeps every file in the archive manifest', async (t) => 
   assert.equal(manifest.find((file) => file.name === 'tiny.txt').md5, undefined);
   assert.equal(manifest.find((file) => file.name === 'tiny.txt').md5SkippedReason, 'tiny-file');
   assert.match(manifest.find((file) => file.name === 'content.bin').md5, /^[a-f0-9]{32}$/);
+});
+
+test('completing MD5 normalizes already hashed entries without retaining skip metadata', async () => {
+  const [completed] = await completeManifestMd5('unused', 'directory', [{
+    relativePath: 'already-hashed.bin',
+    name: 'already-hashed.bin',
+    size: 8,
+    md5: 'ABCDEFABCDEFABCDEFABCDEFABCDEFAB',
+    md5SkippedReason: 'tiny-file',
+    similarityEligible: false
+  }]);
+
+  assert.equal(completed.md5, 'abcdefabcdefabcdefabcdefabcdefab');
+  assert.equal('md5SkippedReason' in completed, false);
+  assert.equal('similarityEligible' in completed, false);
+});
+
+test('exact candidate verification stops hashing as soon as every project candidate is eliminated', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-manifest-candidate-filter-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  for (const [name, content] of [['a.bin', 'actual-a'], ['b.bin', 'actual-b-content'], ['c.bin', 'actual-c-content-longer']]) {
+    await fs.writeFile(path.join(root, name), content);
+  }
+  const complete = await buildManifest(root, 'directory');
+  const partial = complete.map(({ md5: _md5, ...file }) => ({ ...file, md5SkippedReason: 'large-folder-limit' }));
+  const candidates = ['candidate-one', 'candidate-two'].map((id) => ({
+    id,
+    manifest: complete.map((file) => file.name === 'a.bin'
+      ? { ...file, md5: 'ffffffffffffffffffffffffffffffff' }
+      : { ...file })
+  }));
+
+  const result = await verifyManifestMd5AgainstCompleteCandidates(root, 'directory', partial, candidates);
+
+  assert.equal(result.matches.length, 0);
+  assert.equal(result.hashedFiles, 1);
+  assert.match(result.manifest.find((file) => file.name === 'a.bin').md5, /^[a-f0-9]{32}$/);
+  assert.equal(result.manifest.filter((file) => file.md5).length, 1);
 });
 
 test('manifest generation skips and records a file that becomes unreadable', async (t) => {

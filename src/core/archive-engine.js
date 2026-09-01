@@ -285,6 +285,7 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
         pauseController,
         largeFolderSimplification: job.largeFolderSimplification ?? config.largeFolderSimplification,
         largeFolderFileThreshold: job.largeFolderFileThreshold ?? config.largeFolderFileThreshold,
+        largeFolderMd5SampleLimit: job.largeFolderMd5SampleLimit ?? config.largeFolderMd5SampleLimit,
         skipTinyMd5Files: job.skipTinyMd5Files ?? config.skipTinyMd5Files,
         tinyFileMd5ThresholdBytes: job.tinyFileMd5ThresholdBytes ?? config.tinyFileMd5ThresholdBytes,
         onPlan: hooks.onInventoryPlan,

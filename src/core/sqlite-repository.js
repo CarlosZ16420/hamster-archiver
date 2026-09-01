@@ -4,9 +4,9 @@ const crypto = require('node:crypto');
 const fsSync = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
-const { normalizeName, similarityCandidateKeys } = require('./duplicate-check');
+const { createProjectFingerprint, normalizeName, similarityCandidateKeys } = require('./duplicate-check');
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 // 候选键算法版本：saveCatalog 只在记录内容变化时重写键，
 // 算法升级后靠这个版本号把存量记录的键整体重建一次。
@@ -82,6 +82,19 @@ function initializeSchema(database) {
     CREATE INDEX IF NOT EXISTS catalog_files_md5_size ON catalog_files(md5, size);
     CREATE INDEX IF NOT EXISTS catalog_files_name_size ON catalog_files(name, size);
 
+    CREATE TABLE IF NOT EXISTS catalog_project_fingerprints (
+      record_id TEXT PRIMARY KEY REFERENCES catalog_records(id) ON DELETE CASCADE,
+      file_count INTEGER NOT NULL DEFAULT 0,
+      total_bytes INTEGER NOT NULL DEFAULT 0,
+      shape_hash TEXT NOT NULL DEFAULT '',
+      content_hash TEXT NOT NULL DEFAULT '',
+      complete_md5 INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS catalog_project_shape_lookup
+      ON catalog_project_fingerprints(shape_hash, file_count, total_bytes);
+    CREATE INDEX IF NOT EXISTS catalog_project_content_lookup
+      ON catalog_project_fingerprints(content_hash, file_count, total_bytes);
+
     CREATE TABLE IF NOT EXISTS catalog_name_keys (
       record_id TEXT NOT NULL REFERENCES catalog_records(id) ON DELETE CASCADE,
       name_key TEXT NOT NULL,
@@ -132,6 +145,7 @@ function openRepository(repositoryDirectory, options = {}) {
   const database = new DatabaseSync(databasePath);
   initializeSchema(database);
   ensureSimilarityKeyVersion(database);
+  ensureProjectFingerprintVersion(database);
   return { database, databasePath };
 }
 
@@ -156,6 +170,41 @@ function ensureSimilarityKeyVersion(database) {
       INSERT INTO metadata(key, value) VALUES ('similarity_keys_version', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(SIMILARITY_KEYS_VERSION);
+  });
+}
+
+function ensureProjectFingerprintVersion(database) {
+  const version = '1';
+  const row = database.prepare("SELECT value FROM metadata WHERE key = 'project_fingerprints_version'").get();
+  if (row?.value === version) return;
+  withTransaction(database, () => {
+    database.exec('DELETE FROM catalog_project_fingerprints');
+    const insert = database.prepare(`
+      INSERT INTO catalog_project_fingerprints(
+        record_id, file_count, total_bytes, shape_hash, content_hash, complete_md5
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `);
+    for (const record of database.prepare('SELECT id, record_json FROM catalog_records').all()) {
+      let parsed;
+      try {
+        parsed = JSON.parse(record.record_json);
+      } catch {
+        parsed = {};
+      }
+      const fingerprint = createProjectFingerprint(parsed.manifest);
+      insert.run(
+        record.id,
+        fingerprint.fileCount,
+        fingerprint.totalBytes,
+        fingerprint.shapeHash,
+        fingerprint.contentHash,
+        fingerprint.completeMd5 ? 1 : 0
+      );
+    }
+    database.prepare(`
+      INSERT INTO metadata(key, value) VALUES ('project_fingerprints_version', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value
+    `).run(version);
   });
 }
 
@@ -217,6 +266,17 @@ function saveCatalog(database, records, options = {}) {
   const insertSearchTerm = database.prepare('INSERT OR IGNORE INTO catalog_search_terms(record_id, term) VALUES (?, ?)');
   const deleteSimilarityKeys = database.prepare('DELETE FROM catalog_similarity_keys WHERE record_id = ?');
   const insertSimilarityKey = database.prepare('INSERT OR IGNORE INTO catalog_similarity_keys(record_id, candidate_key) VALUES (?, ?)');
+  const upsertProjectFingerprint = database.prepare(`
+    INSERT INTO catalog_project_fingerprints(
+      record_id, file_count, total_bytes, shape_hash, content_hash, complete_md5
+    ) VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(record_id) DO UPDATE SET
+      file_count = excluded.file_count,
+      total_bytes = excluded.total_bytes,
+      shape_hash = excluded.shape_hash,
+      content_hash = excluded.content_hash,
+      complete_md5 = excluded.complete_md5
+  `);
   const indexedIds = new Set(database.prepare('SELECT DISTINCT record_id FROM catalog_search_terms').all().map((row) => row.record_id));
 
   return withTransaction(database, () => {
@@ -279,6 +339,15 @@ function saveCatalog(database, records, options = {}) {
       for (const term of new Set(searchableFields.flatMap(searchGrams))) insertSearchTerm.run(id, term);
       deleteSimilarityKeys.run(id);
       for (const key of similarityCandidateKeys(record, [])) insertSimilarityKey.run(id, key);
+      const fingerprint = createProjectFingerprint(record.manifest);
+      upsertProjectFingerprint.run(
+        id,
+        fingerprint.fileCount,
+        fingerprint.totalBytes,
+        fingerprint.shapeHash,
+        fingerprint.contentHash,
+        fingerprint.completeMd5 ? 1 : 0
+      );
       changed += 1;
     }
     if (deleteMissing) for (const id of existing.keys()) {
@@ -326,22 +395,68 @@ function findCatalogIdsByMd5(database, md5, limit = 2000) {
     .map((row) => row.record_id);
 }
 
+function findCatalogIdsByProjectShape(database, fingerprint) {
+  if (!fingerprint?.shapeHash || !(fingerprint.fileCount > 0)) return [];
+  return database.prepare(`
+    SELECT record_id FROM catalog_project_fingerprints
+    WHERE shape_hash = ? AND file_count = ? AND total_bytes = ?
+  `).all(
+    fingerprint.shapeHash,
+    fingerprint.fileCount,
+    fingerprint.totalBytes
+  ).map((row) => row.record_id);
+}
+
+function findCatalogIdsByProjectContent(database, fingerprint, limit = 20) {
+  if (!fingerprint?.contentHash || fingerprint.completeMd5 !== true || !(fingerprint.fileCount > 0)) return [];
+  return database.prepare(`
+    SELECT record_id FROM catalog_project_fingerprints
+    WHERE content_hash = ? AND file_count = ? AND total_bytes = ? AND complete_md5 = 1
+    LIMIT ?
+  `).all(
+    fingerprint.contentHash,
+    fingerprint.fileCount,
+    fingerprint.totalBytes,
+    Math.max(1, Math.min(1000, Number(limit) || 20))
+  ).map((row) => row.record_id);
+}
+
 function findExactFileMatches(database, manifest, limit = 100) {
-  const lookup = database.prepare(`
-    SELECT f.record_id, f.relative_path, r.display_name, r.record_json
-    FROM catalog_files f JOIN catalog_records r ON r.id = f.record_id
-    WHERE f.md5 = ? AND f.size = ? LIMIT 5
-  `);
+  const sourceFiles = (manifest || []).map((file, sourceIndex) => ({ file, sourceIndex }))
+    .filter(({ file }) => /^[a-f0-9]{32}$/i.test(String(file?.md5 || '')));
   const matches = [];
-  for (const file of manifest || []) {
-    if (!file.md5) continue;
-    const rows = lookup.all(String(file.md5).toLowerCase(), Number(file.size) || 0);
-    if (rows.length > 0) {
+  for (let offset = 0; offset < sourceFiles.length; offset += 200) {
+    const chunk = sourceFiles.slice(offset, offset + 200);
+    const values = chunk.map(() => '(?, ?, ?)').join(', ');
+    const parameters = chunk.flatMap(({ file, sourceIndex }) => [
+      sourceIndex,
+      String(file.md5 || '').trim().toLowerCase(),
+      Number(file.size) || 0
+    ]);
+    const rows = database.prepare(`
+      WITH incoming(source_index, md5, size) AS (VALUES ${values}), ranked AS (
+        SELECT i.source_index, f.record_id, f.relative_path, r.display_name, r.record_json,
+          ROW_NUMBER() OVER (PARTITION BY i.source_index ORDER BY f.record_id, f.ordinal) AS match_rank
+        FROM incoming i
+        JOIN catalog_files f ON f.md5 = i.md5 AND f.size = i.size
+        JOIN catalog_records r ON r.id = f.record_id
+      )
+      SELECT source_index, record_id, relative_path, display_name, record_json
+      FROM ranked WHERE match_rank <= 5 ORDER BY source_index, match_rank
+    `).all(...parameters);
+    const rowsBySource = new Map();
+    for (const row of rows) {
+      if (!rowsBySource.has(row.source_index)) rowsBySource.set(row.source_index, []);
+      rowsBySource.get(row.source_index).push(row);
+    }
+    for (const { file, sourceIndex } of chunk) {
+      const fileRows = rowsBySource.get(sourceIndex) || [];
+      if (fileRows.length === 0) continue;
       matches.push({
         sourceRelativePath: file.relativePath,
-        md5: file.md5,
+        md5: String(file.md5 || '').trim().toLowerCase(),
         size: file.size,
-        previous: rows.map((row) => {
+        previous: fileRows.map((row) => {
           const record = JSON.parse(row.record_json);
           return {
             archiveId: row.record_id,
@@ -351,8 +466,8 @@ function findExactFileMatches(database, manifest, limit = 100) {
           };
         })
       });
+      if (matches.length >= limit) return matches;
     }
-    if (matches.length >= limit) break;
   }
   return matches;
 }
@@ -419,6 +534,8 @@ module.exports = {
   contentHash,
   findCatalogIdsByExactName,
   findCatalogIdsByMd5,
+  findCatalogIdsByProjectContent,
+  findCatalogIdsByProjectShape,
   findCatalogIdsBySearchTerms,
   findCatalogIdsBySimilarityKeys,
   findExactFileMatches,

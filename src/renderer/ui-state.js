@@ -11,14 +11,43 @@
     return { state: 'keep', label: '归档后不移动原文件' };
   },
   shouldShowDuplicateConfirmation(job = {}) {
-    if (job.sourceCatalogRecordId || job.duplicateConfirmedAt) return false;
+    if (job.sourceCatalogRecordId || job.exactDuplicateOverrideAt) return false;
     if (job.status === 'awaiting_duplicate_confirmation') return true;
     if (job.status === 'queued' && (job.automaticDuplicateCheckPending === true ||
       (job.stageText === '等待精确重复核验' && (job.confirmationReasons || []).some((reason) =>
         ['name_match', 'similar_title', 'same_video_size'].includes(reason))))) return true;
-    if (job.status !== 'awaiting_confirmation' || (job.confirmationReasons || []).includes('large_task')) return false;
+    if (job.similarityPreflightBlocking === false || job.status !== 'awaiting_confirmation' ||
+        (job.confirmationReasons || []).includes('large_task')) return false;
     return (job.confirmationReasons || []).some((reason) =>
       ['name_match', 'similar_title', 'same_video_size'].includes(reason));
+  },
+  summarizeScanSkips(items = []) {
+    const summary = {
+      total: items.length,
+      smallItems: 0,
+      smallItemThresholdMb: null,
+      rootNonVideoFiles: 0,
+      links: 0,
+      unreadable: 0,
+      other: 0
+    };
+    for (const item of items) {
+      const reason = String(item?.reason || '');
+      const threshold = reason.match(/^低于过滤阈值 ([\d.]+) MB$/);
+      if (threshold) {
+        summary.smallItems += 1;
+        summary.smallItemThresholdMb ??= threshold[1];
+      } else if (reason === '根级非视频文件') {
+        summary.rootNonVideoFiles += 1;
+      } else if (reason.includes('链接或重解析点')) {
+        summary.links += 1;
+      } else if (item?.code || reason.includes('无法读取') || reason.includes('读取失败')) {
+        summary.unreadable += 1;
+      } else {
+        summary.other += 1;
+      }
+    }
+    return summary;
   },
   similarityProgressPresentation(progress = {}) {
     const total = Math.max(1, Number(progress.total) || 1);

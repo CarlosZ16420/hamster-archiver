@@ -243,7 +243,7 @@
             <div id="notice" class="notice" hidden></div>
             <div id="drop-zone" class="drop-zone">拖拽或粘贴文件夹、视频，快速加入队列</div>
             <div class="summary-grid summary-strip">
-              <article><span>任务</span><strong id="summary-total">0</strong></article><article><span>等待确认</span><strong id="summary-confirm">0</strong></article><article><span>等待压缩</span><strong id="summary-queued">0</strong></article><article><span>已完成</span><strong id="summary-completed">0</strong></article><article><span>原始总量</span><strong id="summary-bytes">0 B</strong></article>
+              <article><span>任务</span><strong id="summary-total">0</strong></article><article><span>等待确认</span><strong id="summary-confirm">0</strong></article><article><span>等待处理</span><strong id="summary-queued">0</strong></article><article><span>已完成</span><strong id="summary-completed">0</strong></article><article><span>原始总量</span><strong id="summary-bytes">0 B</strong></article>
             </div>
             <div class="queue-toolbar">
               <div id="queue-selection-actions" class="context-actions" hidden><span id="selection-count" class="selection-count">未选择任务</span><button id="remove-selected" class="button ghost" disabled>移除所选</button></div>
@@ -252,7 +252,7 @@
                   <label class="queue-setting-toggle"><input id="similarity-report-enabled" type="checkbox" checked><span><strong>相似报告</strong><small>开启后，检测到相似项目时会给出详细报告</small></span></label>
                   <section class="queue-setting-section" aria-labelledby="performance-avoidance-title">
                     <h3 id="performance-avoidance-title">卡顿规避</h3>
-                    <div class="queue-setting-item"><label class="queue-setting-toggle"><input id="large-folder-simplification" type="checkbox"><span><strong>超大文件夹简化处理</strong></span></label><div class="queue-threshold-note"><span class="queue-threshold-clause"><span>对于文件数量超过</span><input id="large-folder-file-threshold" class="queue-inline-number" type="number" min="1" max="100000" step="1" value="500" aria-label="超大文件夹阈值"><span>的文件夹，</span></span><span>选取 200 个代表文件记录 MD5、计算相似度</span></div></div>
+                    <div class="queue-setting-item"><label class="queue-setting-toggle"><input id="large-folder-simplification" type="checkbox"><span><strong>超大文件夹简化处理</strong></span></label><div class="queue-threshold-note"><span class="queue-threshold-clause"><span>对于文件数量超过</span><input id="large-folder-file-threshold" class="queue-inline-number" type="number" min="1" max="100000" step="1" value="500" aria-label="超大文件夹阈值"><span>的文件夹，</span></span><span class="queue-threshold-clause"><span>选取</span><input id="large-folder-md5-sample-limit" class="queue-inline-number" type="number" min="1" max="100000" step="1" value="200" aria-label="代表文件数量"><span>个代表文件记录 MD5、计算相似度</span></span></div></div>
                     <div class="queue-setting-item"><label class="queue-setting-toggle"><input id="skip-tiny-md5-files" type="checkbox"><span><strong>MD5计算跳过极小文件</strong></span></label><div class="queue-threshold-note"><span>小于</span><input id="tiny-file-md5-threshold-kb" class="queue-inline-number" type="number" min="1" max="1048576" step="1" value="5" aria-label="极小文件阈值"><span>KB 的文件不记录 MD5</span></div></div>
                   </section>
                   <label class="queue-setting-toggle"><input id="auto-skip-exact-duplicates" type="checkbox"><span><strong>自动跳过</strong><small>自动跳过已经完整存在于仓库中的项目</small></span></label>
@@ -260,7 +260,7 @@
                     <label><input type="radio" name="auto-skip-exact-duplicate-action" value="remove"> <span>在队列中删除对应项（日志中仍保留）</span></label>
                     <label><input type="radio" name="auto-skip-exact-duplicate-action" value="keep" checked> <span>在队列中保留对应项</span></label>
                   </fieldset>
-                  <p class="queue-setting-note">只有文件数量、相对文件名、文件大小和内容核验全部一致时，才会判定为精确重复项目。部分文件相同不会自动跳过。卡顿规避不会排除自动跳过与名称、路径诊断。</p>
+                  <p class="queue-setting-note">只有完整清单中每个文件都有有效 MD5，且文件数量、相对路径、大小和 MD5 全部一致时，才会判定为精确重复项目。名称或大小相同只会提示可能相似，不会报为精确重复。</p>
                 </div></details>
                 <details class="action-menu"><summary class="button ghost">重复项处理</summary><div class="action-menu-popover"><button id="clear-duplicates" class="menu-button">清除可能重复</button><button id="clear-exact-duplicates" class="menu-button">清除精确重复</button><button id="confirm-all-duplicates" class="menu-button">同意全部重复</button></div></details>
                 <details class="action-menu"><summary class="button ghost">清理队列</summary><div class="action-menu-popover"><button id="clear-completed" class="menu-button">清空已完成队列</button><button id="clear-cancelled" class="menu-button">清空已取消队列</button><button id="clear-queue" class="menu-button danger">一键清空队列…</button></div></details>
@@ -269,6 +269,7 @@
                 <button id="finish-next" class="button ghost">暂停</button>
                 <button id="pause-queue" class="button warning" hidden>暂停当前任务</button>
                 <button id="resume-queue" class="button primary" hidden>继续当前任务</button>
+                <button id="cancel-current" class="button ghost" hidden>取消当前任务</button>
               </div>
             </div>
             <div id="task-list-container" class="table-wrap"><table><thead><tr><th class="select-cell"><input id="select-all-tasks" type="checkbox" aria-label="选择全部任务"></th><th>任务</th><th>文件</th><th>大小</th><th>状态</th><th>进度</th><th>操作</th></tr></thead><tbody id="task-list"></tbody></table><div id="empty-tasks" class="empty-state">还没有任务。点击“扫描目录”选择目录并开始扫描。</div></div>
@@ -277,7 +278,7 @@
 
           <section class="panel log-panel">
             <details class="settings-group log-group" open>
-              <summary class="group-head"><span class="group-title">03 · 运行记录</span><span id="running-indicator" class="running-indicator">空闲</span><span class="group-chevron" aria-hidden="true">⌄</span></summary>
+              <summary class="group-head"><span class="group-title">03 · 运行日志</span><span id="running-indicator" class="running-indicator">空闲</span><span class="group-chevron" aria-hidden="true">⌄</span></summary>
               <div class="group-body"><div id="log-list" class="log-list"><p class="muted">暂无日志</p></div></div>
             </details>
           </section>
@@ -514,7 +515,7 @@
   <dialog id="usage-guide-dialog" class="manual-dialog usage-guide-dialog">
     <div class="dialog-heading"><div><p class="step">使用说明 / QUICK START</p><h2>把资源变成可检索的安全归档</h2></div><button id="close-usage-guide" class="dialog-close" type="button" aria-label="关闭">×</button></div>
     <div class="usage-guide-copy">
-      <section><b>01</b><div><strong>选择资源主目录</strong><p>应用会把其中每个大文件夹与视频分别压缩，生成规整的压缩包，并把内容记录到仓库。</p></div></section>
+      <section><b>01</b><div><strong>选择资源主目录</strong><p>扫描只把每个大文件夹与视频加入队列；随后由您选择压缩入库或不压缩直接入库。</p></div></section>
       <section><b>02</b><div><strong>手动云备份压缩包</strong><p>本工具只负责本地记录，您可以将压缩包存放点设置为云盘自动同步的目录，或自行上传压缩包。</p></div></section>
       <section><b>03</b><div><strong>按需处理单个资源</strong><p>也可以把单个文件夹或视频直接拖入应用，单独加入任务列表。</p></div></section>
       <p class="usage-guide-note">本应用会跳过主目录中的零散图片和其他文件。如需处理，请先把它们收纳到文件夹中。</p>

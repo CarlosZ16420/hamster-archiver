@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { similarityCandidateKeys } = require('../src/core/duplicate-check');
+const { createProjectFingerprint, similarityCandidateKeys } = require('../src/core/duplicate-check');
 const { AppStore, readJson, writeJsonAtomic } = require('../src/core/store');
 const { makeUserDataLayout, resolveUserDataRoot } = require('../src/core/storage-paths');
 
@@ -28,7 +28,7 @@ test('SQLite repository persists catalog, jobs and pending manifests incremental
   const record = {
     id: 'record-one', title: '测试库存', displayName: '测试库存', rating: 4,
     tags: ['视频', '旅行'], inventoryDate: '2026-08-15T10:30:00.000Z',
-    manifest: [{ relativePath: 'movie.mp4', name: 'movie.mp4', size: 123, md5: 'abc', mediaType: 'video' }]
+    manifest: [{ relativePath: 'movie.mp4', name: 'movie.mp4', size: 123, md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', mediaType: 'video' }]
   };
   const job = { id: 'job-one', displayName: '测试任务', sourcePath: 'E:\\input', status: 'queued' };
 
@@ -41,7 +41,21 @@ test('SQLite repository persists catalog, jobs and pending manifests incremental
   assert.equal(await store.verifyRepository(repositoryDirectory), true);
   assert.deepEqual(store.findCatalogIdsBySearchTerms(repositoryDirectory, ['char:测']), ['record-one']);
   assert.deepEqual(store.findCatalogIdsByExactName(repositoryDirectory, '测试库存'), ['record-one']);
+  const fingerprint = createProjectFingerprint(record.manifest);
+  assert.deepEqual(store.findCatalogIdsByProjectShape(repositoryDirectory, fingerprint), ['record-one']);
+  assert.deepEqual(store.findCatalogIdsByProjectContent(repositoryDirectory, fingerprint), ['record-one']);
   assert.equal(store.findExactFileMatches(repositoryDirectory, record.manifest)[0].previous[0].archiveId, 'record-one');
+  const lateExactManifest = [
+    ...Array.from({ length: 120 }, (_, index) => ({
+      relativePath: `unmatched-${index}.bin`, size: index + 1,
+      md5: index.toString(16).padStart(32, '0')
+    })),
+    record.manifest[0]
+  ];
+  assert.equal(
+    store.findExactFileMatches(repositoryDirectory, lateExactManifest, 1)[0].sourceRelativePath,
+    'movie.mp4'
+  );
 
   await store.saveCatalog(repositoryDirectory, [{ ...record, notes: '只更新这一条' }]);
   assert.equal((await store.loadCatalog(repositoryDirectory))[0].notes, '只更新这一条');
@@ -59,7 +73,31 @@ test('SQLite repository persists catalog, jobs and pending manifests incremental
   await store.saveCatalog(repositoryDirectory, []);
   assert.deepEqual(store.findCatalogIdsBySimilarityKeys(repositoryDirectory, similarityKeys), []);
   assert.deepEqual(store.findCatalogIdsByExactName(repositoryDirectory, '测试库存'), []);
+  assert.deepEqual(store.findCatalogIdsByProjectShape(repositoryDirectory, fingerprint), []);
+  assert.deepEqual(store.findCatalogIdsByProjectContent(repositoryDirectory, fingerprint), []);
   assert.equal(store.findExactFileMatches(repositoryDirectory, record.manifest).length, 0);
+  store.closeAll();
+});
+
+test('project shape lookup returns every candidate instead of truncating before a later exact match', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-project-fingerprint-store-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const repositoryDirectory = path.join(root, 'saves');
+  const store = new AppStore(path.join(root, 'user-data'));
+  const records = Array.from({ length: 25 }, (_, index) => ({
+    id: `record-${index}`,
+    title: `项目 ${index}`,
+    displayName: `项目 ${index}`,
+    manifest: [{
+      relativePath: 'same.bin', name: 'same.bin', size: 100,
+      md5: index.toString(16).padStart(32, '0')
+    }]
+  }));
+  await store.saveCatalog(repositoryDirectory, records);
+  const targetFingerprint = createProjectFingerprint(records.at(-1).manifest);
+
+  assert.equal(store.findCatalogIdsByProjectShape(repositoryDirectory, targetFingerprint).length, 25);
+  assert.deepEqual(store.findCatalogIdsByProjectContent(repositoryDirectory, targetFingerprint), ['record-24']);
   store.closeAll();
 });
 

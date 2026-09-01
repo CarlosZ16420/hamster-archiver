@@ -44,6 +44,7 @@ const elements = {
   similarityReportEnabled: document.querySelector('#similarity-report-enabled'),
   largeFolderSimplification: document.querySelector('#large-folder-simplification'),
   largeFolderFileThreshold: document.querySelector('#large-folder-file-threshold'),
+  largeFolderMd5SampleLimit: document.querySelector('#large-folder-md5-sample-limit'),
   skipTinyMd5Files: document.querySelector('#skip-tiny-md5-files'),
   tinyFileMd5ThresholdKb: document.querySelector('#tiny-file-md5-threshold-kb'),
   autoSkipExactDuplicates: document.querySelector('#auto-skip-exact-duplicates'),
@@ -179,9 +180,17 @@ function statusLabel(status) {
   return statusLabels[status] || status;
 }
 
+function jobStatusLabel(job) {
+  return job?.status === 'queued' && job?.intakeModeSelected === false
+    ? '待选入库方式'
+    : statusLabel(job?.status);
+}
+
 let currentState = null;
 let activeCatalogId = null;
 let catalogDetailRequest = 0;
+let nextScanToken = 0;
+let activeScanToken = null;
 let similarityWhitelistContext = null;
 let currentCatalogResults = [];
 let currentCatalogPageRecords = [];
@@ -323,7 +332,7 @@ function queueEstimateText(activeJob, percentage = activeJob.progress || 0) {
 function taskProgressText(job, percentage = job.progress || 0) {
   const base = job.stageText
     ? job.stageText
-    : `${statusLabel(job.status)} · ${Math.round(percentage)}%`;
+    : `${jobStatusLabel(job)} · ${Math.round(percentage)}%`;
   const estimate = queueEstimateText(job, percentage);
   return estimate ? `${base} · ${estimate}` : base;
 }
@@ -653,6 +662,7 @@ function readConfig() {
     similarityReportEnabled: elements.similarityReportEnabled.checked,
     largeFolderSimplification: elements.largeFolderSimplification.checked,
     largeFolderFileThreshold: Number(elements.largeFolderFileThreshold.value),
+    largeFolderMd5SampleLimit: Number(elements.largeFolderMd5SampleLimit.value),
     skipTinyMd5Files: elements.skipTinyMd5Files.checked,
     tinyFileMd5ThresholdBytes: Math.round(Number(elements.tinyFileMd5ThresholdKb.value) * 1024),
     autoSkipExactDuplicates: elements.autoSkipExactDuplicates.checked,
@@ -749,6 +759,7 @@ function updateAutoSkipControls() {
 
 function updatePerformanceAvoidanceControls() {
   elements.largeFolderFileThreshold.disabled = !elements.largeFolderSimplification.checked;
+  elements.largeFolderMd5SampleLimit.disabled = !elements.largeFolderSimplification.checked;
   elements.tinyFileMd5ThresholdKb.disabled = !elements.skipTinyMd5Files.checked;
 }
 
@@ -858,6 +869,7 @@ function renderConfig(config) {
   elements.similarityReportEnabled.checked = config.similarityReportEnabled !== false;
   elements.largeFolderSimplification.checked = config.largeFolderSimplification === true;
   elements.largeFolderFileThreshold.value = String(config.largeFolderFileThreshold || 500);
+  elements.largeFolderMd5SampleLimit.value = String(config.largeFolderMd5SampleLimit || 200);
   elements.skipTinyMd5Files.checked = config.skipTinyMd5Files === true;
   elements.tinyFileMd5ThresholdKb.value = String(Math.round((config.tinyFileMd5ThresholdBytes || (5 * 1024)) / 1024));
   elements.autoSkipExactDuplicates.checked = Boolean(config.autoSkipExactDuplicates);
@@ -951,7 +963,7 @@ function renderJobs(jobs) {
     row.append(make('td', '', formatBytes(job.totalBytes)));
 
     const statusCell = document.createElement('td');
-    statusCell.append(make('span', `status ${job.status}`, statusLabel(job.status)));
+    statusCell.append(make('span', `status ${job.status}`, jobStatusLabel(job)));
     row.append(statusCell);
 
     const progressCell = document.createElement('td');
@@ -984,7 +996,12 @@ function renderJobs(jobs) {
       actionCell.append(actionButton(`确认并按 ${formatBytes(configuredVolumeBytes)} 分卷`, 'confirm', job.id, 'confirm'));
     }
     if (uiState?.shouldShowDuplicateConfirmation(job)) {
-      actionCell.append(actionButton('确认重复并继续', 'confirm', job.id, 'confirm'));
+      actionCell.append(actionButton(
+        job.duplicateReviewKind === 'similarity' ? '确认相似并继续' : '确认重复并继续',
+        'confirm',
+        job.id,
+        'confirm'
+      ));
     }
     if (job.status === 'awaiting_anomaly_confirmation') {
       actionCell.append(
@@ -2331,7 +2348,8 @@ function renderSummary(state) {
     elements.runningIndicator.textContent = t('安全停止：等待确认');
   }
   elements.runningIndicator.classList.toggle('active', state.running);
-  document.querySelector('#start-queue').disabled = state.running || !jobs.some((job) => job.status === 'queued');
+  document.querySelector('#start-queue').disabled = state.running || !jobs.some((job) =>
+    ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
   document.querySelector('#start-inventory-only').disabled = state.running || !jobs.some((job) =>
     !job.sourceCatalogRecordId && ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
   if (state.safetyHalt) document.querySelector('#start-queue').disabled = true;
@@ -2350,7 +2368,7 @@ function renderSummary(state) {
     (job.exactDuplicateMatches || []).length > 0);
   document.querySelector('#confirm-all-duplicates').disabled = !jobs.some((job) =>
     job.status === 'awaiting_duplicate_confirmation' ||
-    (job.status === 'awaiting_confirmation' && (job.confirmationReasons || []).some((reason) =>
+    (job.similarityPreflightBlocking !== false && job.status === 'awaiting_confirmation' && (job.confirmationReasons || []).some((reason) =>
       ['name_match', 'similar_title', 'same_video_size'].includes(reason))));
   elements.undoCatalog.disabled = !state.undoDepth;
   elements.undoCatalog.textContent = t(state.undoDepth ? `撤回：${state.undoLabel}` : '撤回');
@@ -2359,6 +2377,7 @@ function renderSummary(state) {
   const canPause = state.running && !state.paused && ['inventorying', 'compressing', 'verifying'].includes(currentJob?.status);
   document.querySelector('#pause-queue').hidden = !canPause;
   document.querySelector('#resume-queue').hidden = !state.paused;
+  document.querySelector('#cancel-current').hidden = !(state.paused && currentJob);
   renderSafetyChip(Boolean(state.config.autoTrashCompleted), Boolean(state.config.moveCompleted));
 
   if (state.safetyHalt) {
@@ -2370,8 +2389,15 @@ function renderSummary(state) {
   }
 
   if (state.skippedRootFiles.length > 0) {
+    const skipped = uiState.summarizeScanSkips(state.skippedRootFiles);
+    const details = [];
+    if (skipped.smallItems > 0) details.push(t(`${skipped.smallItems} 个低于 ${skipped.smallItemThresholdMb} MB 的小项目`));
+    if (skipped.rootNonVideoFiles > 0) details.push(t(`${skipped.rootNonVideoFiles} 个根目录非视频文件`));
+    if (skipped.links > 0) details.push(t(`${skipped.links} 个链接或重解析点`));
+    if (skipped.unreadable > 0) details.push(t(`${skipped.unreadable} 个无法读取的项目`));
+    if (skipped.other > 0) details.push(t(`${skipped.other} 个不支持的项目`));
     elements.looseSummary.hidden = false;
-    elements.looseSummary.textContent = t(`记录了 ${state.skippedRootFiles.length} 个根级跳过项（非视频、链接或无法读取的内容），当前不会自动移动。`);
+    elements.looseSummary.textContent = `${t('扫描未入队')} ${skipped.total} ${t('项')}${t('：')}${details.join(t('，'))}${t('。')} ${t('这些内容不会移动。')}`;
   } else {
     elements.looseSummary.hidden = true;
   }
@@ -2577,6 +2603,7 @@ elements.largeFolderSimplification.addEventListener('change', () => {
   void saveConfig();
 });
 elements.largeFolderFileThreshold.addEventListener('change', () => { void saveConfig(); });
+elements.largeFolderMd5SampleLimit.addEventListener('change', () => { void saveConfig(); });
 elements.skipTinyMd5Files.addEventListener('change', () => {
   updatePerformanceAvoidanceControls();
   void saveConfig();
@@ -2642,8 +2669,13 @@ document.querySelector('#scan-source').addEventListener('click', async () => {
   if (!saved) return;
   elements.notice.textContent = t('正在扫描下一级目录，请稍候…');
   elements.notice.hidden = false;
-  const state = await safely(() => window.archiveApp.scanSource(elements.intakeDirectory.value.trim()));
-  elements.notice.hidden = true;
+  const scanToken = String(++nextScanToken);
+  activeScanToken = scanToken;
+  const state = await safely(() => window.archiveApp.scanSource(elements.intakeDirectory.value.trim(), scanToken));
+  if (activeScanToken === scanToken) {
+    activeScanToken = null;
+    elements.notice.hidden = true;
+  }
   if (state) render(state);
 });
 
@@ -2762,6 +2794,12 @@ document.querySelector('#pause-queue').addEventListener('click', async () => {
 });
 document.querySelector('#resume-queue').addEventListener('click', async () => {
   const state = await safely(() => window.archiveApp.resumeQueue());
+  if (state) render(state);
+});
+document.querySelector('#cancel-current').addEventListener('click', async () => {
+  const jobId = currentState?.currentJobId;
+  if (!jobId) return;
+  const state = await safely(() => window.archiveApp.cancelTask(jobId));
   if (state) render(state);
 });
 elements.acknowledgeTrashSafety.addEventListener('click', async () => {
@@ -3609,6 +3647,7 @@ window.archiveApp.onCatalogChanged((catalog) => {
   if (libraryVisible) void refreshCatalog();
 });
 window.archiveApp.onScanProgress((progress) => {
+  if (!activeScanToken || String(progress.scanToken || '') !== activeScanToken) return;
   elements.notice.hidden = false;
   elements.notice.textContent = t(`正在统计 ${progress.displayName}（${progress.index + 1}/${progress.total}）…`);
 });

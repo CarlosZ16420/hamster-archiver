@@ -1256,9 +1256,9 @@ function registerIpc() {
     return queueManager.updateConfig(config);
   });
 
-  ipcMain.handle('source:scan', async (event, intakeDirectory) => {
+  ipcMain.handle('source:scan', async (event, intakeDirectory, scanToken) => {
     assertTrustedSender(event);
-    return queueManager.scanSource(intakeDirectory);
+    return queueManager.scanSource(intakeDirectory, scanToken);
   });
 
   ipcMain.handle('task:add-single', async (event, sourcePath) => {
@@ -1308,10 +1308,9 @@ function registerIpc() {
     return queueManager.retryJob(jobId);
   });
 
-  ipcMain.handle('queue:start', (event) => {
+  ipcMain.handle('queue:start', async (event) => {
     assertTrustedSender(event);
-    void queueManager.startQueue();
-    return queueManager.getState();
+    return queueManager.startArchiveQueue();
   });
 
   ipcMain.handle('queue:start-inventory-only', async (event) => {
@@ -1578,7 +1577,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     await queueManager.scanSource(importDirectory);
     for (let cycle = 0; cycle < 4; cycle += 1) {
       await queueManager.confirmAllDuplicateJobs();
-      await queueManager.startQueue();
+      await queueManager.startArchiveQueue();
+      if (queueManager.running) await new Promise((resolve) => queueManager.once('idle', resolve));
       const pendingDuplicate = queueManager.jobs.some((job) => [
         'awaiting_confirmation', 'awaiting_duplicate_confirmation'
       ].includes(job.status));

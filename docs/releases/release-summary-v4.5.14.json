@@ -4,11 +4,15 @@
   "notes": {
     "zh-CN": [
       "修复黑夜与暮光主题下主题选择菜单白底浅色文字、选项难以辨认的问题。",
-      "主题下拉选项现在同时使用当前主题的字段背景和正文色，浅色主题也保持一致。"
+      "扫描目录现在只生成队列；选择压缩或不压缩入库后，定时器才会执行任务。",
+      "相似项目会在读取 MD5 和入库前等待确认；精确重复只接受本次任务有效 MD5 的完整严格匹配。",
+      "修复扫描完成后统计提示滞留，并明确列出小项目过滤、非视频文件、链接和读取失败等未入队原因。"
     ],
     "en-US": [
       "Fixes low-contrast theme menu options that appeared as light text on a white popup in Night and Twilight.",
-      "Theme options now use the active theme's field background and primary text color across both dark and light themes."
+      "Directory scans now only fill the queue; scheduled processing starts only after compressed or uncompressed intake is explicitly selected.",
+      "Similar items wait for confirmation before MD5 or intake work, and exact duplicates require a complete strict match of current-task MD5 values.",
+      "Fixes stale scan progress and lists filtered small items, non-video files, links and unreadable items as separate skip reasons."
     ]
   }
 }

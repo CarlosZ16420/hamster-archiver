@@ -104,6 +104,7 @@ test('new installs keep source/output user-selected and default processed inside
   assert.equal(config.compressionLevel, 1);
   assert.equal(config.archiveVolumeEnabled, true);
   assert.equal(config.archiveVolumeBytes, LARGE_TASK_BYTES);
+  assert.equal(config.largeFolderMd5SampleLimit, 200);
 });
 
 test('portable tools remain relative and owned user-data paths rebase after moving the app', () => {

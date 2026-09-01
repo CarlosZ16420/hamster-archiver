@@ -7,6 +7,8 @@ const {
   integrityCheck,
   findCatalogIdsByExactName,
   findCatalogIdsByMd5,
+  findCatalogIdsByProjectContent,
+  findCatalogIdsByProjectShape,
   findCatalogIdsBySearchTerms,
   findCatalogIdsBySimilarityKeys,
   findExactFileMatches,
@@ -126,6 +128,14 @@ class AppStore {
 
   findCatalogIdsByMd5(repositoryDirectory, md5, limit) {
     return findCatalogIdsByMd5(this.getRepository(repositoryDirectory).database, md5, limit);
+  }
+
+  findCatalogIdsByProjectShape(repositoryDirectory, fingerprint, limit) {
+    return findCatalogIdsByProjectShape(this.getRepository(repositoryDirectory).database, fingerprint, limit);
+  }
+
+  findCatalogIdsByProjectContent(repositoryDirectory, fingerprint, limit) {
+    return findCatalogIdsByProjectContent(this.getRepository(repositoryDirectory).database, fingerprint, limit);
   }
 
   findExactFileMatches(repositoryDirectory, manifest, limit) {

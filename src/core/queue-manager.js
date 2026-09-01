@@ -29,14 +29,19 @@ const {
 const { inspectPath, scanIntakeDirectory } = require('./scanner');
 const {
   DEFAULT_LARGE_FOLDER_FILE_THRESHOLD,
+  DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT,
   DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES,
+  MAX_LARGE_FOLDER_MD5_SAMPLE_LIMIT,
   MAX_TINY_FILE_MD5_THRESHOLD_BYTES,
+  MIN_LARGE_FOLDER_MD5_SAMPLE_LIMIT,
   MIN_TINY_FILE_MD5_THRESHOLD_BYTES,
   buildManifest,
   completeManifestMd5,
   collectDirectories,
   collectFiles,
   createFingerprintPlan,
+  verifyManifestMd5AgainstCompleteCandidates,
+  verifyManifestMd5AgainstReference,
   validateManifestUnchanged
 } = require('./manifest');
 const { CancelledError, runArchiveJob } = require('./archive-engine');
@@ -45,6 +50,8 @@ const {
   DEFAULT_SIMILARITY_STRENGTH,
   STRENGTH_PRESETS,
   SIMILARITY_STRENGTHS,
+  createManifestReviewFingerprint,
+  createProjectFingerprint,
   createSimilarityScorer,
   documentTerms,
   findExactProjectMatches,
@@ -142,80 +149,41 @@ function hasDuplicateConfirmationReason(job) {
 }
 
 function hasPendingAutomaticDuplicateCheck(job) {
-  return job?.automaticDuplicateCheckPending === true ||
-    (!job?.duplicateConfirmedAt && job?.stageText === '等待精确重复核验' && hasDuplicateConfirmationReason(job));
+  return !job?.exactDuplicateOverrideAt && (
+    job?.automaticDuplicateCheckPending === true ||
+    (job?.stageText === '等待精确重复核验' && hasDuplicateConfirmationReason(job))
+  );
 }
 
-function reusableFingerprintIndex(catalog, sourcePath) {
-  const index = new Map();
-  const source = String(sourcePath || '').trim();
-  if (!source) return index;
-  const sourceKey = normalizeForComparison(source);
-  for (const record of catalog || []) {
-    if (record?.archiveState !== 'uncompressed' && record?.sourceDisposition !== 'kept') continue;
-    const recordPaths = [getOriginalSourcePath(record), record.sourcePath]
-      .map((value) => String(value || '').trim())
-      .filter(Boolean);
-    if (!recordPaths.some((value) => normalizeForComparison(value) === sourceKey)) continue;
-    for (const file of record.manifest || []) {
-      if (!/^[a-f0-9]{32}$/i.test(String(file?.md5 || ''))) continue;
-      const relativePath = String(file.relativePath || '').replace(/\\/g, '/').toLocaleLowerCase('en-US');
-      if (!relativePath) continue;
-      if (!index.has(relativePath)) index.set(relativePath, []);
-      index.get(relativePath).push(file);
-    }
-  }
-  return index;
+function hasSelectedIntakeMode(job) {
+  return Boolean(job?.sourceCatalogRecordId) || job?.intakeModeSelected !== false;
 }
 
-async function reusableExactProjectSnapshot(catalog, sourcePath, sourceType) {
-  const files = await collectFiles(sourcePath, sourceType);
-  if (files.length === 0) return null;
-  const sourceKey = normalizeForComparison(sourcePath);
-  const matches = [];
-  let manifest = null;
-  for (const record of catalog || []) {
-    if (record?.archiveState !== 'uncompressed' && record?.sourceDisposition !== 'kept') continue;
-    const recordPaths = [getOriginalSourcePath(record), record.sourcePath]
-      .map((value) => String(value || '').trim())
-      .filter(Boolean);
-    if (!recordPaths.some((value) => normalizeForComparison(value) === sourceKey)) continue;
-    if (!Array.isArray(record.manifest) || record.manifest.length !== files.length) continue;
-    const recordFiles = new Map(record.manifest.map((file) => [
-      String(file.relativePath || '').replace(/\\/g, '/').toLocaleLowerCase('en-US'), file
-    ]));
-    const currentManifest = [];
-    let unchanged = true;
-    for (const file of files) {
-      const relativePathKey = file.relativePath.replace(/\\/g, '/').toLocaleLowerCase('en-US');
-      const cached = recordFiles.get(relativePathKey);
-      if (!cached || !fingerprintMetadataMatches(file, cached)) {
-        unchanged = false;
-        break;
-      }
-      const { absolutePath: _absolutePath, ...entry } = file;
-      currentManifest.push({
-        ...entry,
-        ...(/^[a-f0-9]{32}$/i.test(String(cached.md5 || ''))
-          ? { md5: String(cached.md5).toLocaleLowerCase('en-US') }
-          : { md5SkippedReason: cached.md5SkippedReason || 'metadata-reused' })
-      });
-    }
-    if (!unchanged) continue;
-    manifest ||= currentManifest;
-    matches.push({
-      id: record.id,
-      title: record.title || record.displayName || '',
-      displayName: record.displayName || record.title || '',
-      fileCount: record.manifest.length
-    });
-  }
-  return matches.length > 0 ? { manifest, matches: matches.slice(0, 20) } : null;
+function isRunnableQueuedJob(job) {
+  return job?.status === 'queued' && hasSelectedIntakeMode(job);
 }
 
 function hasCompleteMd5Manifest(manifest) {
   return Array.isArray(manifest) && manifest.length > 0 &&
     manifest.every((file) => /^[a-f0-9]{32}$/i.test(String(file?.md5 || '')));
+}
+
+function manifestCompatibleWithKnownMd5(referenceManifest, candidateManifest) {
+  if (!Array.isArray(referenceManifest) || !Array.isArray(candidateManifest) ||
+      referenceManifest.length !== candidateManifest.length) return false;
+  const candidates = new Map(candidateManifest.map((file) => [
+    String(file?.relativePath || file?.name || '').replace(/\\/g, '/')
+      .normalize('NFKC').toLocaleLowerCase('zh-CN'), file
+  ]));
+  return referenceManifest.every((file) => {
+    const key = String(file?.relativePath || file?.name || '').replace(/\\/g, '/')
+      .normalize('NFKC').toLocaleLowerCase('zh-CN');
+    const candidate = candidates.get(key);
+    if (!candidate || Number(candidate.size) !== Number(file.size)) return false;
+    const leftMd5 = String(file?.md5 || '').toLocaleLowerCase('en-US');
+    const rightMd5 = String(candidate?.md5 || '').toLocaleLowerCase('en-US');
+    return !/^[a-f0-9]{32}$/.test(leftMd5) || !/^[a-f0-9]{32}$/.test(rightMd5) || leftMd5 === rightMd5;
+  });
 }
 
 function manifestsHaveSameStableMetadata(left, right) {
@@ -316,6 +284,7 @@ async function runInventoryOnlyJob(job, config, hooks = {}, signal) {
     pauseController,
     largeFolderSimplification: job.largeFolderSimplification ?? config.largeFolderSimplification,
     largeFolderFileThreshold: job.largeFolderFileThreshold ?? config.largeFolderFileThreshold,
+    largeFolderMd5SampleLimit: job.largeFolderMd5SampleLimit ?? config.largeFolderMd5SampleLimit,
     skipTinyMd5Files: job.skipTinyMd5Files ?? config.skipTinyMd5Files,
     tinyFileMd5ThresholdBytes: job.tinyFileMd5ThresholdBytes ?? config.tinyFileMd5ThresholdBytes,
     onPlan: hooks.onInventoryPlan,
@@ -517,6 +486,7 @@ class QueueManager extends EventEmitter {
       minimumTaskBytes: 100 * MIB,
       largeFolderSimplification: false,
       largeFolderFileThreshold: DEFAULT_LARGE_FOLDER_FILE_THRESHOLD,
+      largeFolderMd5SampleLimit: DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT,
       skipTinyMd5Files: false,
       tinyFileMd5ThresholdBytes: DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES,
       autoSkipExactDuplicates: false,
@@ -541,6 +511,11 @@ class QueueManager extends EventEmitter {
     this.config.largeFolderFileThreshold = Number.isInteger(Number(this.config.largeFolderFileThreshold))
       ? Number(this.config.largeFolderFileThreshold)
       : DEFAULT_LARGE_FOLDER_FILE_THRESHOLD;
+    this.config.largeFolderMd5SampleLimit = Number.isInteger(Number(this.config.largeFolderMd5SampleLimit)) &&
+        Number(this.config.largeFolderMd5SampleLimit) >= MIN_LARGE_FOLDER_MD5_SAMPLE_LIMIT &&
+        Number(this.config.largeFolderMd5SampleLimit) <= MAX_LARGE_FOLDER_MD5_SAMPLE_LIMIT
+      ? Number(this.config.largeFolderMd5SampleLimit)
+      : DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT;
     this.config.skipTinyMd5Files = this.config.skipTinyMd5Files === true;
     this.config.tinyFileMd5ThresholdBytes = Number.isInteger(Number(this.config.tinyFileMd5ThresholdBytes)) &&
         Number(this.config.tinyFileMd5ThresholdBytes) >= MIN_TINY_FILE_MD5_THRESHOLD_BYTES &&
@@ -934,9 +909,9 @@ class QueueManager extends EventEmitter {
     return this.catalog.filter((record) => ids.has(record.id));
   }
 
-  findIndexedExactFileMatches(manifest, excludedRecordId = '') {
+  findIndexedExactFileMatches(manifest, excludedRecordId = '', limit = 100) {
     if (this.store.findExactFileMatches) {
-      return this.store.findExactFileMatches(this.config.repositoryDirectory, manifest, 100)
+      return this.store.findExactFileMatches(this.config.repositoryDirectory, manifest, limit)
         .map((match) => ({
           ...match,
           previous: (match.previous || []).filter((item) => item.archiveId !== excludedRecordId)
@@ -945,15 +920,40 @@ class QueueManager extends EventEmitter {
     }
     const matches = [];
     for (const file of manifest || []) {
-      if (!file.md5) continue;
+      const md5 = String(file.md5 || '').trim().toLocaleLowerCase('en-US');
+      if (!/^[a-f0-9]{32}$/.test(md5)) continue;
       const previous = this.catalog.filter((record) => record.id !== excludedRecordId).flatMap((record) => (record.manifest || [])
-        .filter((candidate) => candidate.md5 && String(candidate.md5).toLowerCase() === String(file.md5).toLowerCase() && Number(candidate.size) === Number(file.size))
+        .filter((candidate) => /^[a-f0-9]{32}$/i.test(String(candidate.md5 || '')) &&
+          String(candidate.md5).toLowerCase() === md5 && Number(candidate.size) === Number(file.size))
         .slice(0, 5)
         .map((candidate) => ({ archiveId: record.id, archiveName: record.archiveBaseName, archivedTask: record.displayName, relativePath: candidate.relativePath })));
-      if (previous.length > 0) matches.push({ sourceRelativePath: file.relativePath, md5: file.md5, size: file.size, previous });
-      if (matches.length >= 100) break;
+      if (previous.length > 0) matches.push({ sourceRelativePath: file.relativePath, md5, size: file.size, previous });
+      if (matches.length >= limit) break;
     }
     return matches;
+  }
+
+  findIndexedProjectCandidates(manifest, kind = 'shape', excludedRecordId = '') {
+    const fingerprint = createProjectFingerprint(manifest);
+    if (!fingerprint.valid) return [];
+    const storeMethod = kind === 'content'
+      ? this.store.findCatalogIdsByProjectContent
+      : this.store.findCatalogIdsByProjectShape;
+    if (typeof storeMethod === 'function') {
+      const ids = new Set(storeMethod.call(
+        this.store,
+        this.config.repositoryDirectory,
+        fingerprint,
+        kind === 'content' ? 20 : undefined
+      ));
+      ids.delete(excludedRecordId);
+      return this.catalog.filter((record) => ids.has(record.id));
+    }
+    const matches = kind === 'content'
+      ? findExactProjectMatches(manifest, this.catalog, excludedRecordId)
+      : findExactProjectShapeMatches(manifest, this.catalog, excludedRecordId);
+    const ids = new Set(matches.map((match) => match.id));
+    return this.catalog.filter((record) => ids.has(record.id));
   }
 
   rememberCatalogAction(label, recordIds, fields = []) {
@@ -1709,10 +1709,15 @@ class QueueManager extends EventEmitter {
     if (!record) throw new Error('没有找到指定归档记录。');
     const similarIds = new Set((record.similarRecords || []).map((item) => item.id));
     const similarCandidates = this.catalog.filter((candidate) => similarIds.has(candidate.id));
+    const indexedExactFileMatches = this.findIndexedExactFileMatches(
+      record.manifest,
+      record.id,
+      Math.min(5000, Math.max(100, record.manifest?.length || 0))
+    );
     return {
       ...record,
       similarEntryMatches: findSimilarEntryMatches(record, similarCandidates, this.similarityIgnoreTerms, {
-        exactCandidates: this.catalog.filter((candidate) => candidate.id !== record.id)
+        exactFileMatches: indexedExactFileMatches
       })
     };
   }
@@ -1734,23 +1739,14 @@ class QueueManager extends EventEmitter {
         const plan = createFingerprintPlan(files, job.sourceType, {
           largeFolderSimplification: job.largeFolderSimplification ?? this.config.largeFolderSimplification,
           largeFolderFileThreshold: job.largeFolderFileThreshold ?? this.config.largeFolderFileThreshold,
+          largeFolderMd5SampleLimit: job.largeFolderMd5SampleLimit ?? this.config.largeFolderMd5SampleLimit,
           skipTinyMd5Files: job.skipTinyMd5Files ?? this.config.skipTinyMd5Files,
           tinyFileMd5ThresholdBytes: job.tinyFileMd5ThresholdBytes ?? this.config.tinyFileMd5ThresholdBytes
         });
-        const reusableFingerprints = reusableFingerprintIndex(this.catalog, job.sourcePath);
         manifest = files.map(({ absolutePath: _absolutePath, ...file }) => {
-          const selectedForMd5 = plan.selectedPaths.has(file.relativePath);
-          const relativePathKey = file.relativePath.replace(/\\/g, '/').toLocaleLowerCase('en-US');
-          const cached = selectedForMd5
-            ? (reusableFingerprints.get(relativePathKey) || []).find((candidate) => fingerprintMetadataMatches(file, candidate))
-            : null;
-          if (cached) reusedFingerprintCount += 1;
-          return {
-            ...file,
-            ...(cached ? { md5: String(cached.md5).toLocaleLowerCase('en-US') } : {})
-          };
+          return { ...file };
         });
-        fingerprintPending = reusedFingerprintCount < plan.selectedFiles.length;
+        fingerprintPending = plan.selectedFiles.length > 0;
       }
     }
     const directories = Array.isArray(completedRecord?.directories)
@@ -1766,9 +1762,13 @@ class QueueManager extends EventEmitter {
     ].filter(Boolean));
     const linkedCandidates = this.catalog.filter((record) => linkedIds.has(record.id));
     const subjectCatalogRecordId = job.sourceCatalogRecordId || completedRecord?.id;
-    const exactCandidates = this.catalog.filter((record) => record.id !== subjectCatalogRecordId);
+    const indexedExactFileMatches = this.findIndexedExactFileMatches(
+      manifest,
+      subjectCatalogRecordId,
+      Math.min(5000, Math.max(100, manifest.length))
+    );
     const similarEntryMatches = findSimilarEntryMatches(subject, linkedCandidates, this.similarityIgnoreTerms, {
-      exactCandidates
+      exactFileMatches: indexedExactFileMatches
     });
 
     const evidenceByRecord = new Map();
@@ -1802,7 +1802,12 @@ class QueueManager extends EventEmitter {
     for (const match of job.exactProjectMatches || []) {
       ensureEvidence(match.id)?.reasons.add('完整项目精确重复');
     }
-    for (const match of findExactProjectMatches(manifest, this.catalog, subjectCatalogRecordId)) {
+    const indexedExactProjectCandidates = this.findIndexedProjectCandidates(
+      manifest,
+      'content',
+      subjectCatalogRecordId
+    );
+    for (const match of findExactProjectMatches(manifest, indexedExactProjectCandidates, subjectCatalogRecordId)) {
       ensureEvidence(match.id)?.reasons.add('完整项目精确重复');
     }
     for (const entry of similarEntryMatches) {
@@ -1956,6 +1961,14 @@ class QueueManager extends EventEmitter {
     if (!Number.isInteger(largeFolderFileThreshold) || largeFolderFileThreshold < 1 || largeFolderFileThreshold > 100000) {
       throw new Error('超大文件夹阈值必须是 1—100000 的整数。');
     }
+    const largeFolderMd5SampleLimit = Number(
+      config.largeFolderMd5SampleLimit ?? this.config.largeFolderMd5SampleLimit ?? DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT
+    );
+    if (!Number.isInteger(largeFolderMd5SampleLimit) ||
+        largeFolderMd5SampleLimit < MIN_LARGE_FOLDER_MD5_SAMPLE_LIMIT ||
+        largeFolderMd5SampleLimit > MAX_LARGE_FOLDER_MD5_SAMPLE_LIMIT) {
+      throw new Error('代表文件数量必须是 1—100000 的整数。');
+    }
     const skipTinyMd5Files = Object.prototype.hasOwnProperty.call(config, 'skipTinyMd5Files')
       ? config.skipTinyMd5Files === true
       : this.config.skipTinyMd5Files === true;
@@ -2044,6 +2057,7 @@ class QueueManager extends EventEmitter {
       smallItemFilter,
       largeFolderSimplification,
       largeFolderFileThreshold,
+      largeFolderMd5SampleLimit,
       skipTinyMd5Files,
       tinyFileMd5ThresholdBytes,
       autoSkipExactDuplicates,
@@ -2115,32 +2129,54 @@ class QueueManager extends EventEmitter {
     await this.log('info', `自动跳过精确重复项目“${job.displayName}”${targetSummary}；源文件和仓库均未修改，${removeFromQueue ? '队列项已删除' : '队列项已保留'}。`, job.id);
   }
 
-  async autoSkipReusableExactDuplicate(job) {
-    if (!this.config.autoSkipExactDuplicates || job.sourceCatalogRecordId) return false;
-    let snapshot;
-    try {
-      snapshot = await reusableExactProjectSnapshot(this.catalog, job.sourcePath, job.sourceType);
-    } catch (error) {
-      await this.log('warning', `未能复用已有清单进行即时精确重复核验，将在队列运行时重新计算 MD5：${error.message}`, job.id);
-      return false;
-    }
-    if (!snapshot) return false;
-    await this.skipExactDuplicateJob(job, snapshot.matches, snapshot.manifest);
-    return true;
-  }
-
   async verifyExactProjectMatches(job, manifest) {
-    const directMatches = findExactProjectMatches(manifest, this.catalog, job.sourceCatalogRecordId);
-    if (directMatches.length > 0) return { manifest, matches: directMatches };
-    const shapeMatches = findExactProjectShapeMatches(manifest, this.catalog, job.sourceCatalogRecordId);
-    if (shapeMatches.length === 0) return { manifest, matches: [] };
-    const shapeIds = new Set(shapeMatches.map((match) => match.id));
-    const shapeCandidates = this.catalog.filter((record) => shapeIds.has(record.id));
-    let verificationManifest;
+    const directCandidates = this.findIndexedProjectCandidates(manifest, 'content', job.sourceCatalogRecordId);
+    const directMatches = findExactProjectMatches(manifest, directCandidates, job.sourceCatalogRecordId);
+    if (directMatches.length > 0) return { manifest, matches: directMatches, verificationIncomplete: false };
+    const shapeCandidates = this.findIndexedProjectCandidates(manifest, 'shape', job.sourceCatalogRecordId);
+    if (shapeCandidates.length === 0) return { manifest, matches: [], verificationIncomplete: false };
+    let verificationManifest = manifest;
+    const completeShapeCandidates = shapeCandidates.filter((record) => hasCompleteMd5Manifest(record.manifest));
+    if (!hasCompleteMd5Manifest(verificationManifest) && completeShapeCandidates.length > 0) {
+      const candidateResult = await verifyManifestMd5AgainstCompleteCandidates(
+        job.sourcePath,
+        job.sourceType,
+        verificationManifest,
+        completeShapeCandidates,
+        {
+          signal: this.abortController?.signal,
+          pauseController: this.pauseController,
+          onProgress: (progress) => {
+            job.stageText = `正在筛选精确重复候选：${progress.processedFiles}/${progress.totalFiles} · ${progress.currentFile}`;
+            job.progress = progress.percent;
+            this.emitProgressThrottled(job);
+          }
+        }
+      );
+      verificationManifest = candidateResult.manifest;
+      const candidateMatches = findExactProjectMatches(
+        verificationManifest,
+        candidateResult.matches,
+        job.sourceCatalogRecordId
+      );
+      if (candidateMatches.length > 0) {
+        return { manifest: verificationManifest, matches: candidateMatches, verificationIncomplete: false };
+      }
+      if (candidateResult.hashedFiles > 0 && candidateResult.matches.length === 0) {
+        await this.log('info', `精确重复候选已提前排除；读取 ${candidateResult.hashedFiles} 个文件后停止完整核验。`, job.id);
+      }
+    }
+
+    const partialShapeCandidates = shapeCandidates.filter((record) =>
+      !hasCompleteMd5Manifest(record.manifest) &&
+      manifestCompatibleWithKnownMd5(verificationManifest, record.manifest));
+    if (partialShapeCandidates.length === 0) {
+      return { manifest: verificationManifest, matches: [], verificationIncomplete: false };
+    }
     try {
       verificationManifest = hasCompleteMd5Manifest(manifest)
-        ? manifest
-        : await completeManifestMd5(job.sourcePath, job.sourceType, manifest, {
+        ? verificationManifest
+        : await completeManifestMd5(job.sourcePath, job.sourceType, verificationManifest, {
           signal: this.abortController?.signal,
           pauseController: this.pauseController,
           onProgress: (progress) => {
@@ -2152,16 +2188,36 @@ class QueueManager extends EventEmitter {
     } catch (error) {
       if (error instanceof CancelledError || error.code === 'TASK_CANCELLED' || error.code === 'SOURCE_CHANGED') throw error;
       await this.log('warning', `精确重复补充核验未完成，继续使用常规重复保护：${error.message}`, job.id);
-      return { manifest, matches: [] };
+      return { manifest, matches: [], verificationIncomplete: false };
     }
 
     const completeCandidates = [];
-    for (const record of shapeCandidates) {
+    let verificationIncomplete = false;
+    const candidateReadBudget = {
+      remainingFiles: verificationManifest.length,
+      remainingBytes: verificationManifest.reduce((sum, file) => sum + Number(file?.size || 0), 0)
+    };
+    const orderedCandidates = [...partialShapeCandidates].sort((left, right) => {
+      const leftComplete = hasCompleteMd5Manifest(left.manifest) ? 1 : 0;
+      const rightComplete = hasCompleteMd5Manifest(right.manifest) ? 1 : 0;
+      if (leftComplete !== rightComplete) return rightComplete - leftComplete;
+      const md5Count = (record) => (record.manifest || [])
+        .filter((file) => /^[a-f0-9]{32}$/i.test(String(file?.md5 || ''))).length;
+      return md5Count(right) - md5Count(left);
+    });
+    for (const record of orderedCandidates) {
       if (hasCompleteMd5Manifest(record.manifest)) {
         completeCandidates.push(record);
         continue;
       }
-      const candidatePaths = [...new Set([getOriginalSourcePath(record), String(record.sourcePath || '').trim()].filter(Boolean))];
+      const candidatePaths = [];
+      const seenCandidatePaths = new Set();
+      for (const candidatePath of [getOriginalSourcePath(record), String(record.sourcePath || '').trim()].filter(Boolean)) {
+        const candidateKey = normalizeForComparison(candidatePath);
+        if (seenCandidatePaths.has(candidateKey)) continue;
+        seenCandidatePaths.add(candidateKey);
+        candidatePaths.push(candidatePath);
+      }
       for (const candidatePath of candidatePaths) {
         if (normalizeForComparison(candidatePath) === normalizeForComparison(job.sourcePath) &&
             manifestsHaveSameStableMetadata(manifest, record.manifest)) {
@@ -2169,21 +2225,38 @@ class QueueManager extends EventEmitter {
           break;
         }
         try {
-          const candidateManifest = await completeManifestMd5(candidatePath, record.sourceType || 'directory', record.manifest, {
-            signal: this.abortController?.signal,
-            pauseController: this.pauseController
-          });
-          completeCandidates.push({ ...record, manifest: candidateManifest });
-          break;
+          const result = await verifyManifestMd5AgainstReference(
+            candidatePath,
+            record.sourceType || 'directory',
+            record.manifest,
+            verificationManifest,
+            {
+              signal: this.abortController?.signal,
+              pauseController: this.pauseController,
+              budget: candidateReadBudget
+            }
+          );
+          if (result.budgetExceeded) {
+            verificationIncomplete = true;
+            break;
+          }
+          if (result.matches) {
+            completeCandidates.push({ ...record, manifest: verificationManifest });
+            break;
+          }
         } catch (error) {
           if (error instanceof CancelledError || error.code === 'TASK_CANCELLED') throw error;
           // 旧来源已移动或元数据已变化时继续尝试记录中的其他已知来源。
         }
       }
     }
+    if (verificationIncomplete) {
+      await this.log('warning', '精确重复候选核验达到读取预算，未完成的候选已转为人工复核；不会自动跳过。', job.id);
+    }
     return {
       manifest: verificationManifest,
-      matches: findExactProjectMatches(verificationManifest, completeCandidates, job.sourceCatalogRecordId)
+      matches: findExactProjectMatches(verificationManifest, completeCandidates, job.sourceCatalogRecordId),
+      verificationIncomplete
     };
   }
 
@@ -2602,17 +2675,21 @@ class QueueManager extends EventEmitter {
     if (nameDuplicateMatches.length > 0) confirmationReasons.push('name_match');
     if (similarMatches.some((match) => match.reasons.includes('标题相似'))) confirmationReasons.push('similar_title');
     if (similarMatches.some((match) => match.reasons.includes('视频大小完全一致'))) confirmationReasons.push('same_video_size');
-    const automaticDuplicateCheckPending = !sourceCatalogRecordId && this.config.autoSkipExactDuplicates &&
-      confirmationReasons.some((reason) => DUPLICATE_CONFIRMATION_REASONS.has(reason));
-    const blockingConfirmationReasons = this.config.autoSkipExactDuplicates
-      ? confirmationReasons.filter((reason) => reason === 'large_task')
-      : confirmationReasons;
+    const explicitProcessingMode = ['archive', 'inventory_only', 'archive_existing'].includes(task.processingMode);
+    const intakeModeSelected = Boolean(sourceCatalogRecordId || task.intakeModeSelected === true || explicitProcessingMode);
+    const automaticDuplicateCheckPending = false;
+    const blockingConfirmationReasons = confirmationReasons.filter((reason) => reason === 'large_task');
+    const similarityNotice = [
+      nameDuplicateMatches.length > 0 ? '名称存在仓库候选' : null,
+      similarMatches.length > 0 ? `发现 ${similarMatches.length} 个相似候选` : null
+    ].filter(Boolean).join(' · ');
     return {
       id: crypto.randomUUID(),
       ...task,
       processingMode: task.processingMode === 'inventory_only'
         ? 'inventory_only'
         : task.processingMode === 'archive_existing' ? 'archive_existing' : 'archive',
+      intakeModeSelected,
       sourceCatalogRecordId: sourceCatalogRecordId || null,
       requiresConfirmation: task.totalBytes > LARGE_TASK_BYTES,
       confirmationReasons,
@@ -2621,19 +2698,26 @@ class QueueManager extends EventEmitter {
       exactDuplicateMatches: [],
       confirmedAt: null,
       duplicateConfirmedAt: null,
+      exactDuplicateOverrideAt: null,
+      duplicateReviewFingerprint: null,
+      duplicateConfirmedManifestFingerprint: null,
+      duplicateReviewKind: null,
+      similarityPreflightBlocking: false,
       automaticDuplicateCheckPending,
       status: blockingConfirmationReasons.length > 0 ? 'awaiting_confirmation' : 'queued',
       progress: 0,
       stageText: blockingConfirmationReasons.length > 0
         ? [
             task.totalBytes > LARGE_TASK_BYTES ? '超过 10 GiB' : null,
-            nameDuplicateMatches.length > 0 ? '名称可能重复' : null,
-            similarMatches.length > 0 ? `发现 ${similarMatches.length} 个相似项目` : null,
+            similarityNotice || null,
             '等待手动确认'
           ].filter(Boolean).join(' · ')
-        : automaticDuplicateCheckPending ? '等待精确重复核验'
-        : task.processingMode === 'inventory_only' ? '等待未压缩直接入库'
-          : sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩',
+        : [
+            similarityNotice || null,
+            !intakeModeSelected ? '等待选择入库方式'
+              : task.processingMode === 'inventory_only' ? '等待未压缩直接入库'
+                : sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩'
+          ].filter(Boolean).join(' · '),
       archiveBaseName: createConfiguredArchiveName(task.displayName, this.config),
       archiveFormat: this.config.archiveFormat || '7z',
       compressionLevel: Number(this.config.compressionLevel ?? 1),
@@ -2641,6 +2725,7 @@ class QueueManager extends EventEmitter {
       archiveVolumeBytes: Number(this.config.archiveVolumeBytes ?? LARGE_TASK_BYTES),
       largeFolderSimplification: this.config.largeFolderSimplification === true,
       largeFolderFileThreshold: Number(this.config.largeFolderFileThreshold ?? DEFAULT_LARGE_FOLDER_FILE_THRESHOLD),
+      largeFolderMd5SampleLimit: Number(this.config.largeFolderMd5SampleLimit ?? DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT),
       skipTinyMd5Files: this.config.skipTinyMd5Files === true,
       tinyFileMd5ThresholdBytes: Number(this.config.tinyFileMd5ThresholdBytes ?? DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES),
       archivePassword: String(this.config.archivePassword || ''),
@@ -2655,7 +2740,7 @@ class QueueManager extends EventEmitter {
     };
   }
 
-  async scanSource(intakeDirectory = this.config.intakeDirectory) {
+  async scanSource(intakeDirectory = this.config.intakeDirectory, scanToken = '') {
     if (this.running) throw new Error('队列运行期间不能重新扫描。');
     validateSourceSelection(this.config, intakeDirectory);
     await this.log('info', `开始扫描目录：${intakeDirectory}`);
@@ -2663,7 +2748,7 @@ class QueueManager extends EventEmitter {
       minimumBytes: this.config.smallItemFilter ? this.config.minimumTaskBytes : 0,
       onProgress: (progress) => {
         if (progress.displayName) {
-          this.emit('scan-progress', progress);
+          this.emit('scan-progress', { ...progress, scanToken });
         }
       }
     });
@@ -2678,7 +2763,6 @@ class QueueManager extends EventEmitter {
       .map((task) => this.createJob(task));
 
     this.jobs.push(...added);
-    for (const job of added) await this.autoSkipReusableExactDuplicate(job);
     this.skippedRootFiles = [
       ...result.skippedRootFiles,
       ...(result.filteredItems || []).map((item) => ({
@@ -2723,7 +2807,6 @@ class QueueManager extends EventEmitter {
     this.jobs.push(job);
     await this.persistJobs();
     await this.log('info', `已添加单项任务：${job.displayName}`, job.id);
-    await this.autoSkipReusableExactDuplicate(job);
     return this.getState();
   }
 
@@ -2734,12 +2817,31 @@ class QueueManager extends EventEmitter {
     if (candidates.length === 0) throw new Error('任务列表中没有可以直接入库的项目。');
     for (const job of candidates) {
       job.processingMode = 'inventory_only';
+      job.intakeModeSelected = true;
       job.stageText = job.status === 'queued'
         ? '等待未压缩直接入库'
         : `未压缩直接入库 · ${job.stageText || '等待手动确认'}`;
     }
     await this.persistJobs();
     await this.log('warning', `已选择不压缩直接入库，共 ${candidates.length} 个任务；原文件将保留在原位置。`);
+    void this.startQueue();
+    return this.getState();
+  }
+
+  async startArchiveQueue() {
+    if (this.running) throw new Error('队列已经在运行。');
+    const candidates = this.jobs.filter((job) =>
+      ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
+    if (candidates.length === 0) throw new Error('任务列表中没有可以压缩入库的项目。');
+    for (const job of candidates) {
+      if (!job.sourceCatalogRecordId) job.processingMode = 'archive';
+      job.intakeModeSelected = true;
+      job.stageText = job.status === 'queued'
+        ? job.sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩'
+        : `${job.sourceCatalogRecordId ? '库内项目压缩' : '压缩入库'} · ${job.stageText || '等待手动确认'}`;
+    }
+    await this.persistJobs();
+    await this.log('info', `已选择压缩入库，共 ${candidates.length} 个任务。`);
     void this.startQueue();
     return this.getState();
   }
@@ -2810,21 +2912,27 @@ class QueueManager extends EventEmitter {
   async confirmJob(jobId) {
     const job = this.findJob(jobId);
     const confirmsQueuedAutomaticCheck = job.status === 'queued' &&
-      hasPendingAutomaticDuplicateCheck(job) && !job.duplicateConfirmedAt;
+      hasPendingAutomaticDuplicateCheck(job) && !job.exactDuplicateOverrideAt;
     if (!['awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status) && !confirmsQueuedAutomaticCheck) {
       throw new Error('当前任务不处于等待确认状态。');
     }
     const now = new Date().toISOString();
-    const confirmsDuplicateRisk = job.status === 'awaiting_duplicate_confirmation' || confirmsQueuedAutomaticCheck ||
-      (job.status === 'awaiting_confirmation' && hasDuplicateConfirmationReason(job) &&
-        !(job.confirmationReasons || []).includes('large_task'));
+    const confirmsExactDuplicateOverride = job.status === 'awaiting_duplicate_confirmation' || confirmsQueuedAutomaticCheck;
+    const confirmsPreflightSimilarity = job.similarityPreflightBlocking !== false &&
+      job.status === 'awaiting_confirmation' && hasDuplicateConfirmationReason(job);
     if (job.status === 'awaiting_confirmation') job.confirmedAt = now;
-    if (confirmsDuplicateRisk) {
-      job.duplicateConfirmedAt = now;
+    if (confirmsPreflightSimilarity || confirmsExactDuplicateOverride) job.duplicateConfirmedAt = now;
+    if (confirmsExactDuplicateOverride) {
+      job.exactDuplicateOverrideAt = now;
+      if (job.duplicateReviewFingerprint) {
+        job.duplicateConfirmedManifestFingerprint = job.duplicateReviewFingerprint;
+      }
       job.automaticDuplicateCheckPending = false;
     }
     job.status = 'queued';
-    job.stageText = job.processingMode === 'inventory_only'
+    job.stageText = !hasSelectedIntakeMode(job)
+      ? '已确认，等待选择入库方式'
+      : job.processingMode === 'inventory_only'
       ? '已确认，等待未压缩直接入库'
       : job.sourceCatalogRecordId ? '已确认，等待库内项目压缩' : '已确认，等待压缩';
     await this.persistJobs();
@@ -2839,9 +2947,13 @@ class QueueManager extends EventEmitter {
       : `${Math.round(configuredVolumeBytes / MIB)} MiB`;
     await this.log(
       'warning',
-      job.duplicateConfirmedAt
-        ? '用户已确认精确重复提示，任务重新进入队列。'
-        : `用户已确认任务风险；大任务将按 ${volumeLabel} 分卷。`,
+      confirmsExactDuplicateOverride
+        ? job.duplicateReviewKind === 'similarity'
+          ? '用户已确认相似报告，任务复用已生成清单并重新进入队列。'
+          : '用户已确认精确重复提示，任务复用已生成清单并重新进入队列。'
+        : confirmsPreflightSimilarity
+          ? '用户已确认名称或相似项目提示；精确重复核验仍将在生成完整 MD5 后执行。'
+          : `用户已确认任务风险；大任务将按 ${volumeLabel} 分卷。`,
       job.id
     );
     return this.getState();
@@ -2850,20 +2962,30 @@ class QueueManager extends EventEmitter {
   async confirmAllDuplicateJobs() {
     const jobs = this.jobs.filter((job) =>
       job.status === 'awaiting_duplicate_confirmation' ||
-      (job.status === 'awaiting_confirmation' && hasDuplicateConfirmationReason(job)) ||
-      (job.status === 'queued' && hasPendingAutomaticDuplicateCheck(job) && !job.duplicateConfirmedAt)
+      (job.similarityPreflightBlocking !== false && job.status === 'awaiting_confirmation' && hasDuplicateConfirmationReason(job)) ||
+      (job.status === 'queued' && hasPendingAutomaticDuplicateCheck(job) && !job.exactDuplicateOverrideAt)
     );
     if (jobs.length === 0) return { state: this.getState(), confirmedCount: 0 };
     const now = new Date().toISOString();
     for (const job of jobs) {
       const stillNeedsLargeTaskConfirmation = job.status === 'awaiting_confirmation' &&
         (job.confirmationReasons || []).includes('large_task');
+      const confirmsExactDuplicateOverride = job.status === 'awaiting_duplicate_confirmation' ||
+        (job.status === 'queued' && hasPendingAutomaticDuplicateCheck(job));
       job.duplicateConfirmedAt = now;
-      job.automaticDuplicateCheckPending = false;
+      if (confirmsExactDuplicateOverride) {
+        job.exactDuplicateOverrideAt = now;
+        if (job.duplicateReviewFingerprint) {
+          job.duplicateConfirmedManifestFingerprint = job.duplicateReviewFingerprint;
+        }
+        job.automaticDuplicateCheckPending = false;
+      }
       if (!stillNeedsLargeTaskConfirmation) {
         if (job.status === 'awaiting_confirmation') job.confirmedAt = now;
         job.status = 'queued';
-        job.stageText = job.processingMode === 'inventory_only'
+        job.stageText = !hasSelectedIntakeMode(job)
+          ? '已批量确认重复风险，等待选择入库方式'
+          : job.processingMode === 'inventory_only'
           ? '已批量确认重复风险，等待未压缩直接入库'
           : job.sourceCatalogRecordId ? '已批量确认重复风险，等待库内项目压缩' : '已批量确认重复风险，等待压缩';
       }
@@ -3046,9 +3168,10 @@ class QueueManager extends EventEmitter {
     job.exactDuplicateMatches = [];
     job.status = job.requiresConfirmation && !job.confirmedAt ? 'awaiting_confirmation' : 'queued';
     job.stageText = job.status === 'queued'
-      ? hasPendingAutomaticDuplicateCheck(job) && !job.duplicateConfirmedAt ? '等待精确重复核验'
-        : job.processingMode === 'inventory_only' ? '等待未压缩直接入库'
-        : job.sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩'
+      ? !hasSelectedIntakeMode(job) ? '等待选择入库方式'
+        : hasPendingAutomaticDuplicateCheck(job) && !job.exactDuplicateOverrideAt ? '等待精确重复核验'
+          : job.processingMode === 'inventory_only' ? '等待未压缩直接入库'
+            : job.sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩'
       : '等待手动确认';
     await this.persistJobs();
     await this.log('info', '任务已重新加入队列。', job.id);
@@ -3151,7 +3274,7 @@ class QueueManager extends EventEmitter {
     if (window.active) {
       if (this.running && this.paused && this.schedulePaused) {
         await this.resumeCurrent();
-      } else if (!this.running && this.jobs.some((job) => job.status === 'queued')) {
+      } else if (!this.running && this.jobs.some(isRunnableQueuedJob)) {
         void this.startQueue();
       }
     } else if (this.running && !this.paused) {
@@ -3272,7 +3395,7 @@ class QueueManager extends EventEmitter {
 
     try {
       while (!this.stopRequested) {
-        const job = this.jobs.find((candidate) => candidate.status === 'queued');
+        const job = this.jobs.find(isRunnableQueuedJob);
         if (!job) break;
         const scheduleDecision = this.canStartScheduledJob(job);
         if (!scheduleDecision.allowed) {
@@ -3280,7 +3403,7 @@ class QueueManager extends EventEmitter {
           const minutes = Math.max(0, Math.floor(scheduleDecision.remainingMs / 60_000));
           await this.log('warning', scheduleDecision.remainingMs > 0
             ? `下一项预计需要 ${Math.ceil(scheduleDecision.estimatedMs / 60_000)} 分钟，剩余 ${minutes} 分钟，本时段不再启动新任务。`
-            : '当前不在定时运行时段，队列等待计划开始时间。');
+            : '当前不在定时运行时段；已记录入库方式，队列将在计划开始时间自动运行。');
           break;
         }
         this.scheduleWaiting = false;
@@ -3309,7 +3432,7 @@ class QueueManager extends EventEmitter {
       this.paused = false;
       this.pauseAfterCurrent = false;
       this.emitState();
-      await this.log('info', '当前可执行任务已经处理完毕。');
+      await this.log('info', this.scheduleWaiting ? '队列已进入定时等待。' : '当前可执行任务已经处理完毕。');
       this.emit('idle');
     }
     return this.getState();
@@ -3361,6 +3484,9 @@ class QueueManager extends EventEmitter {
           ? job.largeFolderSimplification
           : this.config.largeFolderSimplification === true,
         largeFolderFileThreshold: Number(job.largeFolderFileThreshold ?? this.config.largeFolderFileThreshold ?? DEFAULT_LARGE_FOLDER_FILE_THRESHOLD),
+        largeFolderMd5SampleLimit: Number(
+          job.largeFolderMd5SampleLimit ?? this.config.largeFolderMd5SampleLimit ?? DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT
+        ),
         skipTinyMd5Files: typeof job.skipTinyMd5Files === 'boolean'
           ? job.skipTinyMd5Files
           : this.config.skipTinyMd5Files === true,
@@ -3407,19 +3533,45 @@ class QueueManager extends EventEmitter {
             job.automaticDuplicateCheckPending = false;
             return;
           }
-          const similaritySubject = { ...job, id: job.sourceCatalogRecordId || job.id, manifest };
-          const exactVerification = this.config.autoSkipExactDuplicates && !job.duplicateConfirmedAt
-            ? await this.verifyExactProjectMatches(job, manifest)
-            : { manifest, matches: [] };
+          const initialReviewFingerprint = createManifestReviewFingerprint(manifest);
+          const legacyReviewConfirmed = Boolean(
+            job.exactDuplicateOverrideAt && Array.isArray(preparedManifest) && preparedManifest.length > 0
+          );
+          let reviewConfirmed = Boolean(
+            initialReviewFingerprint &&
+            job.duplicateConfirmedManifestFingerprint === initialReviewFingerprint
+          ) || legacyReviewConfirmed;
+          if (legacyReviewConfirmed && !job.duplicateConfirmedManifestFingerprint) {
+            job.duplicateConfirmedManifestFingerprint = initialReviewFingerprint;
+          }
+          let exactVerification;
+          if (!reviewConfirmed && this.config.autoSkipExactDuplicates) {
+            exactVerification = await this.verifyExactProjectMatches(job, manifest);
+          } else if (!reviewConfirmed) {
+            const directCandidates = this.findIndexedProjectCandidates(manifest, 'content', job.sourceCatalogRecordId);
+            exactVerification = {
+              manifest,
+              matches: findExactProjectMatches(manifest, directCandidates, job.sourceCatalogRecordId),
+              verificationIncomplete: false
+            };
+          } else {
+            exactVerification = { manifest, matches: [], verificationIncomplete: false };
+          }
+          const reviewManifest = exactVerification.manifest || manifest;
+          const reviewFingerprint = createManifestReviewFingerprint(reviewManifest);
+          reviewConfirmed = reviewConfirmed || Boolean(
+            reviewFingerprint && job.duplicateConfirmedManifestFingerprint === reviewFingerprint
+          );
           const exactProjectMatches = exactVerification.matches;
-          if (exactProjectMatches.length > 0) {
+          if (this.config.autoSkipExactDuplicates && exactProjectMatches.length > 0) {
             const skipped = new Error('项目与仓库中的现有项目完全一致，已按设置自动跳过。');
             skipped.code = 'AUTO_SKIPPED_EXACT_DUPLICATE';
             skipped.projectMatches = exactProjectMatches;
             skipped.manifest = exactVerification.manifest;
             throw skipped;
           }
-          const exactMatches = this.findIndexedExactFileMatches(manifest, job.sourceCatalogRecordId);
+          const similaritySubject = { ...job, id: job.sourceCatalogRecordId || job.id, manifest: reviewManifest };
+          const exactMatches = this.findIndexedExactFileMatches(reviewManifest, job.sourceCatalogRecordId);
           const manifestSimilarMatches = findSimilarProjects(
             similaritySubject,
             this.getSimilarityCandidates(similaritySubject).filter((record) => record.id !== job.sourceCatalogRecordId),
@@ -3431,26 +3583,37 @@ class QueueManager extends EventEmitter {
             ...manifestSimilarMatches
           ].filter((match, index, items) => items.findIndex((item) => item.id === match.id) === index);
           const hasNameDuplicate = (job.nameDuplicateMatches || []).length > 0;
-          const preflightSimilarityConfirmed = Boolean(job.confirmedAt) && (job.confirmationReasons || []).some((reason) =>
-            ['name_match', 'similar_title', 'same_video_size'].includes(reason));
-          const requiresExactReview = exactMatches.length > 0 && !job.duplicateConfirmedAt;
+          const preflightSimilarityConfirmed = job.similarityPreflightBlocking !== false &&
+            Boolean(job.confirmedAt || job.duplicateConfirmedAt) &&
+            (job.confirmationReasons || []).some((reason) =>
+              ['name_match', 'similar_title', 'same_video_size'].includes(reason));
+          const requiresExactReview = (exactProjectMatches.length > 0 || exactMatches.length > 0) && !reviewConfirmed;
           const requiresNewSimilarityReview = (combinedSimilarMatches.length > 0 || hasNameDuplicate) &&
-            !preflightSimilarityConfirmed && !job.duplicateConfirmedAt;
-          if (requiresExactReview || requiresNewSimilarityReview) {
+            !preflightSimilarityConfirmed && !reviewConfirmed;
+          const requiresVerificationReview = exactVerification.verificationIncomplete && !reviewConfirmed;
+          if (requiresExactReview || requiresNewSimilarityReview || requiresVerificationReview) {
             job.automaticDuplicateCheckPending = false;
-            await this.store.savePendingManifest(this.config.repositoryDirectory, job.id, manifest);
+            await this.store.savePendingManifest(this.config.repositoryDirectory, job.id, reviewManifest);
             const reasons = [
+              exactProjectMatches.length > 0 ? '完整项目与仓库内容完全一致' : null,
               exactMatches.length > 0 ? `${exactMatches.length} 个内容完全相同的文件` : null,
               hasNameDuplicate ? '名称可能重复' : null,
-              combinedSimilarMatches.length > 0 ? `${combinedSimilarMatches.length} 个相似项目或视频` : null
+              combinedSimilarMatches.length > 0 ? `${combinedSimilarMatches.length} 个相似项目或视频` : null,
+              requiresVerificationReview ? '精确重复候选待人工核对' : null
             ].filter(Boolean).join('，');
             const review = new Error(`发现${reasons}，需要确认后才能${inventoryOnly ? '直接入库' : '压缩'}。`);
             review.code = 'DUPLICATE_REVIEW_REQUIRED';
             review.matches = exactMatches;
+            review.projectMatches = exactProjectMatches;
             review.similarMatches = combinedSimilarMatches;
+            review.verificationIncomplete = requiresVerificationReview;
+            review.reviewFingerprint = reviewFingerprint;
+            review.reviewKind = requiresExactReview || requiresVerificationReview ? 'exact' : 'similarity';
             throw review;
           }
           job.automaticDuplicateCheckPending = false;
+          job.duplicateReviewFingerprint = null;
+          job.duplicateReviewKind = null;
         },
         onSkippedFile: (item) => {
           job.skippedFiles = [...(job.skippedFiles || []), item].slice(-500);
@@ -3624,18 +3787,24 @@ class QueueManager extends EventEmitter {
       if (error.code === 'AUTO_SKIPPED_EXACT_DUPLICATE') {
         await this.skipExactDuplicateJob(job, error.projectMatches || [], error.manifest);
       } else if (error.code === 'DUPLICATE_REVIEW_REQUIRED') {
+        const projectCount = (error.projectMatches || []).length;
         const exactCount = (error.matches || []).length;
         const similarCount = (error.similarMatches || []).length;
         const reasonText = [
+          projectCount > 0 ? `${projectCount} 个完整项目精确重复` : null,
           exactCount > 0 ? `${exactCount} 个精确重复文件` : null,
-          similarCount > 0 ? `${similarCount} 个相似项目或视频` : null
+          similarCount > 0 ? `${similarCount} 个相似项目或视频` : null,
+          error.verificationIncomplete ? '精确重复候选待人工核对' : null
         ].filter(Boolean).join('，') || '重复风险';
         await this.updateJob(job, {
           status: 'awaiting_duplicate_confirmation',
           stageText: `发现 ${reasonText}，已延后等待确认`,
           progress: 0,
+          exactProjectMatches: error.projectMatches || [],
           exactDuplicateMatches: error.matches,
           similarMatches: error.similarMatches || job.similarMatches || [],
+          duplicateReviewFingerprint: error.reviewFingerprint || null,
+          duplicateReviewKind: error.reviewKind || 'similarity',
           errorCode: null,
           errorMessage: null
         });
