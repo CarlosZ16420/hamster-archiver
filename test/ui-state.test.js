@@ -5,13 +5,31 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const {
+  formatCatalogDate,
+  formatItemCount,
   queueSimilarityEvidenceText,
+  ratingButtonLabel,
   shouldApplyTaskProgress,
   shouldShowDuplicateConfirmation,
   similarityProgressPresentation,
   summarizeScanSkips,
   sourceDispositionPresentation
 } = require('../src/renderer/ui-state');
+
+test('locale-sensitive warehouse text recalculates dates and singular nouns', () => {
+  const timestamp = '2026-09-03T01:00:00.000Z';
+  const chineseBefore = formatCatalogDate(timestamp, 'zh-CN');
+  const english = formatCatalogDate(timestamp, 'en-US');
+  const chineseAfter = formatCatalogDate(timestamp, 'zh-CN');
+
+  assert.equal(chineseAfter, chineseBefore, 'zh → EN → zh must restore the Chinese date format');
+  assert.notEqual(english, chineseBefore, 'English and Chinese date formats should differ');
+  assert.equal(formatItemCount(1, 'en-US'), '1 item');
+  assert.equal(formatItemCount(2, 'en-US'), '2 items');
+  assert.equal(formatItemCount(1, 'zh-CN'), '1 项');
+  assert.equal(ratingButtonLabel(1, 'en-US'), '1 star');
+  assert.equal(ratingButtonLabel(5, 'en-US'), '5 stars');
+});
 
 test('late running progress cannot overwrite a duplicate-review or auto-skip terminal state', () => {
   assert.equal(shouldApplyTaskProgress(
@@ -106,6 +124,7 @@ test('run log keeps messages in the list instead of duplicating the latest messa
   assert.doesNotMatch(html, /id="digest-log"/);
   assert.doesNotMatch(app, /digest\.textContent\s*=\s*`\$\{latestTime\}/);
   assert.match(app, /for \(const entry of \[\.\.\.logs\]\.reverse\(\)\)/);
+  assert.match(html, /<details class="settings-group log-group" open>/);
   assert.match(html, /03 · 运行日志/);
   assert.doesNotMatch(html, /03 · 运行记录/);
 });
@@ -461,4 +480,45 @@ test('warehouse browsing keeps compact controls, root folders, backup locations 
   assert.match(app, /backupCell\.textContent = record\.backupLocation \|\| '—'/);
   assert.match(app, /\['ArrowLeft', 'ArrowRight'\]\.includes\(event\.key\)/);
   assert.match(styles, /\.activity-cell\[data-level="0"\][^\{]*\{[^}]*background:\s*#fff;/s);
+});
+
+test('warehouse view, ratings and image pickers expose native keyboard controls', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+
+  assert.match(html, /id="catalog-list-view"[^>]*type="button"/);
+  assert.match(html, /id="catalog-grid-view"[^>]*type="button"/);
+  assert.match(app, /catalogListView\.setAttribute\('aria-pressed'/);
+  assert.match(app, /catalogGridView\.setAttribute\('aria-pressed'/);
+  assert.match(app, /ratingButtons\.setAttribute\('role', 'group'\)/);
+  assert.match(app, /button\.type = 'button';[\s\S]*button\.dataset\.rating = String\(value\)/);
+  assert.match(app, /button\.setAttribute\('aria-pressed', String\(value === selectedRating\)\)/);
+  assert.match(html, /id="manual-catalog-images"[^>]*type="file"[^>]*hidden/);
+  assert.match(html, /id="manual-catalog-images-button"[^>]*type="button"/);
+  assert.match(app, /manualCatalogImagesButton\.addEventListener\('click', \(\) => elements\.manualCatalogImages\.click\(\)\)/);
+  assert.match(app, /imageInput\.hidden = true/);
+  assert.match(app, /imagePickerButton\.addEventListener\('click', \(\) => imageInput\.click\(\)\)/);
+});
+
+test('language changes refresh warehouse dates, counts, months and filter-help copy', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+
+  assert.match(app, /updateLanguageToggle\(nextLocale\);\s*updateLocaleSensitiveWarehouseText\(\);/);
+  assert.match(app, /querySelectorAll\('\[data-catalog-date\]'\)/);
+  assert.match(app, /querySelectorAll\('\[data-item-count\]'\)/);
+  assert.match(app, /if \(currentWarehouseInsights\) renderWarehouseInsights\(currentWarehouseInsights\)/);
+  assert.match(app, /makeCatalogDate\('span', '', record\.inventoryDate \|\| record\.completedAt, '入库', record\.rating\)/);
+  assert.match(html, /启用小项目过滤时，低于当前阈值的项目也不会入队（默认 100 MB）/);
+});
+
+test('automatic update checks do not change header status or show failure notifications', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const check = app.match(/async function runUpdateCheck\(\{ automatic = false \} = \{\}\) \{([\s\S]*?)\n\}/)?.[1] || '';
+
+  assert.match(check, /checkForUpdates\(\{ silent: automatic \}\)/);
+  assert.match(check, /if \(!automatic\) \{\s*setUpdateControlsDisabled\(true\);\s*setUpdateStatus\('checking'/);
+  assert.match(check, /if \(!automatic\) \{\s*if \(result\?\.updateAvailable\)/);
+  assert.match(check, /if \(!automatic\) \{\s*setUpdateStatus\('failed'[\s\S]*showToast/);
+  assert.match(check, /if \(!automatic\) setUpdateControlsDisabled\(false\)/);
 });

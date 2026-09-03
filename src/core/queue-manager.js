@@ -43,7 +43,7 @@ const {
   verifyManifestMd5AgainstReference,
   validateManifestUnchanged
 } = require('./manifest');
-const { CancelledError, runArchiveJob } = require('./archive-engine');
+const { CancelledError, recoverPublishedArchiveFiles, runArchiveJob } = require('./archive-engine');
 const {
   DEFAULT_SIMILARITY_IGNORE_TERMS,
   DEFAULT_SIMILARITY_STRENGTH,
@@ -369,6 +369,16 @@ function assertSafePathSegment(value, label) {
     throw new Error(`${label}包含无效路径，已拒绝删除。`);
   }
   return segment;
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
 }
 
 async function quarantineAndTrashArchiveFiles(record, stagingDirectory, trashItem, pathExists) {
@@ -2626,6 +2636,91 @@ class QueueManager extends EventEmitter {
     return '已验证并入库';
   }
 
+  restoreCatalogSnapshot(snapshot) {
+    this.catalog = snapshot;
+    this.catalogThumbnailSummaryCache = new WeakMap();
+    this.markTermStatisticsDirty();
+  }
+
+  async compensateUncommittedArchive(job, result, generatedThumbnailDirectory) {
+    const attemptedAt = new Date().toISOString();
+    const publication = result?.archivePublication;
+    const archiveFiles = Array.isArray(result?.archiveFiles) ? result.archiveFiles : [];
+    let archiveState = archiveFiles.length > 0 ? 'manual_recovery_required' : 'not_applicable';
+    let recoveryDirectory = '';
+    let recoveredFiles = [];
+    let unrecoveredPaths = [];
+    const failures = [];
+
+    if (publication?.files?.length > 0) {
+      try {
+        const recover = this.services.recoverPublishedArchiveFiles || recoverPublishedArchiveFiles;
+        const recovered = await recover(publication);
+        recoveryDirectory = String(recovered?.recoveryDirectory || '');
+        recoveredFiles = Array.isArray(recovered?.recoveredFiles) ? recovered.recoveredFiles : [];
+        archiveState = 'recovered_to_staging';
+      } catch (error) {
+        recoveryDirectory = String(error.recoveryDirectory || '');
+        recoveredFiles = Array.isArray(error.recoveredFiles) ? error.recoveredFiles : [];
+        unrecoveredPaths = Array.isArray(error.unrecoveredPaths)
+          ? error.unrecoveredPaths.map(String).filter(Boolean)
+          : publication.files.map((file) => String(file.path || '')).filter(Boolean);
+        failures.push(`成品补偿失败：${error.message}`);
+      }
+    } else if (archiveFiles.length > 0) {
+      failures.push('归档执行器没有返回本任务的发布凭据；为避免误删用户文件，成品未自动移动。');
+      unrecoveredPaths = archiveFiles.map((file) => path.join(
+        this.config.archiveOutputDirectory,
+        String(file?.name || '')
+      ));
+    }
+
+    let thumbnailState = 'not_applicable';
+    if (generatedThumbnailDirectory) {
+      try {
+        await fs.rm(generatedThumbnailDirectory, { recursive: true, force: true });
+        thumbnailState = 'removed';
+      } catch (error) {
+        thumbnailState = 'manual_recovery_required';
+        failures.push(`缩略图补偿失败：${generatedThumbnailDirectory} · ${error.message}`);
+      }
+    }
+
+    return {
+      attemptedAt,
+      archiveState,
+      recoveryDirectory,
+      recoveredFiles,
+      unrecoveredPaths,
+      thumbnailState,
+      thumbnailPath: generatedThumbnailDirectory || '',
+      failures,
+      recoveryRequired: failures.length > 0
+    };
+  }
+
+  catalogCommitFailure(originalError, compensation) {
+    return this.uncommittedArchiveFailure(originalError, compensation, '仓库记录保存失败');
+  }
+
+  uncommittedArchiveFailure(originalError, compensation, context) {
+    const locations = [
+      compensation.recoveryDirectory,
+      ...compensation.unrecoveredPaths,
+      compensation.thumbnailState === 'manual_recovery_required' ? compensation.thumbnailPath : ''
+    ].filter(Boolean);
+    const recoveryText = compensation.recoveryRequired
+      ? `自动补偿未完成（${compensation.failures.join('；')}），需要人工恢复：${locations.join('；') || '请查看运行日志'}`
+      : compensation.archiveState === 'recovered_to_staging'
+        ? `本任务成品已移回恢复目录：${compensation.recoveryDirectory}`
+        : '未提交的本任务生成物已清理';
+    const error = new Error(`${context}：${originalError.message}；内存仓库未提交；${recoveryText}。源文件保持原位。`);
+    error.code = originalError.code || 'CATALOG_COMMIT_FAILED';
+    error.cause = originalError;
+    error.catalogRecovery = compensation;
+    return error;
+  }
+
   async persistJobs() {
     await this.store.saveJobs(this.config.repositoryDirectory, this.jobs);
   }
@@ -2721,7 +2816,7 @@ class QueueManager extends EventEmitter {
         : [
             similarityNotice || null,
             !intakeModeSelected ? '等待选择入库方式'
-              : task.processingMode === 'inventory_only' ? '等待未压缩直接入库'
+              : task.processingMode === 'inventory_only' ? '等待不压缩入库'
                 : sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩'
           ].filter(Boolean).join(' · '),
       archiveBaseName: createConfiguredArchiveName(task.displayName, this.config),
@@ -2825,7 +2920,7 @@ class QueueManager extends EventEmitter {
       job.processingMode = 'inventory_only';
       job.intakeModeSelected = true;
       job.stageText = job.status === 'queued'
-        ? '等待未压缩直接入库'
+        ? '等待不压缩入库'
         : `未压缩直接入库 · ${job.stageText || '等待手动确认'}`;
     }
     await this.persistJobs();
@@ -2939,7 +3034,7 @@ class QueueManager extends EventEmitter {
     job.stageText = !hasSelectedIntakeMode(job)
       ? '已确认，等待选择入库方式'
       : job.processingMode === 'inventory_only'
-      ? '已确认，等待未压缩直接入库'
+      ? '已确认，等待不压缩入库'
       : job.sourceCatalogRecordId ? '已确认，等待库内项目压缩' : '已确认，等待压缩';
     await this.persistJobs();
     const requestedVolumeBytes = Number(job.archiveVolumeBytes);
@@ -2962,6 +3057,7 @@ class QueueManager extends EventEmitter {
           : `用户已确认任务风险；大任务将按 ${volumeLabel} 分卷。`,
       job.id
     );
+    if (isRunnableQueuedJob(job)) void this.startQueue();
     return this.getState();
   }
 
@@ -2992,12 +3088,13 @@ class QueueManager extends EventEmitter {
         job.stageText = !hasSelectedIntakeMode(job)
           ? '已批量确认重复风险，等待选择入库方式'
           : job.processingMode === 'inventory_only'
-          ? '已批量确认重复风险，等待未压缩直接入库'
+          ? '已批量确认重复风险，等待不压缩入库'
           : job.sourceCatalogRecordId ? '已批量确认重复风险，等待库内项目压缩' : '已批量确认重复风险，等待压缩';
       }
     }
     await this.persistJobs();
     await this.log('warning', `已批量确认 ${jobs.length} 个重复或相似任务。`);
+    if (jobs.some(isRunnableQueuedJob)) void this.startQueue();
     return { state: this.getState(), confirmedCount: jobs.length };
   }
 
@@ -3007,11 +3104,17 @@ class QueueManager extends EventEmitter {
       throw new Error('当前任务没有等待确认的大小异常。');
     }
     const record = normalizeCatalogMetadata(job.pendingCatalogRecord);
+    const catalogBeforeCommit = structuredClone(this.catalog);
     const existingIndex = this.catalog.findIndex((candidate) => candidate.id === record.id);
     if (existingIndex >= 0) this.catalog[existingIndex] = record;
     else this.catalog.push(record);
     this.refreshSimilarityForRecord(record);
-    await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+    try {
+      await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+    } catch (error) {
+      this.restoreCatalogSnapshot(catalogBeforeCommit);
+      throw error;
+    }
     await this.store.deletePendingManifest(this.config.repositoryDirectory, job.id);
 
     let status = 'completed';
@@ -3171,12 +3274,13 @@ class QueueManager extends EventEmitter {
     job.progress = 0;
     job.errorCode = null;
     job.errorMessage = null;
+    delete job.catalogRecovery;
     job.exactDuplicateMatches = [];
     job.status = job.requiresConfirmation && !job.confirmedAt ? 'awaiting_confirmation' : 'queued';
     job.stageText = job.status === 'queued'
       ? !hasSelectedIntakeMode(job) ? '等待选择入库方式'
         : hasPendingAutomaticDuplicateCheck(job) && !job.exactDuplicateOverrideAt ? '等待内容完全一致核验'
-          : job.processingMode === 'inventory_only' ? '等待未压缩直接入库'
+          : job.processingMode === 'inventory_only' ? '等待不压缩入库'
             : job.sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩'
       : '等待手动确认';
     await this.persistJobs();
@@ -3461,6 +3565,9 @@ class QueueManager extends EventEmitter {
     this.pauseController = this.services.createPauseController?.() || new PauseController();
     let compressionStartedAt = 0;
     let compressionFinishedAt = 0;
+    let generatedThumbnailDirectory = '';
+    let result = null;
+    let publishedArtifactsFinalized = false;
     await this.updateJob(job, {
       status: 'inventorying',
       startedAt: new Date().toISOString(),
@@ -3505,7 +3612,7 @@ class QueueManager extends EventEmitter {
           ? job.archivePassword
           : String(this.config.archivePassword || '')
       };
-      const result = await archiveRunner(job, jobConfig, {
+      result = await archiveRunner(job, jobConfig, {
         preparedManifest,
         pauseController: this.pauseController,
         onStage: async (status, stageText) => {
@@ -3640,14 +3747,25 @@ class QueueManager extends EventEmitter {
       }
 
       if (this.services.createThumbnails && !job.sourceCatalogRecordId) {
+        const thumbnailRoot = path.join(this.config.repositoryDirectory, 'thumbnails');
+        const thumbnailDirectory = assertOwnedChildPath(
+          thumbnailRoot,
+          path.join(thumbnailRoot, assertSafePathSegment(job.id, '缩略图目录'))
+        );
+        const thumbnailDirectoryExisted = await pathExists(thumbnailDirectory);
         try {
           result.manifest = await this.services.createThumbnails(job, result.manifest, jobConfig, {
             pauseController: this.pauseController,
             signal: this.abortController.signal,
-            onLog: (message) => { void this.log('warning', message, job.id, false); }
+            onLog: (message, level = 'warning') => { void this.log(level, message, job.id, false); }
           });
         } catch (error) {
+          if (error instanceof CancelledError || error.code === 'TASK_CANCELLED' || this.abortController.signal.aborted) {
+            throw error;
+          }
           await this.log('warning', `缩略图生成未完成：${error.message}`, job.id);
+        } finally {
+          if (!thumbnailDirectoryExisted) generatedThumbnailDirectory = thumbnailDirectory;
         }
       }
 
@@ -3719,6 +3837,8 @@ class QueueManager extends EventEmitter {
         inventoryDate: existingRecord?.inventoryDate || completedAt,
         metadataUpdatedAt: completedAt
       };
+      const archivePublication = result.archivePublication || null;
+      delete record.archivePublication;
       normalizeThumbnailReferences(record, this.config.repositoryDirectory, { strict: true });
       const sizeCheck = inventoryOnly
         ? { abnormal: false, ratio: null, reason: '未压缩' }
@@ -3736,22 +3856,53 @@ class QueueManager extends EventEmitter {
           errorMessage: sizeCheck.reason
         });
         await this.log('error', `压缩体积异常：${sizeCheck.reason}；完整性测试已通过，但必须人工确认后才会入库。`, job.id);
+        publishedArtifactsFinalized = true;
         return;
       }
-      if (existingRecordIndex >= 0) this.catalog[existingRecordIndex] = record;
-      else this.catalog.push(record);
-      this.refreshSimilarityForRecord(record);
-      await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+      const catalogBeforeCommit = structuredClone(this.catalog);
+      try {
+        if (existingRecordIndex >= 0) this.catalog[existingRecordIndex] = record;
+        else this.catalog.push(record);
+        this.refreshSimilarityForRecord(record);
+        await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+      } catch (error) {
+        this.restoreCatalogSnapshot(catalogBeforeCommit);
+        const compensation = await this.compensateUncommittedArchive(
+          job,
+          { ...result, archivePublication },
+          generatedThumbnailDirectory
+        );
+        publishedArtifactsFinalized = true;
+        throw this.catalogCommitFailure(error, compensation);
+      }
+      publishedArtifactsFinalized = true;
       await this.store.deletePendingManifest(this.config.repositoryDirectory, job.id);
 
       let completionStatus = 'completed';
       let completionText = inventoryOnly ? '已生成完整清单并直接入库（未压缩）' : '已验证并入库';
       if (completionAction !== 'keep' && !skipSourceAction && !this.safetyHalt) {
+        let sourceDispositionCompleted = false;
         try {
           completionText = await this.completeSourceDisposition(record, job);
+          sourceDispositionCompleted = true;
           await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
           await this.log('warning', completionText, job.id);
         } catch (error) {
+          if (sourceDispositionCompleted) {
+            const persistenceError = new Error(
+              `源文件后处理已经执行，但处理结果未能写回仓库：${error.message}。请勿重试归档，并按运行日志核对源文件位置。`
+            );
+            persistenceError.code = 'SOURCE_DISPOSITION_COMMIT_FAILED';
+            persistenceError.cause = error;
+            persistenceError.sourceDispositionRecovery = {
+              action: completionAction,
+              sourceDisposition: record.sourceDisposition,
+              originalSourcePath: job.sourcePath,
+              movedTo: String(record.movedTo || ''),
+              trashedAt: String(record.trashedAt || '')
+            };
+            throw persistenceError;
+          }
           if (['TRASH_NOT_PERFORMED', 'TRASH_VERIFICATION_UNAVAILABLE', 'TRASH_RETENTION_FAILED'].includes(error.code)) {
             await this.activateTrashSafetyHalt(record, job, error, result.archiveFiles);
             await this.log('error', `回收站安全熔断：${error.message} 自动移入回收站已关闭，后续任务没有启动。`, job.id);
@@ -3791,7 +3942,18 @@ class QueueManager extends EventEmitter {
         : job.sourceCatalogRecordId
           ? '库内未压缩项目已完成压缩，原仓库记录已升级。'
           : '任务已完成完整性测试并成功入库。', job.id);
-    } catch (error) {
+    } catch (caughtError) {
+      let error = caughtError;
+      if (result?.archivePublication && !publishedArtifactsFinalized) {
+        const compensation = await this.compensateUncommittedArchive(job, result, generatedThumbnailDirectory);
+        publishedArtifactsFinalized = true;
+        const cancelled = error instanceof CancelledError || error.code === 'TASK_CANCELLED' || this.abortController.signal.aborted;
+        if (cancelled && !compensation.recoveryRequired) {
+          error.catalogRecovery = compensation;
+        } else {
+          error = this.uncommittedArchiveFailure(error, compensation, '归档成品发布后的处理失败');
+        }
+      }
       if (error.code === 'AUTO_SKIPPED_EXACT_DUPLICATE') {
         await this.skipExactDuplicateJob(job, error.projectMatches || [], error.manifest);
       } else if (error.code === 'DUPLICATE_REVIEW_REQUIRED') {
@@ -3820,26 +3982,44 @@ class QueueManager extends EventEmitter {
       } else if (error instanceof CancelledError || error.code === 'TASK_CANCELLED') {
         await this.updateJob(job, {
           status: 'cancelled',
-          stageText: '已取消，源文件未修改',
+          stageText: error.catalogRecovery?.archiveState === 'recovered_to_staging'
+            ? '已取消，成品已移回恢复目录，源文件未修改'
+            : '已取消，源文件未修改',
           progress: 0,
           errorCode: null,
-          errorMessage: null
+          errorMessage: null,
+          catalogRecovery: error.catalogRecovery || null
         });
         await this.log('warning', '运行中的任务已安全取消。', job.id);
         await this.store.deletePendingManifest(this.config.repositoryDirectory, job.id);
+      } else if (error.code === 'SOURCE_DISPOSITION_COMMIT_FAILED') {
+        await this.log('error', error.message, job.id);
+        await this.updateJob(job, {
+          status: 'completed_cleanup_failed',
+          stageText: '归档已入库，源文件后处理已完成，但仓库状态保存失败；请查看日志且不要重试',
+          progress: 100,
+          archiveFiles: result?.archiveFiles || [],
+          errorCode: error.code,
+          errorMessage: error.message,
+          sourceDispositionRecovery: error.sourceDispositionRecovery
+        });
       } else {
         const diskSafetyError = ['INSUFFICIENT_DISK_SPACE', 'DISK_SPACE_CHECK_UNAVAILABLE'].includes(error.code);
         if (diskSafetyError) this.stopRequested = true;
+        const failureLogMessage = diskSafetyError
+          ? `${error.message} 整个队列已停止，释放空间并确认目录可用后可重试。`
+          : error.message;
+        // 补偿结果先写独立运行日志；即使仓库同时无法保存任务状态，恢复位置也不会静默丢失。
+        if (error.catalogRecovery) await this.log('error', failureLogMessage, job.id);
         await this.updateJob(job, {
           status: 'failed',
           stageText: diskSafetyError ? '磁盘空间安全停止，等待用户处理' : '处理失败，可重试',
           progress: 0,
           errorCode: error.code || 'UNKNOWN_ERROR',
-          errorMessage: error.message
+          errorMessage: error.message,
+          catalogRecovery: error.catalogRecovery || null
         });
-        await this.log('error', diskSafetyError
-          ? `${error.message} 整个队列已停止，释放空间并确认目录可用后可重试。`
-          : error.message, job.id);
+        if (!error.catalogRecovery) await this.log('error', failureLogMessage, job.id);
       }
     } finally {
       try { await this.pauseController?.resume(); } catch { /* 子进程已退出时忽略 */ }

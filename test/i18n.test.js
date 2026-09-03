@@ -54,6 +54,13 @@ if (!rendererDir) {
     i18n.setLocale('en-US');
     assert.equal(i18n.translate('保存设置'), 'Save settings');
     assert.equal(i18n.translate('一键加入白名单'), 'Add to whitelist');
+    assert.equal(i18n.translate('未评分'), 'Unrated');
+    assert.equal(i18n.translate('所选目录已经不存在。'), 'The selected directory no longer exists.');
+    assert.equal(i18n.translate('入库'), 'Added');
+    assert.equal(
+      i18n.translate('扫描时会把所选目录下的每个文件夹或视频分别加入队列，跳过其他根级文件；启用小项目过滤时，低于当前阈值的项目也不会入队（默认 100 MB）'),
+      'Scanning queues each folder or video directly under the selected directory and skips other root-level files. When small-item filtering is enabled, items below the current threshold are also excluded (100 MB by default)'
+    );
     assert.equal(
       i18n.translate('以下词汇在相似度计算中将被忽略'),
       'The following term will be ignored in similarity calculations'
@@ -112,6 +119,89 @@ if (!rendererDir) {
       i18n.translateStage('开始调用 7-Zip；本任务未设置密码。'),
       'Starting 7-Zip; this task has no password.'
     );
+  });
+
+  test('queue status badges translate in both locales and survive runtime language switches', () => {
+    const app = fs.readFileSync(path.join(rendererDir, 'app.js'), 'utf8');
+    assert.match(
+      app,
+      /statusCell\.append\(makeStage\('span', `status \$\{job\.status\}`, jobStatusLabel\(job\)\)\)/,
+      'dynamic status badges must use the queue-stage translation channel'
+    );
+    assert.match(
+      app,
+      /\? '待选入库方式'\s*:\s*statusLabel\(job\?\.status\)/,
+      'the special badge must remain presentation-only and other statuses must use statusLabel'
+    );
+
+    const previousNode = global.Node;
+    const previousNodeFilter = global.NodeFilter;
+    const previousDocument = global.document;
+    global.Node = { ELEMENT_NODE: 1, TEXT_NODE: 3 };
+    global.NodeFilter = { SHOW_TEXT: 4 };
+    const badges = [];
+    const body = {
+      nodeType: Node.ELEMENT_NODE,
+      matches: () => false,
+      querySelectorAll: () => [],
+      children: []
+    };
+    const makeBadge = (source) => {
+      const badge = {
+        nodeType: Node.ELEMENT_NODE,
+        matches: () => false,
+        querySelectorAll: () => []
+      };
+      const badgeText = {
+        nodeType: Node.TEXT_NODE,
+        nodeValue: source,
+        parentElement: { closest: (selector) => selector === '[data-i18n-stage]' ? badge : null }
+      };
+      badge.textNode = badgeText;
+      badges.push(badge);
+      body.children.push(badge);
+      return badge;
+    };
+    global.document = {
+      body,
+      documentElement: { lang: '' },
+      createTreeWalker: (root) => {
+        const textNodes = root === body
+          ? body.children.map((badge) => badge.textNode)
+          : root.textNode ? [root.textNode] : [];
+        let index = 0;
+        return { nextNode: () => textNodes[index++] || null };
+      }
+    };
+
+    try {
+      i18n.setLocale('zh-CN');
+      const chineseBadge = makeBadge('待选入库方式');
+      i18n.translateDom(chineseBadge);
+      assert.equal(chineseBadge.textNode.nodeValue, '待选入库方式');
+
+      i18n.setLocale('en-US');
+      assert.equal(chineseBadge.textNode.nodeValue, 'Choose intake mode');
+      const regeneratedEnglishBadge = makeBadge('待选入库方式');
+      i18n.translateDom(regeneratedEnglishBadge);
+      assert.equal(regeneratedEnglishBadge.textNode.nodeValue, 'Choose intake mode');
+
+      const queuedBadge = makeBadge('等待压缩');
+      i18n.translateDom(queuedBadge);
+      assert.equal(queuedBadge.textNode.nodeValue, 'Queued');
+      const completedBadge = makeBadge('已完成');
+      i18n.translateDom(completedBadge);
+      assert.equal(completedBadge.textNode.nodeValue, 'Completed');
+      assert.equal(badges.length, 4, 'only the intended status badge instances should be created');
+    } finally {
+      if (previousNode === undefined) delete global.Node;
+      else global.Node = previousNode;
+      if (previousNodeFilter === undefined) delete global.NodeFilter;
+      else global.NodeFilter = previousNodeFilter;
+      if (previousDocument === undefined) delete global.document;
+      else global.document = previousDocument;
+      i18n.setLocale('zh-CN');
+    }
   });
 
   test('dynamic DOM translation includes the inserted root and preserves user data', () => {

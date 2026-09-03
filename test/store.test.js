@@ -2,12 +2,14 @@
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
+const fsSync = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { createProjectFingerprint, similarityCandidateKeys } = require('../src/core/duplicate-check');
 const { AppStore, readJson, writeJsonAtomic } = require('../src/core/store');
 const { makeUserDataLayout, resolveUserDataRoot } = require('../src/core/storage-paths');
+const { WAREHOUSE_INITIALIZED_MARKER } = require('../src/core/sqlite-repository');
 
 test('JSON state can be atomically created and replaced', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-store-'));
@@ -79,6 +81,60 @@ test('SQLite repository persists catalog, jobs and pending manifests incremental
   store.closeAll();
 });
 
+test('concurrent JSON writes stay valid and preserve invocation order', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-store-concurrent-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'settings.json');
+
+  for (let round = 0; round < 5; round += 1) {
+    const writes = Array.from({ length: 20 }, (_, index) => writeJsonAtomic(filePath, {
+      round,
+      index,
+      padding: 'x'.repeat(40 + (index * 37))
+    }));
+    await Promise.all(writes);
+    assert.deepEqual(await readJson(filePath, null), {
+      round,
+      index: 19,
+      padding: 'x'.repeat(40 + (19 * 37))
+    });
+  }
+  assert.deepEqual((await fs.readdir(root)).filter((name) => name.endsWith('.tmp')), []);
+});
+
+test('a first-time zero-byte SQLite file is initialized', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-empty-sqlite-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const repositoryDirectory = path.join(root, 'warehouse');
+  const databasePath = path.join(repositoryDirectory, 'warehouse.sqlite');
+  await fs.mkdir(repositoryDirectory, { recursive: true });
+  await fs.writeFile(databasePath, '');
+  const store = new AppStore(path.join(root, 'user-data'));
+
+  assert.deepEqual(await store.loadCatalog(repositoryDirectory), []);
+  assert.equal((await fs.stat(databasePath)).size > 0, true);
+  assert.equal(await fs.readFile(path.join(repositoryDirectory, WAREHOUSE_INITIALIZED_MARKER), 'utf8').then(Boolean), true);
+  store.closeAll();
+});
+
+test('a previously initialized zero-byte SQLite repository is rejected without modification', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-empty-sqlite-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const repositoryDirectory = path.join(root, 'warehouse');
+  const databasePath = path.join(repositoryDirectory, 'warehouse.sqlite');
+  const initialStore = new AppStore(path.join(root, 'user-data'));
+  await initialStore.loadCatalog(repositoryDirectory);
+  initialStore.closeAll();
+  await fs.writeFile(databasePath, '');
+  const store = new AppStore(path.join(root, 'user-data-recovery'));
+
+  assert.throws(
+    () => store.getRepository(repositoryDirectory),
+    (error) => error.code === 'REPOSITORY_DATABASE_EMPTY' && /请恢复 warehouse\.sqlite/.test(error.message)
+  );
+  assert.equal((await fs.stat(databasePath)).size, 0);
+});
+
 test('project shape lookup returns every candidate instead of truncating before a later exact match', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-project-fingerprint-store-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -125,7 +181,7 @@ test('saved user data location becomes the root for every durable data path', ()
   const selectedRoot = path.resolve('D:\\HamsterData');
   const resolved = resolveUserDataRoot(applicationRoot, () => JSON.stringify({
     userDataDirectory: selectedRoot
-  }), () => true);
+  }), () => true, () => true);
   const layout = makeUserDataLayout(applicationRoot, null, resolved);
 
   assert.equal(resolved, selectedRoot);
@@ -141,5 +197,27 @@ test('saved user data location becomes the root for every durable data path', ()
       userDataDirectory: 'D:\\missing-user-data'
     }), () => false),
     (error) => error.code === 'USER_DATA_LOCATION_MISSING' && /不会自动创建空仓库/.test(error.message)
+  );
+});
+
+test('user data pointers reject ambiguous or non-directory targets', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-user-data-pointer-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const pointerPath = path.join(root, 'user-data-location.json');
+  const fileTarget = path.join(root, 'not-a-directory');
+  await fs.writeFile(fileTarget, 'file');
+
+  assert.throws(() => resolveUserDataRoot(''), /软件主目录不能为空/);
+  for (const userDataDirectory of ['E:', 123, { path: fileTarget }]) {
+    fsSync.writeFileSync(pointerPath, JSON.stringify({ userDataDirectory }), 'utf8');
+    assert.throws(
+      () => resolveUserDataRoot(root),
+      (error) => error.code === 'USER_DATA_LOCATION_INVALID'
+    );
+  }
+  fsSync.writeFileSync(pointerPath, JSON.stringify({ userDataDirectory: fileTarget }), 'utf8');
+  assert.throws(
+    () => resolveUserDataRoot(root),
+    (error) => error.code === 'USER_DATA_LOCATION_INVALID' && /必须指向目录/.test(error.message)
   );
 });

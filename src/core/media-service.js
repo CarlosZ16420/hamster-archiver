@@ -86,11 +86,11 @@ async function probeVideo(sourcePath, config, options = {}) {
   const output = `${result.stderr}\n${result.stdout}`;
   const parsed = parseFfmpegProbeOutput(output);
   if (!parsed) {
-    options.onLog?.(`FFmpeg 探测失败：${path.basename(sourcePath)}；未能从固定版本输出中解析时长或分辨率。`);
+    options.onLog?.(`FFmpeg 探测失败：${path.basename(sourcePath)}；未能从固定版本输出中解析时长或分辨率。`, 'warning');
     throw new Error('FFmpeg 无法读取有效的视频时长或画面尺寸。');
   }
   const stats = await fs.stat(sourcePath);
-  options.onLog?.(`FFmpeg 探测成功：${path.basename(sourcePath)} · ${parsed.width}×${parsed.height} · ${parsed.durationSeconds.toFixed(2)} 秒。`);
+  options.onLog?.(`FFmpeg 探测成功：${path.basename(sourcePath)} · ${parsed.width}×${parsed.height} · ${parsed.durationSeconds.toFixed(2)} 秒。`, 'info');
   return { ...parsed, bytes: stats.size };
 }
 

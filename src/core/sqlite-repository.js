@@ -7,6 +7,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { createProjectFingerprint, normalizeName, similarityCandidateKeys } = require('./duplicate-check');
 
 const SCHEMA_VERSION = 3;
+const WAREHOUSE_INITIALIZED_MARKER = '.warehouse-initialized';
 
 // 候选键算法版本：saveCatalog 只在记录内容变化时重写键，
 // 算法升级后靠这个版本号把存量记录的键整体重建一次。
@@ -142,8 +143,33 @@ function initializeSchema(database) {
 function openRepository(repositoryDirectory, options = {}) {
   fsSync.mkdirSync(repositoryDirectory, { recursive: true });
   const databasePath = options.databasePath || path.join(repositoryDirectory, 'warehouse.sqlite');
+  if (fsSync.existsSync(databasePath)) {
+    const stats = fsSync.statSync(databasePath);
+    const markerPath = path.join(path.dirname(databasePath), WAREHOUSE_INITIALIZED_MARKER);
+    const hasRepositoryEvidence = [
+      markerPath,
+      `${databasePath}-wal`,
+      `${databasePath}-shm`,
+      path.join(path.dirname(databasePath), 'catalog.json'),
+      path.join(path.dirname(databasePath), 'jobs.json'),
+      path.join(path.dirname(databasePath), 'thumbnails')
+    ].some((candidate) => fsSync.existsSync(candidate));
+    if (stats.isFile() && stats.size === 0 && hasRepositoryEvidence) {
+      const error = new Error(`仓库数据库为空，可能已损坏：${databasePath}。请恢复 warehouse.sqlite 后再启动。`);
+      error.code = 'REPOSITORY_DATABASE_EMPTY';
+      throw error;
+    }
+  }
   const database = new DatabaseSync(databasePath);
   initializeSchema(database);
+  const markerPath = path.join(path.dirname(databasePath), WAREHOUSE_INITIALIZED_MARKER);
+  if (!fsSync.existsSync(markerPath)) {
+    try {
+      fsSync.writeFileSync(markerPath, `${new Date().toISOString()}\n`, { encoding: 'utf8', flag: 'wx' });
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+    }
+  }
   ensureSimilarityKeyVersion(database);
   ensureProjectFingerprintVersion(database);
   return { database, databasePath };
@@ -531,6 +557,7 @@ function integrityCheck(database) {
 
 module.exports = {
   SCHEMA_VERSION,
+  WAREHOUSE_INITIALIZED_MARKER,
   contentHash,
   findCatalogIdsByExactName,
   findCatalogIdsByMd5,

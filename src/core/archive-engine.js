@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const { constants: fsConstants } = require('node:fs');
 const path = require('node:path');
@@ -249,11 +250,196 @@ async function publishArchiveFiles(sourceDir, archiveRoot, archiveNames) {
         if (sourceStats.size !== targetStats.size) throw new Error(`跨磁盘复制校验失败：${name}`);
         await fs.rm(sourcePath, { force: true });
       }
-      published.push(targetPath);
+      const identity = await readPublishedFileIdentity(targetPath);
+      published.push({ targetPath, identity });
     }
+    const publicationFiles = published.map(({ targetPath, identity }) => ({
+        name: path.basename(targetPath),
+        path: path.resolve(targetPath),
+        identity
+      }));
     await fs.rm(sourceDir, { recursive: true, force: true });
+    return publicationFiles;
   } catch (error) {
-    await Promise.allSettled(published.map((targetPath) => fs.rm(targetPath, { force: true })));
+    await Promise.allSettled(published.map(async ({ targetPath, identity }) => {
+      try {
+        const currentIdentity = await readPublishedFileIdentity(targetPath);
+        if (samePublishedFileIdentity(identity, currentIdentity)) {
+          await fs.rm(targetPath, { force: true });
+        }
+      } catch (cleanupError) {
+        if (cleanupError.code !== 'ENOENT') throw cleanupError;
+      }
+    }));
+    throw error;
+  }
+}
+
+function isStrictChildPath(root, candidate) {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return Boolean(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+async function readPublishedFileIdentity(filePath) {
+  const stats = await fs.stat(filePath, { bigint: true });
+  if (!stats.isFile()) throw new Error(`归档成品不是普通文件：${filePath}`);
+  return {
+    size: Number(stats.size),
+    device: String(stats.dev),
+    inode: String(stats.ino),
+    modifiedNs: String(stats.mtimeNs),
+    createdNs: String(stats.birthtimeNs)
+  };
+}
+
+function samePublishedFileIdentity(expected, actual) {
+  return expected && actual &&
+    Number(expected.size) === Number(actual.size) &&
+    String(expected.device) === String(actual.device) &&
+    String(expected.inode) === String(actual.inode) &&
+    String(expected.modifiedNs) === String(actual.modifiedNs) &&
+    String(expected.createdNs) === String(actual.createdNs);
+}
+
+async function createArchivePublicationReceipt(jobId, archiveRoot, archiveStagingDirectory, archiveNames) {
+  const ownerJobId = String(jobId || '');
+  if (!ownerJobId || path.basename(ownerJobId) !== ownerJobId || /[\\/]/.test(ownerJobId)) {
+    throw new Error('归档任务标识无效，无法登记成品所有权。');
+  }
+  const resolvedArchiveRoot = path.resolve(archiveRoot);
+  const resolvedStagingRoot = path.resolve(archiveStagingDirectory);
+  const files = [];
+  for (const rawName of archiveNames) {
+    const name = String(rawName || '');
+    if (!name || path.basename(name) !== name || /[\\/]/.test(name)) {
+      throw new Error('归档成品名称无效，无法登记成品所有权。');
+    }
+    const filePath = path.resolve(resolvedArchiveRoot, name);
+    if (!isStrictChildPath(resolvedArchiveRoot, filePath)) {
+      throw new Error('归档成品超出最终输出目录，无法登记成品所有权。');
+    }
+    files.push({ name, path: filePath, identity: await readPublishedFileIdentity(filePath) });
+  }
+  return {
+    ownerJobId,
+    publicationId: crypto.randomUUID(),
+    archiveRoot: resolvedArchiveRoot,
+    stagingRoot: resolvedStagingRoot,
+    files
+  };
+}
+
+async function movePublishedFileToRecovery(sourcePath, recoveryPath, expectedIdentity) {
+  const beforeMoveIdentity = await readPublishedFileIdentity(sourcePath);
+  if (!samePublishedFileIdentity(expectedIdentity, beforeMoveIdentity)) {
+    const error = new Error(`归档成品身份已变化，已拒绝自动移动：${sourcePath}`);
+    error.code = 'ARCHIVE_RECOVERY_OWNERSHIP_UNVERIFIED';
+    throw error;
+  }
+  try {
+    await fs.rename(sourcePath, recoveryPath);
+    const movedIdentity = await readPublishedFileIdentity(recoveryPath);
+    if (!samePublishedFileIdentity(expectedIdentity, movedIdentity)) {
+      try { await fs.rename(recoveryPath, sourcePath); } catch { /* 保留在恢复目录并交由上层报告 */ }
+      const error = new Error(`归档成品移动后身份复核失败：${sourcePath}`);
+      error.code = 'ARCHIVE_RECOVERY_OWNERSHIP_UNVERIFIED';
+      throw error;
+    }
+    return;
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error;
+  }
+
+  await fs.copyFile(sourcePath, recoveryPath, fsConstants.COPYFILE_EXCL);
+  try {
+    const [sourceIdentity, recoveryIdentity] = await Promise.all([
+      readPublishedFileIdentity(sourcePath),
+      readPublishedFileIdentity(recoveryPath)
+    ]);
+    if (!samePublishedFileIdentity(expectedIdentity, sourceIdentity) ||
+        Number(recoveryIdentity.size) !== Number(expectedIdentity.size)) {
+      throw new Error('跨磁盘恢复副本校验失败。');
+    }
+    await fs.rm(sourcePath);
+  } catch (error) {
+    await fs.rm(recoveryPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function recoverPublishedArchiveFiles(publication) {
+  if (!publication || !Array.isArray(publication.files) || publication.files.length === 0) {
+    return { recoveryDirectory: '', recoveredFiles: [] };
+  }
+  const rawArchiveRoot = String(publication.archiveRoot || '').trim();
+  const rawStagingRoot = String(publication.stagingRoot || '').trim();
+  if (!rawArchiveRoot || !rawStagingRoot) {
+    throw new Error('归档成品发布凭据缺少最终目录或暂存目录，已拒绝自动补偿。');
+  }
+  const archiveRoot = path.resolve(rawArchiveRoot);
+  const stagingRoot = path.resolve(rawStagingRoot);
+  const ownerJobId = String(publication.ownerJobId || '');
+  const publicationId = String(publication.publicationId || '');
+  if (!ownerJobId || path.basename(ownerJobId) !== ownerJobId || /[\\/]/.test(ownerJobId) ||
+      !publicationId || path.basename(publicationId) !== publicationId || /[\\/]/.test(publicationId)) {
+    throw new Error('归档成品发布凭据无效，已拒绝自动补偿。');
+  }
+
+  const recoveryRoot = path.join(stagingRoot, 'recovery');
+  const recoveryDirectory = path.join(recoveryRoot, ownerJobId, publicationId);
+  const verified = [];
+  for (const file of publication.files) {
+    const sourcePath = path.resolve(String(file.path || ''));
+    if (!isStrictChildPath(archiveRoot, sourcePath) || path.basename(sourcePath) !== String(file.name || '')) {
+      const error = new Error('归档成品发布凭据超出最终输出目录，已拒绝自动补偿。');
+      error.code = 'ARCHIVE_RECOVERY_OWNERSHIP_UNVERIFIED';
+      error.unrecoveredPaths = publication.files.map((item) => String(item.path || '')).filter(Boolean);
+      throw error;
+    }
+    let currentIdentity;
+    try {
+      currentIdentity = await readPublishedFileIdentity(sourcePath);
+    } catch (cause) {
+      const error = new Error(`无法复核本任务刚发布的归档成品：${sourcePath} · ${cause.message}`);
+      error.code = 'ARCHIVE_RECOVERY_OWNERSHIP_UNVERIFIED';
+      error.unrecoveredPaths = publication.files.map((item) => String(item.path || '')).filter(Boolean);
+      throw error;
+    }
+    if (!samePublishedFileIdentity(file.identity, currentIdentity)) {
+      const error = new Error(`归档成品身份已变化，已拒绝自动移动：${sourcePath}`);
+      error.code = 'ARCHIVE_RECOVERY_OWNERSHIP_UNVERIFIED';
+      error.unrecoveredPaths = publication.files.map((item) => String(item.path || '')).filter(Boolean);
+      throw error;
+    }
+    verified.push({ ...file, sourcePath });
+  }
+
+  const recoveredFiles = [];
+  try {
+    await fs.mkdir(path.dirname(recoveryDirectory), { recursive: true });
+    await fs.mkdir(recoveryDirectory);
+    for (const file of verified) {
+      const recoveryPath = path.join(recoveryDirectory, file.name);
+      await movePublishedFileToRecovery(file.sourcePath, recoveryPath, file.identity);
+      recoveredFiles.push({ originalPath: file.sourcePath, recoveryPath });
+    }
+    await fs.writeFile(path.join(recoveryDirectory, 'recovery.json'), `${JSON.stringify({
+      type: 'catalog-commit-recovery',
+      ownerJobId,
+      publicationId,
+      recoveredAt: new Date().toISOString(),
+      files: recoveredFiles
+    }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+    return { recoveryDirectory, recoveredFiles };
+  } catch (cause) {
+    const recoveredOriginalPaths = new Set(recoveredFiles.map((item) => item.originalPath));
+    const error = new Error(`归档成品补偿未完成：${cause.message}`);
+    error.code = 'ARCHIVE_RECOVERY_INCOMPLETE';
+    error.recoveryDirectory = recoveryDirectory;
+    error.recoveredFiles = recoveredFiles;
+    error.unrecoveredPaths = verified
+      .map((file) => file.sourcePath)
+      .filter((filePath) => !recoveredOriginalPaths.has(filePath));
     throw error;
   }
 }
@@ -369,13 +555,17 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       await assertEnoughDiskSpace(archiveRoot, stagedArchiveBytes, '成品磁盘');
     }
     await onStage('moving', '正在把已验证成品移入归档库');
-    await publishArchiveFiles(taskStagingDir, archiveRoot, archiveFiles);
+    const publicationId = crypto.randomUUID();
+    const publishedFiles = await publishArchiveFiles(taskStagingDir, archiveRoot, archiveFiles);
+    const archivePublication = {
+      ownerJobId: String(job.id),
+      publicationId,
+      archiveRoot: path.resolve(archiveRoot),
+      stagingRoot: path.resolve(config.archiveStagingDirectory),
+      files: publishedFiles
+    };
 
-    const finalFiles = [];
-    for (const name of archiveFiles) {
-      const stats = await fs.stat(path.join(archiveRoot, name));
-      finalFiles.push({ name, size: stats.size });
-    }
+    const finalFiles = publishedFiles.map((file) => ({ name: file.name, size: file.identity.size }));
 
     return {
       archiveFiles: finalFiles,
@@ -386,6 +576,7 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       skippedFiles,
       passwordScheme: hasPassword ? PASSWORD_SCHEME : 'none',
       hasPassword,
+      archivePublication,
       verifiedAt: new Date().toISOString()
     };
   } catch (error) {
@@ -403,6 +594,8 @@ module.exports = {
   buildCompressArgs,
   buildVerifyArgs,
   resolveArchiveVolumeBytes,
+  createArchivePublicationReceipt,
+  recoverPublishedArchiveFiles,
   runArchiveJob,
   runProcess
 };

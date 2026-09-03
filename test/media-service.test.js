@@ -37,10 +37,14 @@ test('portable FFmpeg probes video metadata and extracts evenly spaced JPEG thum
   assert.equal(generated.status, 0, generated.stderr);
 
   const config = { ffmpegPath };
-  const info = await probeVideo(videoPath, config);
+  const logs = [];
+  const info = await probeVideo(videoPath, config, {
+    onLog: (message, level) => logs.push({ message, level })
+  });
   assert.equal(info.width, 640);
   assert.equal(info.height, 360);
   assert.ok(info.durationSeconds >= 3.9);
+  assert.ok(logs.some((entry) => entry.level === 'info' && entry.message.startsWith('FFmpeg 探测成功')));
   const result = await extractVideoFrames(videoPath, root, 0, 3, config);
   assert.equal(result.frames.length, 3);
   assert.ok(result.frames[0].timeSeconds < result.frames[1].timeSeconds);

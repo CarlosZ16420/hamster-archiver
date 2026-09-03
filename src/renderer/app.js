@@ -103,6 +103,7 @@ const elements = {
   manualCatalogSource: document.querySelector('#manual-catalog-source'),
   manualCatalogBackup: document.querySelector('#manual-catalog-backup'),
   manualCatalogImages: document.querySelector('#manual-catalog-images'),
+  manualCatalogImagesButton: document.querySelector('#manual-catalog-images-button'),
   manualImagePaste: document.querySelector('#manual-image-paste'),
   manualImagePreview: document.querySelector('#manual-image-preview'),
   bulkTagsDialog: document.querySelector('#bulk-tags-dialog'),
@@ -256,6 +257,7 @@ elements.languageToggle?.addEventListener('click', () => {
   const nextLocale = i18n?.getLocale?.() === 'en-US' ? 'zh-CN' : 'en-US';
   i18n?.setLocale(nextLocale);
   updateLanguageToggle(nextLocale);
+  updateLocaleSensitiveWarehouseText();
   void saveConfig();
 });
 
@@ -410,20 +412,26 @@ function setUpdateControlsDisabled(disabled) {
 async function runUpdateCheck({ automatic = false } = {}) {
   if (updateCheckInFlight || !elements.updateStatusChip) return null;
   updateCheckInFlight = true;
-  setUpdateControlsDisabled(true);
-  setUpdateStatus('checking', automatic ? '正在检查…' : '正在检查…');
+  if (!automatic) {
+    setUpdateControlsDisabled(true);
+    setUpdateStatus('checking', '正在检查…');
+  }
   try {
     const result = await window.archiveApp.checkForUpdates({ silent: automatic });
-    if (result?.updateAvailable) setUpdateStatus('available', '检查更新');
-    else setUpdateStatus('current', '检查更新');
+    if (!automatic) {
+      if (result?.updateAvailable) setUpdateStatus('available', '检查更新');
+      else setUpdateStatus('current', '检查更新');
+    }
     return result;
   } catch (error) {
-    setUpdateStatus('failed', '检查更新');
-    showToast(`检查更新失败：${error.message || String(error)}`, true);
+    if (!automatic) {
+      setUpdateStatus('failed', '检查更新');
+      showToast(`检查更新失败：${error.message || String(error)}`, true);
+    }
     return null;
   } finally {
     updateCheckInFlight = false;
-    setUpdateControlsDisabled(false);
+    if (!automatic) setUpdateControlsDisabled(false);
   }
 }
 
@@ -487,14 +495,47 @@ function starText(rating) {
 }
 
 function formatCatalogDate(value) {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) {
-    return `${String(value).replaceAll('-', '/')}（旧记录，仅日期）`;
+  const formatted = uiState.formatCatalogDate(value, i18n?.getLocale?.());
+  if (!formatted) return t('日期未知');
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))
+    ? `${formatted}${t('（旧记录，仅日期）')}`
+    : formatted;
+}
+
+function catalogDateText(value, label = '', rating = null) {
+  const prefix = label ? `${t(label)}${label === '入库' ? ' ' : t('：')}` : '';
+  const ratingPrefix = rating === null ? '' : `${t(starText(rating))} · `;
+  return `${ratingPrefix}${prefix}${formatCatalogDate(value)}`;
+}
+
+function makeCatalogDate(tag, className, value, label = '', rating = null) {
+  const node = makeUserText(tag, className);
+  node.dataset.catalogDate = String(value || '');
+  node.dataset.catalogDateLabel = label;
+  if (rating !== null) node.dataset.catalogRating = String(Number(rating) || 0);
+  node.textContent = catalogDateText(value, label, rating);
+  return node;
+}
+
+function makeItemCount(tag, className, count) {
+  const node = makeUserText(tag, className);
+  node.dataset.itemCount = String(Number(count) || 0);
+  node.textContent = uiState.formatItemCount(count, i18n?.getLocale?.());
+  return node;
+}
+
+function updateLocaleSensitiveWarehouseText() {
+  for (const node of document.querySelectorAll('[data-catalog-date]')) {
+    const rating = node.hasAttribute('data-catalog-rating') ? Number(node.dataset.catalogRating) : null;
+    node.textContent = catalogDateText(node.dataset.catalogDate, node.dataset.catalogDateLabel || '', rating);
   }
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return t('日期未知');
-  return date.toLocaleString(i18n?.getLocale?.() === 'en-US' ? 'en-US' : 'zh-CN', {
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
-  });
+  for (const node of document.querySelectorAll('[data-item-count]')) {
+    node.textContent = uiState.formatItemCount(node.dataset.itemCount, i18n?.getLocale?.());
+  }
+  for (const button of document.querySelectorAll('[data-rating-button-label]')) {
+    button.setAttribute('aria-label', uiState.ratingButtonLabel(button.dataset.rating, i18n?.getLocale?.()));
+  }
+  if (currentWarehouseInsights) renderWarehouseInsights(currentWarehouseInsights);
 }
 
 function formatDecimalGb(bytes) {
@@ -518,13 +559,14 @@ function activityLevel(entry, maxBytes, maxCount) {
 
 function renderWarehouseInsights(insights) {
   currentWarehouseInsights = insights;
-  elements.metricInventory.textContent = Number(insights.inventoryCount || 0).toLocaleString('zh-CN');
-  elements.metricTags.textContent = Number(insights.uniqueTagCount || 0).toLocaleString('zh-CN');
+  const locale = i18n?.getLocale?.() === 'en-US' ? 'en-US' : 'zh-CN';
+  elements.metricInventory.textContent = Number(insights.inventoryCount || 0).toLocaleString(locale);
+  elements.metricTags.textContent = Number(insights.uniqueTagCount || 0).toLocaleString(locale);
   elements.metricGb.textContent = formatDecimalGb(insights.totalOriginalBytes);
   elements.metricWeek.textContent = insights.activity
     .slice(-7)
     .reduce((sum, entry) => sum + (entry.future ? 0 : Number(entry.inventoryCount || 0)), 0)
-    .toLocaleString('zh-CN');
+    .toLocaleString(locale);
 
   elements.activityGrid.replaceChildren();
   for (const entry of insights.activity) {
@@ -602,7 +644,7 @@ function renderDiscovery(title, description, records) {
     const info = make('span', 'discovery-hero-info');
     info.append(
       makeUserText('strong', '', catalogTitle(record)),
-      make('span', '', `${starText(record.rating)} · 入库 ${formatCatalogDate(record.inventoryDate || record.completedAt)}`),
+      makeCatalogDate('span', '', record.inventoryDate || record.completedAt, '入库', record.rating),
       (record.tags || []).length > 0
         ? makeUserText('small', '', record.tags.join(' · '))
         : make('small', '', '暂无标签')
@@ -963,7 +1005,7 @@ function renderJobs(jobs) {
     row.append(make('td', '', formatBytes(job.totalBytes)));
 
     const statusCell = document.createElement('td');
-    statusCell.append(make('span', `status ${job.status}`, jobStatusLabel(job)));
+    statusCell.append(makeStage('span', `status ${job.status}`, jobStatusLabel(job)));
     row.append(statusCell);
 
     const progressCell = document.createElement('td');
@@ -1179,7 +1221,7 @@ function renderCatalog(catalog) {
         make('span', record.archiveState === 'uncompressed' ? 'catalog-text-status uncompressed' : 'catalog-text-status', archiveSummary),
         tagsCell,
         backupCell,
-        make('span', 'catalog-text-date', formatCatalogDate(record.inventoryDate || record.completedAt)),
+        makeCatalogDate('span', 'catalog-text-date', record.inventoryDate || record.completedAt),
         make('span', 'catalog-text-rating', starText(record.rating))
       );
       row.append(checkbox, button);
@@ -1225,7 +1267,7 @@ function renderCatalog(catalog) {
         : `${record.directoryCount || 0} 个子目录 · ${record.archiveState === 'uncompressed'
           ? '未压缩'
           : formatBytes(record.archiveTotalBytes)}`),
-      make('small', '', `入库 ${formatCatalogDate(record.inventoryDate || record.completedAt)}`)
+      makeCatalogDate('small', '', record.inventoryDate || record.completedAt, '入库')
     );
     const visibleTags = catalogTags(record);
     if (visibleTags.length > 0) {
@@ -1752,7 +1794,7 @@ function renderVirtualDirectoryTree(root, similarEntryMatches = []) {
           whitelistable,
           exactRanges: similarity?.exactRanges || []
         });
-        row.append(name, make('small', '', `${item.count} 项`));
+        row.append(name, makeItemCount('small', '', item.count));
       } else {
         const name = make('span', 'virtual-tree-name');
         appendHighlightedName(name, item.file.name, similarity?.similarRanges || similarity?.ranges || [], {
@@ -1984,6 +2026,9 @@ function renderCatalogEditor(record) {
   const ratingField = make('div', 'editor-field rating-field');
   ratingField.append(make('span', '', '星级'));
   const ratingButtons = make('div', 'rating-buttons');
+  ratingButtons.setAttribute('role', 'group');
+  ratingButtons.setAttribute('aria-label', '星级');
+  i18n?.translateDom(ratingButtons);
   let selectedRating = Number(record.rating) || 0;
   const paintRating = () => {
     ratingButtons.querySelectorAll('button').forEach((button) => {
@@ -2000,7 +2045,8 @@ function renderCatalogEditor(record) {
     const button = make('button', 'star-button', '★');
     button.type = 'button';
     button.dataset.rating = String(value);
-    button.setAttribute('aria-label', `${value} 星`);
+    button.dataset.ratingButtonLabel = 'true';
+    button.setAttribute('aria-label', uiState.ratingButtonLabel(value, i18n?.getLocale?.()));
     ratingButtons.append(button);
   }
   ratingButtons.addEventListener('click', (event) => {
@@ -2029,6 +2075,7 @@ function renderCatalogEditor(record) {
   imageInput.type = 'file';
   imageInput.accept = 'image/png,image/jpeg,image/webp,image/gif';
   imageInput.multiple = true;
+  imageInput.hidden = true;
 
   const uploadFiles = async (files) => {
     if (!files?.length) return;
@@ -2057,8 +2104,9 @@ function renderCatalogEditor(record) {
   const submit = make('button', 'button primary editor-save', '保存整理信息');
   submit.type = 'submit';
   const formActions = make('div', 'catalog-form-actions');
-  const imagePickerButton = make('label', 'button ghost', '添加图片');
-  imagePickerButton.htmlFor = imageInput.id;
+  const imagePickerButton = make('button', 'button ghost', '添加图片');
+  imagePickerButton.type = 'button';
+  imagePickerButton.addEventListener('click', () => imageInput.click());
   formActions.append(imageInput, imagePickerButton, submit);
   form.append(titleLabel, tagsLabel, ratingField, backupLabel);
   if (passwordLabel) form.append(passwordLabel);
@@ -2180,7 +2228,7 @@ function renderCatalogDetail(record) {
     originalTitle.append(make('span', '', '原始名称：'), makeUserText('span', '', record.displayName));
     heading.append(originalTitle);
   }
-  heading.append(make('p', 'inventory-date', `入库日期：${formatCatalogDate(record.inventoryDate || record.completedAt)}`));
+  heading.append(makeCatalogDate('p', 'inventory-date', record.inventoryDate || record.completedAt, '入库日期'));
   if (record.recordType === 'manual') {
     heading.append(make('p', '', '手动库存记录 · 未关联压缩包或文件清单'));
   }
@@ -3518,6 +3566,7 @@ elements.manualCatalogDialog.addEventListener('click', (event) => {
 elements.manualCatalogImages.addEventListener('change', () => {
   void safely(() => appendPendingManualFiles(elements.manualCatalogImages.files));
 });
+elements.manualCatalogImagesButton.addEventListener('click', () => elements.manualCatalogImages.click());
 elements.manualImagePaste.addEventListener('paste', (event) => {
   const files = [...(event.clipboardData?.files || [])].filter((file) => file.type.startsWith('image/'));
   if (files.length === 0) return;

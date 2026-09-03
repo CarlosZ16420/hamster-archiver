@@ -6,7 +6,13 @@ const test = require('node:test');
 const { LARGE_TASK_BYTES, MIB } = require('../src/core/constants');
 const fs = require('node:fs/promises');
 const os = require('node:os');
-const { assertEnoughDiskSpace, buildCompressArgs, buildVerifyArgs } = require('../src/core/archive-engine');
+const {
+  assertEnoughDiskSpace,
+  buildCompressArgs,
+  buildVerifyArgs,
+  createArchivePublicationReceipt,
+  recoverPublishedArchiveFiles
+} = require('../src/core/archive-engine');
 
 function makeJob(totalBytes) {
   return {
@@ -88,4 +94,45 @@ test('disk-space guard rejects an impossibly large task instead of silently cont
     (error) => error.code === 'INSUFFICIENT_DISK_SPACE'
   );
   assert.ok(await fs.stat(os.tmpdir()));
+});
+
+test('archive recovery refuses to move a published path whose file identity changed', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-publication-identity-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const output = path.join(root, 'output');
+  const staging = path.join(root, 'staging');
+  await fs.mkdir(output, { recursive: true });
+  const archivePath = path.join(output, 'owned.7z');
+  await fs.writeFile(archivePath, Buffer.alloc(64, 0x11));
+  const receipt = await createArchivePublicationReceipt('identity-job', output, staging, ['owned.7z']);
+
+  await fs.rm(archivePath);
+  await fs.writeFile(archivePath, Buffer.alloc(64, 0x22));
+
+  await assert.rejects(
+    recoverPublishedArchiveFiles(receipt),
+    (error) => error.code === 'ARCHIVE_RECOVERY_OWNERSHIP_UNVERIFIED'
+  );
+  assert.deepEqual(await fs.readFile(archivePath), Buffer.alloc(64, 0x22));
+});
+
+test('archive recovery never overwrites an existing recovery directory', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-publication-collision-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const output = path.join(root, 'output');
+  const staging = path.join(root, 'staging');
+  await fs.mkdir(output, { recursive: true });
+  const archivePath = path.join(output, 'owned.7z');
+  await fs.writeFile(archivePath, 'owned publication');
+  const receipt = await createArchivePublicationReceipt('collision-job', output, staging, ['owned.7z']);
+  const recoveryDirectory = path.join(staging, 'recovery', receipt.ownerJobId, receipt.publicationId);
+  await fs.mkdir(recoveryDirectory, { recursive: true });
+  await fs.writeFile(path.join(recoveryDirectory, 'user-file.txt'), 'must remain');
+
+  await assert.rejects(
+    recoverPublishedArchiveFiles(receipt),
+    (error) => error.code === 'ARCHIVE_RECOVERY_INCOMPLETE'
+  );
+  assert.equal(await fs.readFile(archivePath, 'utf8'), 'owned publication');
+  assert.equal(await fs.readFile(path.join(recoveryDirectory, 'user-file.txt'), 'utf8'), 'must remain');
 });

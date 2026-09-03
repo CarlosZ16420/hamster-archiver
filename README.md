@@ -10,7 +10,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 本地优先 · 批量归档 · 媒体预览 · 便携数据
 
-![Version](https://img.shields.io/badge/version-4.5.17-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.5.18-d45f3c?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
@@ -157,7 +157,7 @@ npm start
 ## 便携数据布局
 
 ```text
-HamsterArchiver-v4.5.17-win-x64/
+HamsterArchiver-v4.5.18-win-x64/
 ├─ HamsterArchiver.exe
 ├─ tools/
 │  ├─ 7zip/

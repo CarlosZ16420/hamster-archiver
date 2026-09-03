@@ -4,6 +4,8 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { makeArchiveStagingDirectory, normalizeForComparison } = require('./paths');
 
+const USER_DATA_COPY_MARKER = '.user-data-copy-in-progress';
+
 async function pathExists(targetPath) {
   try {
     await fs.access(targetPath);
@@ -51,6 +53,9 @@ async function prepareUserDataTarget(currentRoot, targetRoot) {
   await fs.mkdir(target, { recursive: true });
   const targetEntries = await fs.readdir(target);
   if (targetEntries.length > 0) {
+    if (targetEntries.includes(USER_DATA_COPY_MARKER)) {
+      throw new Error('所选目录包含未完成的数据迁移。请保留原数据，并改用新的空目录或先人工核对该目录。');
+    }
     const recognized = await pathExists(path.join(target, 'config', 'settings.json')) ||
       await pathExists(path.join(target, 'warehouse', 'warehouse.sqlite'));
     if (!recognized) {
@@ -60,14 +65,22 @@ async function prepareUserDataTarget(currentRoot, targetRoot) {
   }
 
   const skipped = new Set(['electron', 'updates']);
-  for (const entry of await fs.readdir(current, { withFileTypes: true })) {
-    if (skipped.has(entry.name)) continue;
-    await fs.cp(path.join(current, entry.name), path.join(target, entry.name), {
-      recursive: true,
-      force: false,
-      errorOnExist: true
-    });
-    await verifyCopiedPath(path.join(current, entry.name), path.join(target, entry.name));
+  const copyMarker = path.join(target, USER_DATA_COPY_MARKER);
+  await fs.writeFile(copyMarker, `${new Date().toISOString()}\n`, 'utf8');
+  let copyCompleted = false;
+  try {
+    for (const entry of await fs.readdir(current, { withFileTypes: true })) {
+      if (skipped.has(entry.name)) continue;
+      await fs.cp(path.join(current, entry.name), path.join(target, entry.name), {
+        recursive: true,
+        force: false,
+        errorOnExist: true
+      });
+      await verifyCopiedPath(path.join(current, entry.name), path.join(target, entry.name));
+    }
+    copyCompleted = true;
+  } finally {
+    if (copyCompleted) await fs.rm(copyMarker, { force: true });
   }
   return { mode: 'copied', target };
 }
@@ -187,6 +200,7 @@ async function migrateToUserData(config, workspaceRoot, layout) {
 }
 
 module.exports = {
+  USER_DATA_COPY_MARKER,
   copyPathIfMissing,
   migrateToUserData,
   movePathIfMissing,

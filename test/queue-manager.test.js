@@ -7,7 +7,7 @@ const path = require('node:path');
 const os = require('node:os');
 const test = require('node:test');
 const { QueueManager } = require('../src/core/queue-manager');
-const { CancelledError } = require('../src/core/archive-engine');
+const { CancelledError, createArchivePublicationReceipt } = require('../src/core/archive-engine');
 const { buildManifest } = require('../src/core/manifest');
 const { AppStore } = require('../src/core/store');
 const { LARGE_TASK_BYTES, MIB } = require('../src/core/constants');
@@ -80,6 +80,56 @@ test('queue stops instead of repeating a job whose state did not advance', async
   assert.equal(calls, 1);
   assert.equal(job.status, 'failed');
   assert.equal(job.errorCode, 'QUEUE_STATE_STALLED');
+});
+
+test('confirming a duplicate while the queue runs does not start a concurrent queue', async () => {
+  let releaseFirst;
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const calls = [];
+  let activeRunners = 0;
+  let maxActiveRunners = 0;
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+    archiveRunner: async (job) => {
+      calls.push(job.id);
+      activeRunners += 1;
+      maxActiveRunners = Math.max(maxActiveRunners, activeRunners);
+      if (job.id === 'first') {
+        markFirstStarted();
+        await firstGate;
+      }
+      activeRunners -= 1;
+      return {
+        archiveFiles: [{ name: `${job.id}.7z`, size: 50 }],
+        archiveTotalBytes: 50,
+        manifest: [],
+        directories: [],
+        skippedFiles: [],
+        passwordScheme: 'none',
+        hasPassword: false,
+        verifiedAt: new Date().toISOString()
+      };
+    }
+  });
+  manager.jobs = [
+    { ...queuedJob('first'), totalBytes: 100, intakeModeSelected: true },
+    {
+      ...queuedJob('second'), totalBytes: 100, intakeModeSelected: true,
+      status: 'awaiting_duplicate_confirmation'
+    }
+  ];
+
+  const running = manager.startQueue();
+  await firstStarted;
+  await manager.confirmJob('second');
+  assert.deepEqual(calls, ['first']);
+  releaseFirst();
+  await running;
+
+  assert.deepEqual(calls, ['first', 'second']);
+  assert.equal(maxActiveRunners, 1);
+  assert.equal(manager.jobs[1].status, 'completed');
 });
 
 test('failed resume aborts the current task and stops the queue', async () => {
@@ -629,6 +679,8 @@ test('queue similarity report asks once after fingerprinting and reuses the conf
   await fs.writeFile(path.join(sourcePath, 'same.txt'), 'same-content');
   const manifest = await buildManifest(sourcePath, 'directory');
   const store = new FakeStore();
+  const preparedManifests = [];
+  let compressionStarts = 0;
   const manager = new QueueManager(store, {
     archiveOutputDirectory: path.join(root, 'output'),
     archiveStagingDirectory: path.join(root, 'staging'),
@@ -637,7 +689,9 @@ test('queue similarity report asks once after fingerprinting and reuses the conf
     autoSkipExactDuplicates: false
   }, {
     archiveRunner: async (_job, _config, hooks) => {
+      preparedManifests.push(hooks.preparedManifest);
       await hooks.onManifestReady(manifest);
+      compressionStarts += 1;
       return {
         archiveFiles: [{ name: 'confirmed.7z', size: 6 }],
         archiveTotalBytes: 6,
@@ -675,14 +729,17 @@ test('queue similarity report asks once after fingerprinting and reuses the conf
   assert.equal(job.status, 'awaiting_duplicate_confirmation');
   assert.equal(job.exactDuplicateOverrideAt, null);
   assert.ok(job.duplicateReviewFingerprint);
+  const resumedIdle = new Promise((resolve) => manager.once('idle', resolve));
   await manager.confirmJob(job.id);
   assert.ok(job.exactDuplicateOverrideAt);
   assert.equal(job.duplicateConfirmedManifestFingerprint, job.duplicateReviewFingerprint);
-  const resumedIdle = new Promise((resolve) => manager.once('idle', resolve));
-  await manager.startArchiveQueue();
   await resumedIdle;
 
   assert.equal(job.status, 'completed');
+  assert.equal(preparedManifests.length, 2);
+  assert.equal(preparedManifests[0], null);
+  assert.deepEqual(preparedManifests[1], manifest);
+  assert.equal(compressionStarts, 1);
   const reportAfterInventory = await manager.getQueueSimilarityReport(job.id);
   assert.equal(reportAfterInventory.fingerprintPending, false);
   assert.equal(reportAfterInventory.similarProjects[0].exactFileCount, 1);
@@ -818,10 +875,10 @@ test('name matches remain nonblocking until one post-fingerprint similarity revi
 test('all duplicate and similar confirmations can be accepted in one action', async () => {
   const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
   manager.jobs = [
-    { ...queuedJob('similar'), status: 'awaiting_confirmation', confirmationReasons: ['similar_title'] },
-    { ...queuedJob('exact'), status: 'awaiting_duplicate_confirmation', confirmationReasons: [] },
-    { ...queuedJob('unique'), status: 'queued', confirmationReasons: [] },
-    { ...queuedJob('large'), status: 'awaiting_confirmation', confirmationReasons: ['large_task', 'name_match'] }
+    { ...queuedJob('similar'), intakeModeSelected: false, status: 'awaiting_confirmation', confirmationReasons: ['similar_title'] },
+    { ...queuedJob('exact'), intakeModeSelected: false, status: 'awaiting_duplicate_confirmation', confirmationReasons: [] },
+    { ...queuedJob('unique'), intakeModeSelected: false, status: 'queued', confirmationReasons: [] },
+    { ...queuedJob('large'), intakeModeSelected: false, status: 'awaiting_confirmation', confirmationReasons: ['large_task', 'name_match'] }
   ];
   const result = await manager.confirmAllDuplicateJobs();
   assert.equal(result.confirmedCount, 3);
@@ -832,6 +889,32 @@ test('all duplicate and similar confirmations can be accepted in one action', as
   assert.ok(manager.jobs[3].duplicateConfirmedAt);
   assert.equal(manager.jobs[3].confirmedAt, undefined);
   assert.equal(manager.jobs[3].status, 'awaiting_confirmation');
+});
+
+test('bulk duplicate confirmation resumes tasks whose intake mode is already selected', async () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+    archiveRunner: async (job) => ({
+      archiveFiles: [{ name: `${job.id}.7z`, size: 50 }],
+      archiveTotalBytes: 50,
+      manifest: [],
+      directories: [],
+      skippedFiles: [],
+      passwordScheme: 'none',
+      hasPassword: false,
+      verifiedAt: new Date().toISOString()
+    })
+  });
+  manager.jobs = [{
+    ...queuedJob('bulk-exact'), totalBytes: 100, intakeModeSelected: true,
+    status: 'awaiting_duplicate_confirmation'
+  }];
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+
+  const result = await manager.confirmAllDuplicateJobs();
+  await idle;
+
+  assert.equal(result.confirmedCount, 1);
+  assert.equal(manager.jobs[0].status, 'completed');
 });
 
 test('each queued task keeps the password that was active when it was added', async () => {
@@ -1166,6 +1249,34 @@ test('changing similarity strength keeps existing relations until an explicit re
   assert.equal(manager.similarityStrength, 'strict');
   assert.deepEqual(manager.catalog[0].similarRecords, [{ id: 'b', score: 0.75 }]);
   assert.deepEqual(manager.catalog[1].similarRecords, [{ id: 'a', score: 0.75 }]);
+});
+
+test('thumbnail service log levels preserve successful FFmpeg probes as info', async () => {
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', repositoryDirectory: 'E:\\warehouse'
+  }, {
+    archiveRunner: async () => ({
+      archiveFiles: [{ name: 'probe-log.7z', size: 50 }],
+      archiveTotalBytes: 50,
+      manifest: [],
+      directories: [],
+      skippedFiles: [],
+      passwordScheme: 'none',
+      hasPassword: false,
+      verifiedAt: new Date().toISOString()
+    }),
+    createThumbnails: async (_job, manifest, _config, options) => {
+      options.onLog('FFmpeg 探测成功：sample.mp4 · 320×240 · 2.00 秒。', 'info');
+      options.onLog('FFmpeg 视频抽帧失败，改用系统缩略图：sample.mp4');
+      return manifest;
+    }
+  });
+  manager.jobs = [{ ...queuedJob('probe-log'), totalBytes: 100, intakeModeSelected: true }];
+
+  await manager.startQueue();
+
+  assert.equal(manager.logs.find((entry) => entry.message.startsWith('FFmpeg 探测成功')).level, 'info');
+  assert.equal(manager.logs.find((entry) => entry.message.startsWith('FFmpeg 视频抽帧失败')).level, 'warning');
 });
 
 test('each queued task snapshots performance safeguard settings', async () => {
@@ -2446,3 +2557,404 @@ test('warehouse compression upgrades the same uncompressed record and removes it
   assert.equal(manager.catalog[0].notes, '保留备注');
   assert.deepEqual(manager.catalog[0].archiveFiles, [{ name: 'upgraded.7z', size: 5 }]);
 });
+
+test('catalog commit failure rolls back memory and recovers task-owned output while preserving source', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-catalog-commit-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  const output = path.join(root, 'output');
+  const staging = path.join(root, 'staging');
+  const repository = path.join(root, 'repository');
+  await fs.mkdir(sourcePath, { recursive: true });
+  await fs.writeFile(path.join(sourcePath, 'source.bin'), 'source remains intact');
+  const sourceStats = await fs.stat(path.join(sourcePath, 'source.bin'));
+  const store = new FakeStore();
+  store.saveCatalog = async () => {
+    const error = new Error('simulated repository access denied');
+    error.code = 'EACCES';
+    throw error;
+  };
+  let sourceDispositionCalls = 0;
+  const manager = new QueueManager(store, {
+    archiveOutputDirectory: output,
+    archiveStagingDirectory: staging,
+    repositoryDirectory: repository,
+    autoTrashCompleted: true,
+    autoSkipExactDuplicates: false,
+    similarityEnabled: false
+  }, {
+    archiveRunner: async (job) => {
+      await fs.mkdir(output, { recursive: true });
+      const archivePath = path.join(output, job.archiveBaseName);
+      await fs.writeFile(archivePath, 'verified archive');
+      return {
+        archiveFiles: [{ name: job.archiveBaseName, size: 16 }],
+        archiveTotalBytes: 16,
+        manifest: [{ relativePath: 'source.bin', name: 'source.bin', size: sourceStats.size, md5: 'abc' }],
+        directories: [],
+        skippedFiles: [],
+        passwordScheme: 'none',
+        hasPassword: false,
+        archivePublication: await createArchivePublicationReceipt(job.id, output, staging, [job.archiveBaseName]),
+        verifiedAt: new Date().toISOString()
+      };
+    },
+    createThumbnails: async (job, manifest, config) => {
+      const thumbnailDirectory = path.join(config.repositoryDirectory, 'thumbnails', job.id);
+      await fs.mkdir(thumbnailDirectory, { recursive: true });
+      await fs.writeFile(path.join(thumbnailDirectory, '001.png'), 'thumbnail');
+      return manifest;
+    },
+    trashItem: async () => { sourceDispositionCalls += 1; },
+    isTrashItemPresent: async () => true
+  });
+  const job = {
+    ...queuedJob('catalog-commit-failure'),
+    sourcePath,
+    totalBytes: sourceStats.size,
+    archiveBaseName: 'catalog-commit-failure.7z'
+  };
+  manager.jobs = [job];
+
+  await manager.startQueue();
+
+  assert.equal(job.status, 'failed');
+  assert.equal(job.errorCode, 'EACCES');
+  assert.equal(manager.catalog.length, 0);
+  assert.equal(sourceDispositionCalls, 0);
+  await fs.access(path.join(sourcePath, 'source.bin'));
+  await assert.rejects(fs.access(path.join(output, job.archiveBaseName)), /ENOENT/);
+  await assert.rejects(fs.access(path.join(repository, 'thumbnails', job.id)), /ENOENT/);
+  assert.equal(job.catalogRecovery.archiveState, 'recovered_to_staging');
+  assert.equal(job.catalogRecovery.recoveryRequired, false);
+  assert.equal(job.catalogRecovery.recoveredFiles.length, 1);
+  assert.equal(await fs.readFile(job.catalogRecovery.recoveredFiles[0].recoveryPath, 'utf8'), 'verified archive');
+  const recoveryManifest = JSON.parse(await fs.readFile(
+    path.join(job.catalogRecovery.recoveryDirectory, 'recovery.json'),
+    'utf8'
+  ));
+  assert.equal(recoveryManifest.ownerJobId, job.id);
+  assert.equal(recoveryManifest.files[0].recoveryPath, job.catalogRecovery.recoveredFiles[0].recoveryPath);
+  assert.match(job.errorMessage, /内存仓库未提交/);
+  assert.match(job.errorMessage, /恢复目录/);
+  assert.ok(manager.logs.some((entry) => entry.level === 'error' && entry.message.includes(job.catalogRecovery.recoveryDirectory)));
+});
+
+test('catalog commit compensation failure leaves explicit recovery diagnostics and never touches source', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-catalog-recovery-failure-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  const output = path.join(root, 'output');
+  const staging = path.join(root, 'staging');
+  const repository = path.join(root, 'repository');
+  await fs.mkdir(sourcePath, { recursive: true });
+  await fs.writeFile(path.join(sourcePath, 'source.bin'), 'source remains intact');
+  const sourceStats = await fs.stat(path.join(sourcePath, 'source.bin'));
+  const store = new FakeStore();
+  store.saveCatalog = async () => {
+    const error = new Error('simulated repository access denied');
+    error.code = 'EACCES';
+    throw error;
+  };
+  let archivePath;
+  const recoveryDirectory = path.join(staging, 'recovery', 'manual-attention');
+  const manager = new QueueManager(store, {
+    archiveOutputDirectory: output,
+    archiveStagingDirectory: staging,
+    repositoryDirectory: repository,
+    moveCompleted: false,
+    autoTrashCompleted: false,
+    autoSkipExactDuplicates: false,
+    similarityEnabled: false
+  }, {
+    archiveRunner: async (job) => {
+      await fs.mkdir(output, { recursive: true });
+      archivePath = path.join(output, job.archiveBaseName);
+      await fs.writeFile(archivePath, 'verified archive');
+      return {
+        archiveFiles: [{ name: job.archiveBaseName, size: 16 }],
+        archiveTotalBytes: 16,
+        manifest: [{ relativePath: 'source.bin', name: 'source.bin', size: sourceStats.size, md5: 'abc' }],
+        directories: [],
+        skippedFiles: [],
+        passwordScheme: 'none',
+        hasPassword: false,
+        archivePublication: await createArchivePublicationReceipt(job.id, output, staging, [job.archiveBaseName]),
+        verifiedAt: new Date().toISOString()
+      };
+    },
+    recoverPublishedArchiveFiles: async () => {
+      const error = new Error('simulated recovery device failure');
+      error.code = 'EIO';
+      error.recoveryDirectory = recoveryDirectory;
+      error.unrecoveredPaths = [archivePath];
+      throw error;
+    }
+  });
+  const job = {
+    ...queuedJob('catalog-recovery-failure'),
+    sourcePath,
+    totalBytes: sourceStats.size,
+    archiveBaseName: 'catalog-recovery-failure.7z'
+  };
+  manager.jobs = [job];
+
+  await manager.startQueue();
+
+  assert.equal(job.status, 'failed');
+  assert.equal(manager.catalog.length, 0);
+  await fs.access(path.join(sourcePath, 'source.bin'));
+  await fs.access(archivePath);
+  assert.equal(job.catalogRecovery.recoveryRequired, true);
+  assert.equal(job.catalogRecovery.archiveState, 'manual_recovery_required');
+  assert.deepEqual(job.catalogRecovery.unrecoveredPaths, [archivePath]);
+  assert.match(job.errorMessage, /自动补偿未完成/);
+  assert.match(job.errorMessage, new RegExp(archivePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.ok(manager.logs.some((entry) => entry.level === 'error' && entry.message.includes('simulated recovery device failure')));
+});
+
+test('successful catalog commit keeps the published archive and does not create recovery state', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-catalog-commit-success-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  const output = path.join(root, 'output');
+  const staging = path.join(root, 'staging');
+  const repository = path.join(root, 'repository');
+  await fs.mkdir(sourcePath, { recursive: true });
+  await fs.writeFile(path.join(sourcePath, 'source.bin'), 'source remains intact');
+  const sourceStats = await fs.stat(path.join(sourcePath, 'source.bin'));
+  const manager = new QueueManager(new FakeStore(), {
+    archiveOutputDirectory: output,
+    archiveStagingDirectory: staging,
+    repositoryDirectory: repository,
+    moveCompleted: false,
+    autoTrashCompleted: false,
+    autoSkipExactDuplicates: false,
+    similarityEnabled: false
+  }, {
+    archiveRunner: async (job) => {
+      await fs.mkdir(output, { recursive: true });
+      const archivePath = path.join(output, job.archiveBaseName);
+      await fs.writeFile(archivePath, 'verified archive');
+      return {
+        archiveFiles: [{ name: job.archiveBaseName, size: 16 }],
+        archiveTotalBytes: 16,
+        manifest: [{ relativePath: 'source.bin', name: 'source.bin', size: sourceStats.size, md5: 'abc' }],
+        directories: [],
+        skippedFiles: [],
+        passwordScheme: 'none',
+        hasPassword: false,
+        archivePublication: await createArchivePublicationReceipt(job.id, output, staging, [job.archiveBaseName]),
+        verifiedAt: new Date().toISOString()
+      };
+    }
+  });
+  const job = {
+    ...queuedJob('catalog-commit-success'),
+    sourcePath,
+    totalBytes: sourceStats.size,
+    archiveBaseName: 'catalog-commit-success.7z'
+  };
+  manager.jobs = [job];
+
+  await manager.startQueue();
+
+  assert.equal(job.status, 'completed');
+  assert.equal(manager.catalog.length, 1);
+  assert.equal(job.catalogRecovery, undefined);
+  await fs.access(path.join(output, job.archiveBaseName));
+  await fs.access(path.join(sourcePath, 'source.bin'));
+  assert.equal(await pathExistsForTest(path.join(staging, 'recovery')), false);
+});
+
+test('anomaly confirmation restores the in-memory catalog when persistence fails', async () => {
+  const store = new FakeStore();
+  store.saveCatalog = async () => {
+    const error = new Error('simulated anomaly catalog denial');
+    error.code = 'EACCES';
+    throw error;
+  };
+  const manager = new QueueManager(store, {
+    repositoryDirectory: 'E:\\warehouse',
+    similarityEnabled: false
+  });
+  const existing = {
+    id: 'existing-record',
+    title: 'existing',
+    displayName: 'existing',
+    recordType: 'archive',
+    manifest: [],
+    similarRecords: []
+  };
+  manager.catalog = [existing];
+  const catalogBeforeCommit = structuredClone(manager.catalog);
+  manager.refreshSimilarityForRecord = () => {
+    manager.catalog[0].possibleDuplicate = true;
+    manager.catalog[0].similarRecords.push({ id: 'pending-record', score: 1 });
+  };
+  const pendingRecord = {
+    id: 'pending-record',
+    jobId: 'anomaly-commit-failure',
+    title: 'pending',
+    displayName: 'pending',
+    recordType: 'archive',
+    manifest: [],
+    similarRecords: [],
+    archiveFiles: [{ name: 'pending.7z', size: 10 }],
+    sourceDisposition: 'kept',
+    completedAt: new Date().toISOString()
+  };
+  const job = {
+    ...queuedJob('anomaly-commit-failure'),
+    status: 'awaiting_anomaly_confirmation',
+    pendingCatalogRecord: pendingRecord
+  };
+  manager.jobs = [job];
+
+  await assert.rejects(manager.confirmAnomaly(job.id), (error) => error.code === 'EACCES');
+
+  assert.deepEqual(manager.catalog, catalogBeforeCommit);
+  assert.equal(job.status, 'awaiting_anomaly_confirmation');
+  assert.equal(job.pendingCatalogRecord.id, pendingRecord.id);
+});
+
+test('cancelling during thumbnails recovers the published archive and does not commit the catalog', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-cancel-after-publication-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  const output = path.join(root, 'output');
+  const staging = path.join(root, 'staging');
+  const repository = path.join(root, 'repository');
+  await fs.mkdir(sourcePath, { recursive: true });
+  await fs.writeFile(path.join(sourcePath, 'source.bin'), 'source remains intact');
+  const sourceStats = await fs.stat(path.join(sourcePath, 'source.bin'));
+  const manager = new QueueManager(new FakeStore(), {
+    archiveOutputDirectory: output,
+    archiveStagingDirectory: staging,
+    repositoryDirectory: repository,
+    moveCompleted: false,
+    autoTrashCompleted: false,
+    autoSkipExactDuplicates: false,
+    similarityEnabled: false
+  }, {
+    archiveRunner: async (job) => {
+      await fs.mkdir(output, { recursive: true });
+      const archivePath = path.join(output, job.archiveBaseName);
+      await fs.writeFile(archivePath, 'verified archive');
+      return {
+        archiveFiles: [{ name: job.archiveBaseName, size: 16 }],
+        archiveTotalBytes: 16,
+        manifest: [{ relativePath: 'source.bin', name: 'source.bin', size: sourceStats.size, md5: 'abc' }],
+        directories: [],
+        skippedFiles: [],
+        passwordScheme: 'none',
+        hasPassword: false,
+        archivePublication: await createArchivePublicationReceipt(job.id, output, staging, [job.archiveBaseName]),
+        verifiedAt: new Date().toISOString()
+      };
+    },
+    createThumbnails: async () => {
+      manager.abortController.abort();
+      throw new CancelledError();
+    }
+  });
+  const job = {
+    ...queuedJob('cancel-after-publication'),
+    sourcePath,
+    totalBytes: sourceStats.size,
+    archiveBaseName: 'cancel-after-publication.7z'
+  };
+  manager.jobs = [job];
+
+  await manager.startQueue();
+
+  assert.equal(job.status, 'cancelled');
+  assert.equal(manager.catalog.length, 0);
+  assert.equal(job.catalogRecovery.archiveState, 'recovered_to_staging');
+  assert.equal(job.catalogRecovery.recoveryRequired, false);
+  await assert.rejects(fs.access(path.join(output, job.archiveBaseName)), /ENOENT/);
+  await fs.access(job.catalogRecovery.recoveredFiles[0].recoveryPath);
+  await fs.access(path.join(sourcePath, 'source.bin'));
+});
+
+test('source disposition commit failure is reported without falsely claiming that the move failed', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-disposition-commit-failure-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source', 'project');
+  const processed = path.join(root, 'processed');
+  const output = path.join(root, 'output');
+  const staging = path.join(root, 'staging');
+  const repository = path.join(root, 'repository');
+  await fs.mkdir(sourcePath, { recursive: true });
+  await fs.writeFile(path.join(sourcePath, 'source.bin'), 'source will be moved');
+  const sourceStats = await fs.stat(path.join(sourcePath, 'source.bin'));
+  const store = new FakeStore();
+  let catalogSaveCalls = 0;
+  store.saveCatalog = async (_directory, records) => {
+    catalogSaveCalls += 1;
+    if (catalogSaveCalls === 1) {
+      store.catalog = structuredClone(records);
+      return;
+    }
+    const error = new Error('simulated second catalog denial');
+    error.code = 'EACCES';
+    throw error;
+  };
+  const manager = new QueueManager(store, {
+    archiveOutputDirectory: output,
+    archiveStagingDirectory: staging,
+    repositoryDirectory: repository,
+    processedSourceDirectory: processed,
+    moveCompleted: true,
+    autoTrashCompleted: false,
+    autoSkipExactDuplicates: false,
+    similarityEnabled: false
+  }, {
+    archiveRunner: async (job) => {
+      await fs.mkdir(output, { recursive: true });
+      const archivePath = path.join(output, job.archiveBaseName);
+      await fs.writeFile(archivePath, 'verified archive');
+      return {
+        archiveFiles: [{ name: job.archiveBaseName, size: 16 }],
+        archiveTotalBytes: 16,
+        manifest: [{ relativePath: 'source.bin', name: 'source.bin', size: sourceStats.size, md5: 'abc' }],
+        directories: [], skippedFiles: [], passwordScheme: 'none', hasPassword: false,
+        archivePublication: await createArchivePublicationReceipt(job.id, output, staging, [job.archiveBaseName]),
+        verifiedAt: new Date().toISOString()
+      };
+    },
+    validateSourceBeforeDisposition: async () => {}
+  });
+  const job = {
+    ...queuedJob('disposition-commit-failure'),
+    sourcePath,
+    totalBytes: sourceStats.size,
+    archiveBaseName: 'disposition-commit-failure.7z'
+  };
+  manager.jobs = [job];
+
+  await manager.startQueue();
+
+  const movedTo = path.join(processed, path.basename(sourcePath));
+  assert.equal(job.status, 'completed_cleanup_failed');
+  assert.equal(job.errorCode, 'SOURCE_DISPOSITION_COMMIT_FAILED');
+  assert.match(job.stageText, /源文件后处理已完成/);
+  assert.doesNotMatch(job.stageText, /移动源项目失败/);
+  assert.equal(job.sourceDispositionRecovery.movedTo, movedTo);
+  assert.equal(manager.catalog[0].sourceDisposition, 'moved');
+  assert.equal(store.catalog[0].sourceDisposition, 'move_pending');
+  await assert.rejects(fs.access(sourcePath), /ENOENT/);
+  await fs.access(path.join(movedTo, 'source.bin'));
+  await fs.access(path.join(output, job.archiveBaseName));
+  assert.ok(manager.logs.some((entry) => entry.level === 'error' && entry.message.includes('请勿重试归档')));
+});
+
+async function pathExistsForTest(targetPath) {
+  try {
+    await fs.access(targetPath);
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT') return false;
+    throw error;
+  }
+}

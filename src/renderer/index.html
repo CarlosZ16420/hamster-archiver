@@ -46,7 +46,7 @@
 
             <div class="path-stack">
               <label class="path-field">
-                <span>需备份目录 <span class="help-tip" tabindex="0" aria-label="扫描时会把所选目录下的每一个文件夹或视频分别加入队列，并跳过其他根级文件" data-tooltip="扫描时会把所选目录下的每一个文件夹或视频分别加入队列，并跳过其他根级文件">!</span></span>
+                <span>需备份目录 <span class="help-tip" tabindex="0" aria-label="扫描时会把所选目录下的每个文件夹或视频分别加入队列，跳过其他根级文件；启用小项目过滤时，低于当前阈值的项目也不会入队（默认 100 MB）" data-tooltip="扫描时会把所选目录下的每个文件夹或视频分别加入队列，跳过其他根级文件；启用小项目过滤时，低于当前阈值的项目也不会入队（默认 100 MB）">!</span></span>
                 <div><input id="intake-directory" type="text" placeholder="选填"><button data-pick="intake-directory">选择</button></div>
               </label>
               <label class="path-field">
@@ -434,11 +434,11 @@
         <span>备份位置（选填）</span>
         <input id="manual-catalog-backup" type="text" maxlength="200" placeholder="例如：百度网盘 / 移动硬盘 A">
       </label>
-      <label class="editor-field manual-image-field">
+      <div class="editor-field manual-image-field">
         <span>图片（选填，可多选）</span>
-        <input id="manual-catalog-images" class="image-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple>
-        <span class="image-picker-button">＋ 选择项目图片</span>
-      </label>
+        <input id="manual-catalog-images" class="image-file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+        <button id="manual-catalog-images-button" class="image-picker-button" type="button">＋ 选择项目图片</button>
+      </div>
       <div id="manual-image-paste" class="image-paste-zone" tabindex="0">也可以在这里按 Ctrl+V 粘贴图片</div>
       <div id="manual-image-preview" class="pending-image-preview"></div>
       <div class="dialog-actions">

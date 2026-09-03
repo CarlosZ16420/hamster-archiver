@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const path = require('node:path');
@@ -29,11 +30,30 @@ async function readJson(filePath, fallback) {
   }
 }
 
-async function writeJsonAtomic(filePath, value) {
+const jsonWriteQueues = new Map();
+
+async function performJsonAtomicWrite(filePath, value) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const temporaryPath = `${filePath}.${process.pid}.tmp`;
-  await fs.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
-  await fs.rename(temporaryPath, filePath);
+  const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+    await fs.rename(temporaryPath, filePath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function writeJsonAtomic(filePath, value) {
+  const resolved = path.resolve(filePath);
+  const previous = jsonWriteQueues.get(resolved) || Promise.resolve();
+  const operation = previous.catch(() => {}).then(() => performJsonAtomicWrite(resolved, value));
+  jsonWriteQueues.set(resolved, operation);
+  try {
+    await operation;
+  } finally {
+    if (jsonWriteQueues.get(resolved) === operation) jsonWriteQueues.delete(resolved);
+  }
 }
 
 class AppStore {

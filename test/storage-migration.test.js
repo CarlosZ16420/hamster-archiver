@@ -5,7 +5,11 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { migrateToUserData, prepareUserDataTarget } = require('../src/core/storage-migration');
+const {
+  USER_DATA_COPY_MARKER,
+  migrateToUserData,
+  prepareUserDataTarget
+} = require('../src/core/storage-migration');
 const { makeUserDataLayout, resolveUserDataRootFromLocationFile } = require('../src/core/storage-paths');
 
 test('portable storage migration moves legacy data under the application root and merges the user log once', async (t) => {
@@ -76,6 +80,38 @@ test('choosing an empty user data area copies durable data but keeps the old are
   assert.equal(await fs.readFile(path.join(target, 'warehouse', 'warehouse.sqlite'), 'utf8'), 'database');
   await assert.rejects(fs.access(path.join(target, 'electron')), /ENOENT/);
   await assert.rejects(fs.access(path.join(target, 'updates')), /ENOENT/);
+  assert.equal(await fs.readFile(path.join(current, 'warehouse', 'warehouse.sqlite'), 'utf8'), 'database');
+  await assert.rejects(fs.access(path.join(target, USER_DATA_COPY_MARKER)), /ENOENT/);
+});
+
+test('an interrupted user data copy cannot be mistaken for complete existing data', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-user-data-interrupted-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const current = path.join(root, 'current');
+  const target = path.join(root, 'target');
+  await fs.mkdir(path.join(current, 'config'), { recursive: true });
+  await fs.mkdir(path.join(current, 'warehouse'), { recursive: true });
+  await fs.writeFile(path.join(current, 'config', 'settings.json'), '{}');
+  await fs.writeFile(path.join(current, 'warehouse', 'warehouse.sqlite'), 'database');
+
+  const originalCopy = fs.cp;
+  let copyCount = 0;
+  fs.cp = async (...args) => {
+    copyCount += 1;
+    if (copyCount === 2) throw new Error('simulated interrupted copy');
+    return originalCopy(...args);
+  };
+  try {
+    await assert.rejects(prepareUserDataTarget(current, target), /simulated interrupted copy/);
+  } finally {
+    fs.cp = originalCopy;
+  }
+
+  assert.equal(await fs.readFile(path.join(target, USER_DATA_COPY_MARKER), 'utf8').then(Boolean), true);
+  await assert.rejects(
+    prepareUserDataTarget(current, target),
+    /未完成的数据迁移/
+  );
   assert.equal(await fs.readFile(path.join(current, 'warehouse', 'warehouse.sqlite'), 'utf8'), 'database');
 });
 

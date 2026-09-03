@@ -5,6 +5,31 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.hamsterUiState = api;
 }(typeof globalThis === 'object' ? globalThis : this, () => ({
+  formatCatalogDate(value, locale = 'zh-CN') {
+    const selectedLocale = locale === 'en-US' ? 'en-US' : 'zh-CN';
+    const dateOnly = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (dateOnly) {
+      const [, year, month, day] = dateOnly;
+      return new Intl.DateTimeFormat(selectedLocale, {
+        year: 'numeric', month: '2-digit', day: '2-digit', timeZone: 'UTC'
+      }).format(new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), 12)));
+    }
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return null;
+    return new Intl.DateTimeFormat(selectedLocale, {
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
+    }).format(date);
+  },
+  formatItemCount(count, locale = 'zh-CN') {
+    const value = Number(count) || 0;
+    if (locale !== 'en-US') return `${value} 项`;
+    return `${value} ${value === 1 ? 'item' : 'items'}`;
+  },
+  ratingButtonLabel(rating, locale = 'zh-CN') {
+    const value = Number(rating) || 0;
+    if (locale !== 'en-US') return `${value} 星`;
+    return `${value} ${value === 1 ? 'star' : 'stars'}`;
+  },
   sourceDispositionPresentation(autoTrash, moveCompleted) {
     if (autoTrash) return { state: 'trash', label: '归档后移入回收站' };
     if (moveCompleted) return { state: 'move', label: '归档后移动原文件' };

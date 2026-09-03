@@ -43,3 +43,12 @@ test('scanner reports candidates below the configured size threshold', async (t)
   assert.deepEqual(result.tasks.map((task) => task.displayName), ['large.mp4']);
   assert.deepEqual(result.filteredItems.map((item) => item.displayName), ['small-folder']);
 });
+
+test('scanner wraps a missing intake directory in a user-facing error', async () => {
+  const missingPath = path.join(os.tmpdir(), `hamster-missing-${Date.now()}-${process.pid}`);
+
+  await assert.rejects(
+    () => scanIntakeDirectory(missingPath),
+    (error) => error.code === 'SOURCE_NOT_FOUND' && error.message === '所选目录已经不存在。'
+  );
+});

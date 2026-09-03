@@ -6,7 +6,7 @@ const path = require('node:path');
 const USER_DATA_LOCATION_FILENAME = 'user-data-location.json';
 
 function userDataLocationPath(applicationRoot) {
-  if (!applicationRoot) throw new Error('软件主目录不能为空。');
+  if (!String(applicationRoot || '').trim()) throw new Error('软件主目录不能为空。');
   return path.join(path.resolve(applicationRoot), USER_DATA_LOCATION_FILENAME);
 }
 
@@ -20,14 +20,17 @@ function userDataLocationError(code, message, cause = null) {
 function resolveUserDataRoot(
   applicationRoot,
   readFileSync = fs.readFileSync,
-  pathExists = fs.existsSync
+  pathExists = fs.existsSync,
+  pathIsDirectory = (targetPath) => fs.statSync(targetPath).isDirectory()
 ) {
-  const resolvedApplicationRoot = path.resolve(applicationRoot);
+  const locationFilePath = userDataLocationPath(applicationRoot);
+  const resolvedApplicationRoot = path.dirname(locationFilePath);
   return resolveUserDataRootFromLocationFile(
-    userDataLocationPath(resolvedApplicationRoot),
+    locationFilePath,
     path.join(resolvedApplicationRoot, 'userdata'),
     readFileSync,
-    pathExists
+    pathExists,
+    pathIsDirectory
   );
 }
 
@@ -35,7 +38,8 @@ function resolveUserDataRootFromLocationFile(
   locationFilePath,
   defaultRoot,
   readFileSync = fs.readFileSync,
-  pathExists = fs.existsSync
+  pathExists = fs.existsSync,
+  pathIsDirectory = (targetPath) => fs.statSync(targetPath).isDirectory()
 ) {
   const resolvedLocationFilePath = path.resolve(locationFilePath);
   const resolvedDefaultRoot = path.resolve(defaultRoot);
@@ -57,11 +61,18 @@ function resolveUserDataRootFromLocationFile(
       error
     );
   }
-  const configured = String(saved?.userDataDirectory || '').trim();
-  if (!configured) {
+  const configuredValue = saved?.userDataDirectory;
+  if (typeof configuredValue !== 'string' || !configuredValue.trim()) {
     throw userDataLocationError(
       'USER_DATA_LOCATION_INVALID',
       '用户数据位置文件没有配置有效目录，请恢复 user-data-location.json 后再启动。'
+    );
+  }
+  const configured = configuredValue.trim();
+  if (/^[a-z]:$/i.test(configured)) {
+    throw userDataLocationError(
+      'USER_DATA_LOCATION_INVALID',
+      '用户数据位置不能使用依赖当前工作目录的裸盘符。'
     );
   }
   const resolved = path.isAbsolute(configured)
@@ -77,6 +88,12 @@ function resolveUserDataRootFromLocationFile(
     throw userDataLocationError(
       'USER_DATA_LOCATION_MISSING',
       `用户数据位置不存在：${resolved}。请恢复或修正该目录，不会自动创建空仓库。`
+    );
+  }
+  if (!pathIsDirectory(resolved)) {
+    throw userDataLocationError(
+      'USER_DATA_LOCATION_INVALID',
+      `用户数据位置必须指向目录：${resolved}。`
     );
   }
   return resolved;

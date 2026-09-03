@@ -58,12 +58,28 @@ async function inspectPath(sourcePath, sourceType, onProgress = () => {}) {
 async function scanIntakeDirectory(intakeDirectory, options = {}) {
   const onProgress = options.onProgress || (() => {});
   const minimumBytes = options.minimumBytes > 0 ? Number(options.minimumBytes) : 0;
-  const stats = await fs.stat(intakeDirectory);
+  let stats;
+  try {
+    stats = await fs.stat(intakeDirectory);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    const missing = new Error('所选目录已经不存在。');
+    missing.code = 'SOURCE_NOT_FOUND';
+    throw missing;
+  }
   if (!stats.isDirectory()) {
     throw new Error('所选目录不是文件夹。');
   }
 
-  const entries = await fs.readdir(intakeDirectory, { withFileTypes: true });
+  let entries;
+  try {
+    entries = await fs.readdir(intakeDirectory, { withFileTypes: true });
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    const missing = new Error('所选目录已经不存在。');
+    missing.code = 'SOURCE_NOT_FOUND';
+    throw missing;
+  }
   const candidates = [];
   const skippedRootFiles = [];
 

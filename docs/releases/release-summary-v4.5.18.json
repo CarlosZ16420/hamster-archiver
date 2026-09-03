@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.5.18",
+  "notes": {
+    "zh-CN": [
+      "仓库提交失败时安全保留已生成的归档成品到恢复位置，并准确报告恢复状态。",
+      "清理或恢复归档成品前校验文件身份，防止同名替换文件被误删或误移动。",
+      "缩略图阶段取消会正确终止任务、清理未提交生成物并保持源文件安全；源文件已移动但状态写回失败时会准确诊断。",
+      "修复英文界面“待选入库方式”徽标翻译。"
+    ],
+    "en-US": [
+      "Archive commit failures now retain generated archives in a recovery location and report recovery state accurately.",
+      "Archive identity is checked before cleanup or recovery moves to prevent deleting or moving a same-named replacement.",
+      "Cancelling during thumbnails now terminates correctly and cleans uncommitted output safely; source moves and failed state write-backs are diagnosed separately.",
+      "Fixed the English translation for the Choose an intake method badge."
+    ]
+  }
+}
