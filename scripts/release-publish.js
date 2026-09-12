@@ -26,14 +26,14 @@ function parseArgs(argv) {
   return options;
 }
 
-function validateTarget(repo, tag) {
+function validateTarget(repo, tag, commandRunner = run) {
   if (!/^CarlosZ16420\/hamster-archiv(?:e|er)$/.test(repo || '')) throw new Error('Choose an explicit Hamster repository.');
   if (tag !== `v${version}`) throw new Error(`Tag must match package version v${version}.`);
-  if (run('git', ['status', '--porcelain'])) throw new Error('Commit changes before releasing.');
-  const head = run('git', ['rev-parse', 'HEAD']);
-  const localTag = run('git', ['rev-parse', `${tag}^{commit}`]);
+  if (commandRunner('git', ['status', '--porcelain'])) throw new Error('Commit changes before releasing.');
+  const head = commandRunner('git', ['rev-parse', 'HEAD']);
+  const localTag = commandRunner('git', ['rev-parse', `${tag}^{commit}`]);
   if (head !== localTag) throw new Error('HEAD must be the version tag commit. Do not move an existing release tag.');
-  const remote = JSON.parse(run('gh', ['api', `repos/${repo}/commits/${tag}`]));
+  const remote = JSON.parse(commandRunner('gh', ['api', `repos/${repo}/commits/${tag}`]));
   if (remote.sha !== head) throw new Error('Remote version tag differs from this checkout.');
   return head;
 }
@@ -42,21 +42,21 @@ function findReleaseByTag(releases, tag) {
   return releases.find(release => release?.tag_name === tag);
 }
 
-function getRelease(repo, tag) {
-  const releases = [];
+function getRelease(repo, tag, commandRunner = run) {
   for (let page = 1; page <= 100; page += 1) {
-    const pageReleases = JSON.parse(run('gh', ['api', `repos/${repo}/releases?per_page=100&page=${page}`]));
+    const pageReleases = JSON.parse(commandRunner('gh', ['api', `repos/${repo}/releases?per_page=100&page=${page}`]));
     if (!Array.isArray(pageReleases)) throw new Error('GitHub release listing returned an invalid response.');
-    releases.push(...pageReleases);
+    const match = findReleaseByTag(pageReleases, tag);
+    if (match) return match;
     if (pageReleases.length < 100) break;
     if (page === 100) throw new Error('GitHub release listing exceeded the pagination limit.');
   }
-  return findReleaseByTag(releases, tag) || null;
+  return null;
 }
 
-function preflight(repo, tag) {
-  validateTarget(repo, tag);
-  const release = getRelease(repo, tag);
+function preflight(repo, tag, commandRunner = run) {
+  validateTarget(repo, tag, commandRunner);
+  const release = getRelease(repo, tag, commandRunner);
   if (release && !release.draft) throw new Error('This version is already published; historical releases will not be overwritten.');
   return release;
 }

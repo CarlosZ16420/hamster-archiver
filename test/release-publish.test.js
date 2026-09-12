@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { findReleaseByTag, planUploads, parseArgs } = require('../scripts/release-publish');
+const { findReleaseByTag, getRelease, planUploads, parseArgs, preflight } = require('../scripts/release-publish');
 const { optionsFrom, findRequest } = require('../scripts/release');
 const { readReleaseNotes, assertDraftNotes } = require('../scripts/release-publish');
 const fs = require('node:fs/promises');
@@ -39,6 +39,43 @@ test('release lookup matches exact tags, including drafts', () => {
   ];
   assert.equal(findReleaseByTag(releases, 'v4.6.0').id, 7);
   assert.equal(findReleaseByTag(releases, 'v4.6.1'), undefined);
+});
+
+test('release lookup paginates drafts and stops at the first exact match', () => {
+  const calls = [];
+  const runner = (_command, args) => {
+    calls.push(args[1]);
+    if (args[1].includes('&page=1')) return JSON.stringify(Array.from({ length: 100 }, (_, id) => ({ tag_name: `v0.0.${id}` })));
+    if (args[1].includes('&page=2')) return JSON.stringify([{ tag_name: 'v4.6.0', draft: true, id: 9 }]);
+    throw new Error('unexpected page');
+  };
+  assert.equal(getRelease('CarlosZ16420/hamster-archiver', 'v4.6.0', runner).id, 9);
+  assert.equal(calls.length, 2);
+
+  const firstPage = getRelease('CarlosZ16420/hamster-archiver', 'v4.5.18', (_command, args) => {
+    calls.push(args[1]);
+    return JSON.stringify([{ tag_name: 'v4.5.18', draft: false, id: 10 }]);
+  });
+  assert.equal(firstPage.id, 10);
+  assert.equal(calls.at(-1).includes('page=2'), false);
+});
+
+test('release lookup returns null for a short page and rejects malformed pages', () => {
+  const short = getRelease('CarlosZ16420/hamster-archiver', 'v4.6.1', () => JSON.stringify([]));
+  assert.equal(short, null);
+  assert.throws(() => getRelease('CarlosZ16420/hamster-archiver', 'v4.6.1', () => JSON.stringify({})), /invalid response/);
+});
+
+test('preflight preserves published refusal and returns a draft through injected GitHub calls', () => {
+  const runnerFor = release => (command, args) => {
+    if (command === 'git' && args[0] === 'status') return '';
+    if (command === 'git' && args[0] === 'rev-parse') return 'abc123';
+    if (command === 'gh' && args[0] === 'api' && args[1].includes('/commits/')) return JSON.stringify({ sha: 'abc123' });
+    if (command === 'gh' && args[0] === 'api' && args[1].includes('/releases?')) return JSON.stringify([release]);
+    throw new Error(`unexpected call: ${command} ${args.join(' ')}`);
+  };
+  assert.throws(() => preflight('CarlosZ16420/hamster-archiver', 'v4.6.0', runnerFor({ tag_name: 'v4.6.0', draft: false })), /already published/);
+  assert.equal(preflight('CarlosZ16420/hamster-archiver', 'v4.6.0', runnerFor({ tag_name: 'v4.6.0', draft: true })).draft, true);
 });
 
 test('draft resume skips identical assets and uploads only missing files', () => {
