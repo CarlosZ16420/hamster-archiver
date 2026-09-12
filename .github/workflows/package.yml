@@ -1,23 +1,62 @@
 name: Package Windows release
+run-name: Windows release ${{ inputs.tag }} / ${{ inputs.request_id }}
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
+    inputs:
+      tag:
+        description: Existing version tag (main allowed only for validation)
+        required: true
+        default: main
+        type: string
+      publish:
+        description: Upload a complete Release draft (never publish automatically)
+        default: false
+        type: boolean
+      retain_artifact:
+        description: Also retain a temporary Actions package for 3 days
+        default: false
+        type: boolean
+      request_id:
+        description: Unique identifier used by the release launcher
+        default: manual
+        type: string
 
 permissions:
-  contents: read
+  contents: write
+
+concurrency:
+  group: windows-release-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   package:
     runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_PROMPT_DISABLED: '1'
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_PUBLISH: ${{ inputs.publish }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
           cache: npm
+      - name: Set isolated build directory
+        shell: pwsh
+        run: '"HAMSTER_LOCAL_ROOT=$env:RUNNER_TEMP\HamsterArchiver-Local" >> $env:GITHUB_ENV'
+      - name: Validate target before building
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_PUBLISH -eq 'true') {
+            node scripts/release-publish.js preflight --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - run: npm ci
       - name: Install locked Electron runtime
         run: node node_modules/electron/install.js
@@ -29,13 +68,30 @@ jobs:
           New-Item -ItemType Directory -Force tools\7zip | Out-Null
           Copy-Item -LiteralPath $bootstrap -Destination tools\7zip\7z.exe
           npm run tools:prepare
-      - name: Build, verify and package
-        run: npm run release:local
-        env:
-          HAMSTER_LOCAL_ROOT: ${{ runner.temp }}\HamsterArchiver-Local
-      - name: Upload verified package
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build portable package with full checks
+        run: npm run release:local -- --full-checks
+      - name: Build installer
+        run: npm run build:installer
+      - name: Verify complete release files
+        run: node scripts/release-publish.js verify
+      - name: Upload Release draft directly without Actions storage
+        if: inputs.publish
+        shell: pwsh
+        run: node scripts/release-publish.js upload --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
+      - name: Optionally retain temporary package
+        if: inputs.retain_artifact
+        continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: HamsterArchiver-${{ github.ref_name }}-windows-x64
-          path: ${{ runner.temp }}\HamsterArchiver-Local\builds\packages\*
+          name: HamsterArchiver-${{ inputs.tag }}-windows-x64
+          path: |
+            ${{ runner.temp }}\HamsterArchiver-Local\builds\packages\*.zip*
+            ${{ runner.temp }}\HamsterArchiver-Local\builds\installers\*.exe*
+          retention-days: 3
           if-no-files-found: error
+      - name: Report failure and local fallback
+        if: failure()
+        shell: pwsh
+        run: |
+          'Cloud build failed. No release was published. Use npm run release -- --mode local after this run has stopped. Partial uploads remain drafts; published releases are never overwritten.' >> $env:GITHUB_STEP_SUMMARY

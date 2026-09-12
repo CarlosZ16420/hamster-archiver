@@ -29,6 +29,10 @@ async function main() {
   if (process.platform !== 'win32' || process.arch !== 'x64') {
     throw new Error('Windows x64 安装版只能在 Windows x64 环境构建。');
   }
+  if (run('git', ['status', '--porcelain'], { stdio: ['ignore', 'pipe', 'inherit'] }).trim()) {
+    throw new Error('安装版必须从已提交的干净工作树构建。');
+  }
+  const commit = run('git', ['rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'inherit'] }).trim();
   for (const target of [installedBuild, layout.installerRoot, layout.installerStagingRoot]) {
     assertPathInsideLocalRoot(target, layout.root, '安装版构建目录');
   }
@@ -37,7 +41,9 @@ async function main() {
   await fsp.rm(installerPath, { force: true });
   await fsp.rm(installerShaPath, { force: true });
 
-  run(process.execPath, [path.join('scripts', 'build-release.js'), '--distribution=installed']);
+  run(process.execPath, [path.join('scripts', 'build-release.js'), '--distribution=installed'], {
+    env: { ...process.env, HAMSTER_RELEASE_COMMIT: commit }
+  });
   run(process.execPath, [builderCli,
     '--win', 'nsis:x64',
     '--prepackaged', installedBuild,

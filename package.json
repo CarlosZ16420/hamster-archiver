@@ -29,6 +29,7 @@
     "check:layout": "node scripts/verify-workspace-layout.js",
     "verify:version": "node scripts/verify-version.js",
     "release:local": "node scripts/release-local.js",
+    "release": "node scripts/release.js",
     "preview:current": "node scripts/launch-current.js"
   },
   "engines": {
