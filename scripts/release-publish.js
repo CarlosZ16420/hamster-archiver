@@ -38,14 +38,20 @@ function validateTarget(repo, tag) {
   return head;
 }
 
+function findReleaseByTag(releases, tag) {
+  return releases.find(release => release?.tag_name === tag);
+}
+
 function getRelease(repo, tag) {
-  try {
-    return JSON.parse(run('gh', ['api', `repos/${repo}/releases/tags/${tag}`]));
-  } catch (error) {
-    const message = `${error.stderr || ''}\n${error.stdout || ''}`;
-    if (/HTTP 404|"status":\s*"404"/.test(message)) return null;
-    throw error;
+  const releases = [];
+  for (let page = 1; page <= 100; page += 1) {
+    const pageReleases = JSON.parse(run('gh', ['api', `repos/${repo}/releases?per_page=100&page=${page}`]));
+    if (!Array.isArray(pageReleases)) throw new Error('GitHub release listing returned an invalid response.');
+    releases.push(...pageReleases);
+    if (pageReleases.length < 100) break;
+    if (page === 100) throw new Error('GitHub release listing exceeded the pagination limit.');
   }
+  return findReleaseByTag(releases, tag) || null;
 }
 
 function preflight(repo, tag) {
@@ -155,4 +161,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, parseArgs, planUploads, preflight, run, upload, validateTarget, verifyFiles };
+module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, findReleaseByTag, getRelease, parseArgs, planUploads, preflight, run, upload, validateTarget, verifyFiles };

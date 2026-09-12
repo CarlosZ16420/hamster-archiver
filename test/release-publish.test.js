@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { planUploads, parseArgs } = require('../scripts/release-publish');
+const { findReleaseByTag, planUploads, parseArgs } = require('../scripts/release-publish');
 const { optionsFrom, findRequest } = require('../scripts/release');
 const { readReleaseNotes, assertDraftNotes } = require('../scripts/release-publish');
 const fs = require('node:fs/promises');
@@ -29,6 +29,16 @@ test('public releases cannot fall back to latest private patch notes or empty tr
 test('draft continuation and read-back reject stale release text', () => {
   assert.throws(() => assertDraftNotes({ body: 'Old patch notes' }, 'Cumulative notes'), /Draft notes differ/);
   assert.doesNotThrow(() => assertDraftNotes({ body: '## 中文\r\n说明\r\n' }, '## 中文\n说明\n'));
+});
+
+test('release lookup matches exact tags, including drafts', () => {
+  const releases = [
+    { tag_name: 'v4.5.18', draft: false },
+    { tag_name: 'v4.6.0', draft: true, id: 7 },
+    { tag_name: 'v4.60', draft: true, id: 8 }
+  ];
+  assert.equal(findReleaseByTag(releases, 'v4.6.0').id, 7);
+  assert.equal(findReleaseByTag(releases, 'v4.6.1'), undefined);
 });
 
 test('draft resume skips identical assets and uploads only missing files', () => {
