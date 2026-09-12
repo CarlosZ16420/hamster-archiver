@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.0",
+  "notes": {
+    "zh-CN": [
+      "大项目详情查询减少重复读取，缩略图按可见区域加载并限制并发。",
+      "新增默认关闭的本机 MCP 接口，支持 AI 批量入库、查询、进度和相似项处理，并保留源文件。",
+      "同一原始位置、完整目录结构、文件名、文件数量和文件大小一致且快照完整时，可直接判定完全重复并跳过 MD5；自动跳过仍受用户设置控制，否则继续内容核验。",
+      "归档入库复用清单和目录信息，减少重复遍历与整库写回；队列运行期间可追加项目，并显示“等待下次入库”。",
+      "自动跳过保留项自动取消选择；更新窗口、窄窗口队列布局和 Windows 原生图标显示得到改善。"
+    ],
+    "en-US": [
+      "Large project details avoid repeated reads; thumbnails load near the visible area with bounded concurrency.",
+      "Added an opt-in local MCP interface for AI batch intake, queries, progress and similarity actions while keeping source files.",
+      "When the same original location, complete directory shape, filenames, file count and file sizes match a complete snapshot, a complete duplicate can skip MD5; automatic skipping remains controlled by the user's setting, otherwise content verification continues.",
+      "Archive intake reuses manifest and directory data to reduce repeated work; new items can be added during a queue run and show “Waiting for next intake run”.",
+      "Kept automatic-skip items are deselected automatically; the update dialog, narrow queue layout and Windows native icon rendering are improved."
+    ]
+  }
+}

@@ -131,6 +131,7 @@ function formatReleaseNotes(value, language = 'zh-CN') {
 }
 
 module.exports = {
+  selectLocalizedMarkdownSection,
   MAX_RELEASE_NOTE_ITEMS,
   cleanMarkdownText,
   compactReleaseNotesPayload,

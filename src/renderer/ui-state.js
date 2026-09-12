@@ -50,6 +50,12 @@
     const runningStages = new Set(['inventorying', 'compressing', 'verifying', 'moving']);
     return runningStages.has(job.status) && job.status === progress.stage;
   },
+  newlyAutoSkippedJobIds(previousJobs = [], nextJobs = []) {
+    const previousStatuses = new Map(previousJobs.map((job) => [job.id, job.status]));
+    return nextJobs
+      .filter((job) => job.status === 'skipped_duplicate' && previousStatuses.get(job.id) !== 'skipped_duplicate')
+      .map((job) => job.id);
+  },
   queueSimilarityEvidenceText(project = {}) {
     if ((project.reasons || []).includes('项目完全重复')) return '项目完全重复';
     const details = [];

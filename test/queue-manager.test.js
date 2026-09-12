@@ -132,6 +132,177 @@ test('confirming a duplicate while the queue runs does not start a concurrent qu
   assert.equal(manager.jobs[1].status, 'completed');
 });
 
+test('items added while a queue batch runs wait for the next run', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-queue-live-add-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const addedPath = path.join(root, 'added.mp4');
+  await fs.writeFile(addedPath, 'next');
+  let releaseFirst;
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const calls = [];
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    smallItemFilter: false
+  }, {
+    archiveRunner: async (job) => {
+      calls.push(job.id);
+      if (job.id === 'first') {
+        markFirstStarted();
+        await firstGate;
+      }
+      return {
+        archiveFiles: [{ name: `${job.id}.7z`, size: Math.max(1, Math.floor(job.totalBytes / 2)) }],
+        archiveTotalBytes: Math.max(1, Math.floor(job.totalBytes / 2)),
+        manifest: [], directories: [], skippedFiles: [], passwordScheme: 'none', hasPassword: false,
+        verifiedAt: new Date().toISOString()
+      };
+    }
+  });
+  manager.jobs = [{ ...queuedJob('first'), totalBytes: 100, intakeModeSelected: true }];
+
+  const running = manager.startQueue();
+  await firstStarted;
+  await manager.addSingle(addedPath, { requestId: 'live-add', mode: 'archive' });
+  const added = manager.jobs.find((job) => job.id !== 'first');
+  assert.equal(added.deferredUntilNextRun, true);
+  assert.equal(added.stageText, '等待下次入库');
+  releaseFirst();
+  await running;
+
+  assert.deepEqual(calls, ['first']);
+  assert.equal(added.status, 'queued');
+  await manager.startQueue();
+  assert.deepEqual(calls, ['first', added.id]);
+  assert.equal(added.deferredUntilNextRun, undefined);
+  assert.equal(added.status, 'completed');
+});
+
+test('an item added during an aborted run remains queued and resumes on the next start', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-queue-abort-add-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const addedPath = path.join(root, 'added.mp4');
+  await fs.writeFile(addedPath, 'next');
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  const calls = [];
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    smallItemFilter: false
+  }, {
+    archiveRunner: async (job, _config, _hooks, signal) => {
+      calls.push(job.id);
+      if (job.id === 'first') {
+        markFirstStarted();
+        await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+        throw new CancelledError();
+      }
+      return {
+        archiveFiles: [{ name: `${job.id}.7z`, size: 2 }], archiveTotalBytes: 2,
+        manifest: [], directories: [], skippedFiles: [], passwordScheme: 'none', hasPassword: false,
+        verifiedAt: new Date().toISOString()
+      };
+    }
+  });
+  manager.jobs = [{ ...queuedJob('first'), totalBytes: 100, intakeModeSelected: true }];
+
+  const running = manager.startQueue();
+  await firstStarted;
+  await manager.addSingle(addedPath, { requestId: 'abort-add', mode: 'archive' });
+  const added = manager.jobs.find((job) => job.id !== 'first');
+  await manager.stopForShutdown();
+  await running;
+
+  assert.equal(added.status, 'queued');
+  assert.equal(added.deferredUntilNextRun, true);
+  await manager.startQueue();
+  assert.deepEqual(calls, ['first', added.id]);
+  assert.equal(added.status, 'completed');
+  assert.equal(added.deferredUntilNextRun, undefined);
+});
+
+test('a scan started during a run stays deferred even if that run ends before scanning completes', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-queue-scan-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const item = path.join(root, 'item');
+  await fs.mkdir(item);
+  await fs.writeFile(path.join(item, 'one.txt'), 'one');
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: `${root}-warehouse`,
+    smallItemFilter: false
+  });
+  manager.running = true;
+
+  const scanning = manager.scanSource(root, 'race-scan');
+  manager.running = false;
+  await scanning;
+
+  assert.equal(manager.jobs.length, 1);
+  assert.equal(manager.jobs[0].deferredUntilNextRun, true);
+  assert.equal(manager.jobs[0].stageText, '等待下次入库');
+});
+
+test('deferred large additions keep their confirmation warning', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-deferred-large-warning-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'large.mp4');
+  await fs.writeFile(sourcePath, 'placeholder');
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    smallItemFilter: false
+  });
+  const createJob = manager.createJob.bind(manager);
+  manager.createJob = (task) => createJob({ ...task, totalBytes: LARGE_TASK_BYTES + 1 });
+  manager.running = true;
+
+  await manager.addSingle(sourcePath);
+
+  assert.equal(manager.jobs[0].status, 'awaiting_confirmation');
+  assert.equal(manager.jobs[0].deferredUntilNextRun, true);
+  assert.match(manager.jobs[0].stageText, /超过 10 GiB.*等待手动确认.*等待下次入库/);
+});
+
+test('archive start keeps its selected batch fixed across persistence awaits', async () => {
+  const calls = [];
+  let releaseFirstPersist;
+  let markFirstPersist;
+  const firstPersistStarted = new Promise((resolve) => { markFirstPersist = resolve; });
+  const firstPersistGate = new Promise((resolve) => { releaseFirstPersist = resolve; });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+    archiveRunner: async (job) => {
+      calls.push(job.id);
+      return {
+        archiveFiles: [{ name: `${job.id}.7z`, size: 50 }], archiveTotalBytes: 50,
+        manifest: [], directories: [], skippedFiles: [], passwordScheme: 'none', hasPassword: false,
+        verifiedAt: new Date().toISOString()
+      };
+    }
+  });
+  manager.jobs = [{ ...queuedJob('selected-first'), totalBytes: 100 }];
+  const persistJobs = manager.persistJobs.bind(manager);
+  let persistenceCalls = 0;
+  manager.persistJobs = async () => {
+    persistenceCalls += 1;
+    if (persistenceCalls === 1) {
+      markFirstPersist();
+      await firstPersistGate;
+    }
+    return persistJobs();
+  };
+
+  const starting = manager.startArchiveQueue();
+  await firstPersistStarted;
+  manager.jobs.push({ ...queuedJob('added-in-gap'), totalBytes: 100, intakeModeSelected: true });
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  releaseFirstPersist();
+  await starting;
+  await idle;
+
+  assert.deepEqual(calls, ['selected-first']);
+  assert.equal(manager.jobs.find((job) => job.id === 'added-in-gap').status, 'queued');
+});
+
 test('failed resume aborts the current task and stops the queue', async () => {
   const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
   let aborted = false;
@@ -469,6 +640,103 @@ test('same-source metadata without complete MD5 never reports an exact duplicate
   assert.equal(manager.jobs[0].status, 'queued');
   assert.match(manager.jobs[0].stageText, /名称存在仓库候选/);
   assert.equal(manager.jobs[0].exactProjectMatches, undefined);
+});
+
+test('same-source complete tree skips before MD5 while preserving empty-directory evidence', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-same-source-tree-fast-path-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'same-project');
+  await fs.mkdir(path.join(sourcePath, 'empty'), { recursive: true });
+  await fs.writeFile(path.join(sourcePath, 'same.txt'), 'same-content');
+  const manifest = await buildManifest(sourcePath, 'directory', {
+    skipTinyMd5Files: true,
+    tinyFileMd5ThresholdBytes: 5 * 1024
+  });
+  assert.equal(manifest[0].md5, undefined);
+  const store = new FakeStore();
+  const manager = new QueueManager(store, {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    smallItemFilter: false,
+    autoSkipExactDuplicates: true,
+    autoSkipExactDuplicateAction: 'keep'
+  });
+  manager.catalog = [{
+    id: 'same-source-record', title: 'same-project', displayName: 'same-project',
+    archiveState: 'compressed', sourceDisposition: 'kept', sourceType: 'directory',
+    sourcePath, originalSourcePath: sourcePath, manifest,
+    directories: ['empty'], fileCount: 1, originalBytes: manifest[0].size,
+    sourceTreeSnapshotComplete: true, skippedFiles: []
+  }];
+
+  await manager.addSingle(sourcePath);
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startInventoryOnlyQueue();
+  await idle;
+
+  const job = manager.jobs[0];
+  assert.equal(job.status, 'skipped_duplicate');
+  assert.equal(job.exactProjectMatches[0].verification, 'same_source_tree');
+  const savedManifest = await store.loadPendingManifest(manager.config.repositoryDirectory, job.id);
+  assert.ok(savedManifest.every((file) => file.md5 === undefined));
+});
+
+test('same-source fast path rejects incomplete historical snapshots', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-same-source-incomplete-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'same-project');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'same.txt'), 'new!');
+  const stats = await fs.stat(path.join(sourcePath, 'same.txt'));
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    smallItemFilter: false,
+    autoSkipExactDuplicates: true
+  });
+  manager.catalog = [{
+    id: 'incomplete-history', title: 'historical title', displayName: 'historical title',
+    sourceType: 'directory', sourcePath, originalSourcePath: sourcePath,
+    manifest: [{
+      relativePath: 'same.txt', name: 'same.txt', size: stats.size,
+      modifiedAtMs: stats.mtimeMs, modifiedAt: stats.mtime.toISOString()
+    }],
+    directories: [], fileCount: 2, originalBytes: stats.size,
+    sourceTreeSnapshotComplete: false, skippedFiles: [{ path: 'missing.txt' }]
+  }];
+
+  await manager.addSingle(sourcePath, { requestId: 'incomplete', mode: 'inventory_only' });
+  await manager.startQueue();
+
+  assert.equal(manager.jobs[0].status, 'completed');
+  assert.equal(manager.catalog.length, 2);
+  assert.equal(manager.jobs[0].exactProjectMatches, undefined);
+});
+
+test('same-source fast path requires an identical empty-directory list', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-same-source-directory-shape-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'same-project');
+  await fs.mkdir(path.join(sourcePath, 'new-empty'), { recursive: true });
+  await fs.writeFile(path.join(sourcePath, 'same.txt'), 'same-content');
+  const manifest = await buildManifest(sourcePath, 'directory');
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    smallItemFilter: false,
+    autoSkipExactDuplicates: true
+  });
+  manager.catalog = [{
+    id: 'different-directories', title: 'different title', displayName: 'different title',
+    sourceType: 'directory', sourcePath, originalSourcePath: sourcePath,
+    manifest, directories: [], fileCount: 1, originalBytes: manifest[0].size,
+    sourceTreeSnapshotComplete: true, skippedFiles: []
+  }];
+
+  await manager.addSingle(sourcePath, { requestId: 'directory-shape', mode: 'inventory_only' });
+  await manager.startQueue();
+
+  assert.equal(manager.jobs[0].status, 'skipped_duplicate');
+  assert.equal(manager.jobs[0].exactProjectMatches[0].verification, undefined);
+  const savedManifest = await manager.store.loadPendingManifest(manager.config.repositoryDirectory, manager.jobs[0].id);
+  assert.ok(savedManifest.every((file) => /^[a-f0-9]{32}$/.test(file.md5)));
 });
 
 test('historical MD5 coverage is not reused as the current task fingerprint during scanning', async (t) => {

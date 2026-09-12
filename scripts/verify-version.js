@@ -27,6 +27,13 @@ for (const readme of ['README.md', 'README.en.md']) {
 const releaseNotes = path.join(projectRoot, 'docs', 'releases', `release-notes-v${version}.md`);
 if (!fs.existsSync(releaseNotes)) {
   errors.push(`缺少 docs/releases/release-notes-v${version}.md`);
+} else {
+  const sections = fs.readFileSync(releaseNotes, 'utf8').replace(/\r\n?/g, '\n').split(/^## /m);
+  for (const heading of ['中文', 'English']) {
+    if (!sections.some((section) => section.startsWith(`${heading}\n`) && section.slice(heading.length).trim())) {
+      errors.push(`release-notes-v${version}.md 缺少非空的 ## ${heading} 分区`);
+    }
+  }
 }
 const releaseSummaryPath = path.join(projectRoot, 'docs', 'releases', `release-summary-v${version}.json`);
 if (!fs.existsSync(releaseSummaryPath)) {

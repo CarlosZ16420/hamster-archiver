@@ -180,11 +180,16 @@ async function assertEnoughDiskSpace(directory, requiredBytes, label = '暂存�
 }
 
 async function sameStorage(firstPath, secondPath) {
+  const [first, second] = await Promise.all([
+    fs.stat(firstPath, { bigint: true }),
+    fs.stat(secondPath, { bigint: true })
+  ]);
   if (process.platform === 'win32') {
-    return path.parse(path.resolve(firstPath)).root.toLowerCase() === path.parse(path.resolve(secondPath)).root.toLowerCase();
+    const firstRoot = path.parse(path.resolve(firstPath)).root.toLowerCase();
+    const secondRoot = path.parse(path.resolve(secondPath)).root.toLowerCase();
+    if (firstRoot !== secondRoot) return false;
   }
-  const [first, second] = await Promise.all([fs.stat(firstPath), fs.stat(secondPath)]);
-  return first.dev === second.dev;
+  return String(first.dev) === String(second.dev);
 }
 
 async function removeAppOwnedDirectory(directory) {
@@ -225,7 +230,13 @@ async function moveTaskDirectory(sourceDir, destinationDir) {
   }
 }
 
-async function publishArchiveFiles(sourceDir, archiveRoot, archiveNames) {
+async function publishArchiveFiles(
+  sourceDir,
+  archiveRoot,
+  archiveNames,
+  expectedSourceIdentities = new Map(),
+  { copySpacePrechecked = false } = {}
+) {
   await fs.mkdir(archiveRoot, { recursive: true });
   for (const name of archiveNames) {
     try {
@@ -237,21 +248,68 @@ async function publishArchiveFiles(sourceDir, archiveRoot, archiveNames) {
   }
 
   const published = [];
+  let usedCrossDiskCopy = false;
+  let copySpaceChecked = copySpacePrechecked;
   try {
-    for (const name of archiveNames) {
+    for (let index = 0; index < archiveNames.length; index += 1) {
+      const name = archiveNames[index];
       const sourcePath = path.join(sourceDir, name);
       const targetPath = path.join(archiveRoot, name);
+      let expectedSourceIdentity = expectedSourceIdentities.get(name);
+      let targetIdentity;
+      let publicationMethod = 'rename';
       try {
         await fs.rename(sourcePath, targetPath);
+        targetIdentity = await readPublishedFileIdentity(targetPath);
+        if (expectedSourceIdentity && !samePublishedFileIdentity(expectedSourceIdentity, targetIdentity)) {
+          const error = new Error(`归档成品移动后身份复核失败：${name}`);
+          error.code = 'ARCHIVE_PUBLICATION_IDENTITY_CHANGED';
+          try {
+            await fs.rename(targetPath, sourcePath);
+          } catch (rollbackError) {
+            error.rollbackError = rollbackError;
+          }
+          throw error;
+        }
       } catch (error) {
         if (error.code !== 'EXDEV') throw error;
-        await fs.copyFile(sourcePath, targetPath, fsConstants.COPYFILE_EXCL);
-        const [sourceStats, targetStats] = await Promise.all([fs.stat(sourcePath), fs.stat(targetPath)]);
-        if (sourceStats.size !== targetStats.size) throw new Error(`跨磁盘复制校验失败：${name}`);
-        await fs.rm(sourcePath, { force: true });
+        usedCrossDiskCopy = true;
+        publicationMethod = 'copy';
+        expectedSourceIdentity ||= await readPublishedFileIdentity(sourcePath);
+        expectedSourceIdentities.set(name, expectedSourceIdentity);
+        if (!copySpaceChecked) {
+          const remainingNames = archiveNames.slice(index);
+          await Promise.all(remainingNames.map(async (remainingName) => {
+            if (expectedSourceIdentities.has(remainingName)) return;
+            expectedSourceIdentities.set(
+              remainingName,
+              await readPublishedFileIdentity(path.join(sourceDir, remainingName))
+            );
+          }));
+          const remainingBytes = remainingNames.reduce(
+            (sum, remainingName) => sum + Number(expectedSourceIdentities.get(remainingName)?.size || 0),
+            0
+          );
+          await assertEnoughDiskSpace(archiveRoot, remainingBytes, '成品磁盘');
+          copySpaceChecked = true;
+        }
+        try {
+          await fs.copyFile(sourcePath, targetPath, fsConstants.COPYFILE_EXCL);
+          const [sourceIdentity, copiedIdentity] = await Promise.all([
+            readPublishedFileIdentity(sourcePath),
+            readPublishedFileIdentity(targetPath)
+          ]);
+          if (!samePublishedFileIdentity(expectedSourceIdentity, sourceIdentity) ||
+              Number(copiedIdentity.size) !== Number(expectedSourceIdentity.size)) {
+            throw new Error(`跨磁盘复制校验失败：${name}`);
+          }
+          targetIdentity = copiedIdentity;
+        } catch (copyError) {
+          await fs.rm(targetPath, { force: true }).catch(() => {});
+          throw copyError;
+        }
       }
-      const identity = await readPublishedFileIdentity(targetPath);
-      published.push({ targetPath, identity });
+      published.push({ sourcePath, targetPath, identity: targetIdentity, publicationMethod });
     }
     const publicationFiles = published.map(({ targetPath, identity }) => ({
         name: path.basename(targetPath),
@@ -259,18 +317,24 @@ async function publishArchiveFiles(sourceDir, archiveRoot, archiveNames) {
         identity
       }));
     await fs.rm(sourceDir, { recursive: true, force: true });
-    return publicationFiles;
+    return {
+      files: publicationFiles,
+      mode: usedCrossDiskCopy ? 'cross_disk_copy' : 'same_disk_rename'
+    };
   } catch (error) {
-    await Promise.allSettled(published.map(async ({ targetPath, identity }) => {
+    const cleanupErrors = [];
+    for (const { sourcePath, targetPath, identity, publicationMethod } of published.reverse()) {
       try {
         const currentIdentity = await readPublishedFileIdentity(targetPath);
         if (samePublishedFileIdentity(identity, currentIdentity)) {
-          await fs.rm(targetPath, { force: true });
+          if (publicationMethod === 'rename') await fs.rename(targetPath, sourcePath);
+          else await fs.rm(targetPath, { force: true });
         }
       } catch (cleanupError) {
-        if (cleanupError.code !== 'ENOENT') throw cleanupError;
+        if (cleanupError.code !== 'ENOENT') cleanupErrors.push(cleanupError);
       }
-    }));
+    }
+    if (cleanupErrors.length > 0) error.cleanupErrors = cleanupErrors;
     throw error;
   }
 }
@@ -474,6 +538,7 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
         largeFolderMd5SampleLimit: job.largeFolderMd5SampleLimit ?? config.largeFolderMd5SampleLimit,
         skipTinyMd5Files: job.skipTinyMd5Files ?? config.skipTinyMd5Files,
         tinyFileMd5ThresholdBytes: job.tinyFileMd5ThresholdBytes ?? config.tinyFileMd5ThresholdBytes,
+        onMetadataReady: hooks.onManifestMetadataReady,
         onPlan: hooks.onInventoryPlan,
         onProgress: (progress) => {
           onProgress(progress.percent);
@@ -497,16 +562,18 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       await validateManifestUnchanged(job.sourcePath, job.sourceType, manifest, signal, pauseController);
     }
 
-    const directories = await collectDirectories(job.sourcePath, job.sourceType, {
-      signal,
-      pauseController,
-      onSkippedFile: (item) => {
-        onLog(`清单目录已跳过：${item.path}（${item.code}）`);
-        hooks.onSkippedFile?.(item);
-      }
-    });
+    const directories = Array.isArray(manifest.directories)
+      ? manifest.directories
+      : await collectDirectories(job.sourcePath, job.sourceType, {
+        signal,
+        pauseController,
+        onSkippedFile: (item) => {
+          onLog(`清单目录已跳过：${item.path}（${item.code}）`);
+          hooks.onSkippedFile?.(item);
+        }
+      });
 
-    await hooks.onManifestReady?.(manifest);
+    await hooks.onManifestReady?.(manifest, directories);
 
     await assertEnoughDiskSpace(config.archiveStagingDirectory, job.totalBytes);
     await pauseController?.waitIfPaused(signal);
@@ -548,15 +615,30 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       onOutput: () => {}
     });
 
-    const stagedArchiveBytes = (await Promise.all(
-      archiveFiles.map(async (name) => (await fs.stat(path.join(taskStagingDir, name))).size)
-    )).reduce((sum, size) => sum + size, 0);
-    if (!(await sameStorage(taskStagingDir, archiveRoot))) {
+    const crossStorage = !(await sameStorage(taskStagingDir, archiveRoot));
+    const stagedIdentities = new Map();
+    if (crossStorage) {
+      await Promise.all(archiveFiles.map(async (name) => {
+        stagedIdentities.set(name, await readPublishedFileIdentity(path.join(taskStagingDir, name)));
+      }));
+      const stagedArchiveBytes = [...stagedIdentities.values()]
+        .reduce((sum, identity) => sum + Number(identity.size || 0), 0);
       await assertEnoughDiskSpace(archiveRoot, stagedArchiveBytes, '成品磁盘');
     }
     await onStage('moving', '正在把已验证成品移入归档库');
     const publicationId = crypto.randomUUID();
-    const publishedFiles = await publishArchiveFiles(taskStagingDir, archiveRoot, archiveFiles);
+    const publicationStartedAt = Date.now();
+    const publicationResult = await publishArchiveFiles(
+      taskStagingDir,
+      archiveRoot,
+      archiveFiles,
+      stagedIdentities,
+      { copySpacePrechecked: crossStorage }
+    );
+    const publishedFiles = publicationResult.files;
+    const archivePublishDurationMs = Date.now() - publicationStartedAt;
+    const archivePublicationMode = publicationResult.mode;
+    onLog(`已验证成品发布完成：${archivePublicationMode === 'cross_disk_copy' ? '跨盘复制' : '同盘重命名'} ${publishedFiles.length} 个文件，用时 ${archivePublishDurationMs} 毫秒。`);
     const archivePublication = {
       ownerJobId: String(job.id),
       publicationId,
@@ -571,6 +653,8 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       archiveFiles: finalFiles,
       archiveTotalBytes: finalFiles.reduce((sum, item) => sum + item.size, 0),
       archiveVolumeBytes: archiveVolumeBytes || null,
+      archivePublicationMode,
+      archivePublishDurationMs,
       manifest,
       directories,
       skippedFiles,
@@ -595,6 +679,7 @@ module.exports = {
   buildVerifyArgs,
   resolveArchiveVolumeBytes,
   createArchivePublicationReceipt,
+  publishArchiveFiles,
   recoverPublishedArchiveFiles,
   runArchiveJob,
   runProcess

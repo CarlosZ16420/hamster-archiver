@@ -43,7 +43,10 @@ const { findTrashItems, isTrashItemPresent, restoreTrashItem } = require('./core
 const { readAndVerifyReleaseManifest } = require('./core/tool-integrity');
 const { resolveDevelopmentUserDataRoot } = require('./core/development-paths');
 
-const appIconPath = path.join(__dirname, '..', 'assets', 'app-icon.png');
+// Let Windows choose the nearest native-size frame from the multi-resolution
+// ICO. Passing the 1024px PNG here makes the title-bar icon downsample at
+// runtime and produces a visibly soft 16px glyph.
+const appIconPath = path.join(__dirname, '..', 'assets', 'app-icon.ico');
 const releasesUrl = 'https://github.com/CarlosZ16420/hamster-archiver/releases';
 const packageMetadata = require('../package.json');
 const distributionMode = packageMetadata.distributionMode === 'installed' ? 'installed' : 'portable';
@@ -56,6 +59,7 @@ let allowWindowClose = false;
 let closePromptOpen = false;
 let shutdownInProgress = false;
 let scheduleTimer = null;
+let mcpServer = null;
 let lastCatalogPushSignature = '';
 const isSmokeTest = process.env.HAMSTER_SMOKE_TEST === '1';
 if (isSmokeTest) {
@@ -1022,106 +1026,39 @@ function registerIpc() {
     return queueManager.importWarehouseFromArchiveOrDirectory(result.filePaths[0]);
   });
 
+  let checkedUpdate = null;
+  let updateInstallInFlight = false;
   ipcMain.handle('app:check-for-updates', async (event, options = {}) => {
     assertTrustedSender(event);
+    const result = await checkForUpdates({
+      currentVersion: app.getVersion(),
+      distributionMode: isInstalledDistribution ? 'installed' : 'portable',
+      includeHistory: options?.silent !== true,
+      fetchImpl: net.fetch,
+      timeoutMs: options?.silent === true ? 6_000 : 8_000
+    });
+    if (options?.silent !== true) checkedUpdate = result;
+    return result;
+  });
+
+  ipcMain.handle('app:install-checked-update', async (event, version) => {
+    assertTrustedSender(event);
     const english = queueManager?.config?.language === 'en-US';
-    let result;
-    try {
-      result = await checkForUpdates({
-        currentVersion: app.getVersion(),
-        distributionMode: isInstalledDistribution ? 'installed' : 'portable',
-        fetchImpl: net.fetch,
-        timeoutMs: options?.silent === true ? 6_000 : 8_000
-      });
-    } catch (error) {
-      if (options?.silent === true) throw error;
-      if (isInstalledDistribution) {
-        const response = await dialog.showMessageBox(mainWindow, {
-          type: 'warning',
-          title: english ? 'Check for updates' : '检查更新',
-          message: english ? 'The latest version could not be retrieved.' : '暂时无法获取最新版本。',
-          detail: english
-            ? `Current version: ${app.getVersion()}\nLatest version: unavailable\n\nYou can still update manually.\n${error.message || error}`
-            : `当前版本：${app.getVersion()}\n最新版本：暂时无法获取\n\n仍可手动更新。\n${error.message || error}`,
-          buttons: english ? ['Manual update', 'Close'] : ['手动更新', '关闭'],
-          defaultId: 0,
-          cancelId: 1,
-          noLink: true
-        });
-        if (response.response === 0) {
-          return { currentVersion: app.getVersion(), latestVersion: null, updateAvailable: false, checkFailed: true, ...(await runLocalPackageUpdate()) };
-        }
-        return { currentVersion: app.getVersion(), latestVersion: null, updateAvailable: false, checkFailed: true };
-      }
-      const response = await dialog.showMessageBox(mainWindow, {
-        type: 'warning',
-        title: english ? 'Check for updates' : '检查更新',
-        message: english ? 'The latest version could not be retrieved.' : '暂时无法获取最新版本。',
-        detail: english
-          ? `Current version: ${app.getVersion()}\nLatest version: unavailable\n\nYou can still update manually.\n${error.message || error}`
-          : `当前版本：${app.getVersion()}\n最新版本：暂时无法获取\n\n仍可手动更新。\n${error.message || error}`,
-        buttons: english ? ['Manual update', 'Close'] : ['手动更新', '关闭'],
-        defaultId: 0,
-        cancelId: 1,
-        noLink: true
-      });
-      if (response.response === 0) {
-        return { currentVersion: app.getVersion(), latestVersion: null, updateAvailable: false, checkFailed: true, ...(await runLocalPackageUpdate()) };
-      }
-      return { currentVersion: app.getVersion(), latestVersion: null, updateAvailable: false, checkFailed: true };
+    const result = checkedUpdate;
+    if (updateInstallInFlight || !result?.updateAvailable || !result.installable || result.latestVersion !== version) {
+      throw new Error(english ? 'Please check for updates again.' : '请重新检查更新。');
     }
-    if (options?.silent === true) return result;
-    if (isInstalledDistribution) {
-      const detail = result.updateAvailable
-        ? appendReleaseNotes(english
-            ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion || 'no published release'}\n\nAutomatic update downloads and verifies the installer before starting it. You can also update manually at any time.`
-            : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion || '暂无正式发行版'}\n\n自动更新会先下载并校验安装程序，再启动安装；你也可以随时手动更新。`, result.releaseNotes, english)
-        : (english
-            ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion || 'no published release'}\n\nYou can update manually at any time.`
-            : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion || '暂无正式发行版'}\n\n你可以随时手动更新。`);
-      const buttons = result.updateAvailable
-        ? (result.installable
-            ? (english
-                ? ['Automatic update', 'Manual update', 'Open release page', 'Later']
-                : ['自动更新', '手动更新', '打开发布页', '稍后'])
-            : (english
-                ? ['Manual update', 'Open release page', 'Later']
-                : ['手动更新', '打开发布页', '稍后']))
-        : (english ? ['Manual update', 'Close'] : ['手动更新', '关闭']);
-      const response = await dialog.showMessageBox(mainWindow, {
-        type: result.updateAvailable ? 'info' : 'none',
-        title: english ? 'Check for updates' : '检查更新',
-        message: result.updateAvailable
-          ? (english ? `Version ${result.latestVersion} is available.` : `可以更新到 ${result.latestVersion}。`)
-          : (english ? 'You are using the latest version.' : '当前已是最新版本。'),
-        detail,
-        buttons,
-        defaultId: 0,
-        cancelId: buttons.length - 1,
-        noLink: true
-      });
-      if (!result.updateAvailable) {
-        if (response.response === 0) return { ...result, ...(await runLocalPackageUpdate(result)) };
-        return result;
-      }
-      if (!result.installable) {
-        if (response.response === 0) return { ...result, ...(await runLocalPackageUpdate(result)) };
-        if (response.response === 1) await shell.openExternal(result.releaseUrl);
-        return result;
-      }
-      if (response.response === 1) return { ...result, ...(await runLocalPackageUpdate(result)) };
-      if (response.response === 2) {
-        await shell.openExternal(result.releaseUrl);
-        return result;
-      }
-      if (response.response !== 0) return result;
-      if (queueManager.running) {
-        throw new Error(english
-          ? 'Updates are unavailable while the archive queue is running. Pause or finish the current task first.'
-          : '归档任务运行期间不能更新，请先暂停或完成当前任务。');
-      }
-      const prepared = await prepareInstalledUpdate({
+    if (queueManager.running) {
+      throw new Error(english
+        ? 'Updates are unavailable while the archive queue is running. Pause or finish the current task first.'
+        : '归档任务运行期间不能更新，请先暂停或完成当前任务。');
+    }
+    updateInstallInFlight = true;
+    try {
+      const prepared = await (isInstalledDistribution ? prepareInstalledUpdate : prepareUpdate)({
+        applicationRoot,
         userDataDirectory: queueManager.config.userDataDirectory,
+        sevenZipPath: resolveApplicationPath(applicationRoot, queueManager.config.sevenZipPath),
         currentVersion: result.currentVersion,
         release: result,
         fetchImpl: net.fetch,
@@ -1129,94 +1066,24 @@ function registerIpc() {
           if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:progress', progress);
         }
       });
-      const updateState = await promptAndLaunchPreparedInstaller({
-        prepared,
-        version: result.latestVersion,
-        releaseUrl: result.releaseUrl
+      const updateState = await (isInstalledDistribution ? promptAndLaunchPreparedInstaller : promptAndLaunchPreparedUpdate)({
+        prepared, version: result.latestVersion, releaseUrl: result.releaseUrl
       });
       return { ...result, ...updateState };
+    } finally {
+      updateInstallInFlight = false;
     }
-    if (!result.updateAvailable) {
-      const response = await dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: english ? 'Check for updates' : '检查更新',
-        message: english ? 'You are using the latest version.' : '当前已是最新版本。',
-        detail: english
-          ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion || 'no published release'}\n\nYou can update manually at any time.`
-          : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion || '暂无正式发行版'}\n\n你可以随时手动更新。`,
-        buttons: english ? ['Manual update', 'Close'] : ['手动更新', '关闭'],
-        defaultId: 0,
-        cancelId: 1,
-        noLink: true
-      });
-      if (response.response === 0) return { ...result, ...(await runLocalPackageUpdate()) };
-      return result;
-    }
-    if (!result.installable) {
-      const response = await dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: english ? 'New version available' : '发现新版本',
-        message: english ? `Version ${result.latestVersion} is available.` : `可以更新到 ${result.latestVersion}。`,
-        detail: appendReleaseNotes(english
-          ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion}\n\nNo recognized Windows portable package is attached to this release.`
-          : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion}\n\n当前 Release 没有可识别的 Windows 便携包。`, result.releaseNotes, english),
-        buttons: english ? ['Manual update', 'Open release page', 'Later'] : ['手动更新', '打开发布页', '稍后'],
-        defaultId: 0,
-        cancelId: 2,
-        noLink: true
-      });
-      if (response.response === 0) return { ...result, ...(await runLocalPackageUpdate()) };
-      if (response.response === 1) await shell.openExternal(result.releaseUrl);
-      return result;
-    }
-    const response = await dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      title: english ? 'New version available' : '发现新版本',
-      message: english ? `Version ${result.latestVersion} is available.` : `可以更新到 ${result.latestVersion}。`,
-      detail: appendReleaseNotes(english
-        ? `Current version: ${result.currentVersion}\nLatest version: ${result.latestVersion}\nPackage size: ${Math.max(1, Math.round((result.asset.size || 0) / (1024 * 1024)))} MB\n\nAutomatic update downloads, verifies and restarts the app. User data is not overwritten.`
-        : `当前版本：${result.currentVersion}\n最新版本：${result.latestVersion}\n更新包大小：${Math.max(1, Math.round((result.asset.size || 0) / (1024 * 1024)))} MB\n\n自动更新会下载、校验并重启；用户数据不会被覆盖。`, result.releaseNotes, english),
-      buttons: english
-        ? ['Automatic update', 'Manual update', 'Open release page', 'Later']
-        : ['自动更新', '手动更新', '打开发布页', '稍后'],
-      defaultId: 0,
-      cancelId: 3,
-      noLink: true
-    });
-    if (response.response === 1) return { ...result, ...(await runLocalPackageUpdate()) };
-    if (response.response === 2) {
-      await shell.openExternal(result.releaseUrl);
-      return result;
-    }
-    if (response.response !== 0) return result;
-    if (queueManager.running) {
-      throw new Error(english
-        ? 'Updates are unavailable while the archive queue is running. Pause or finish the current task first.'
-        : '归档任务运行期间不能更新，请先暂停或完成当前任务。');
-    }
-    const prepared = await prepareUpdate({
-      applicationRoot,
-      userDataDirectory: queueManager.config.userDataDirectory,
-      sevenZipPath: resolveApplicationPath(applicationRoot, queueManager.config.sevenZipPath),
-      currentVersion: result.currentVersion,
-      release: result,
-      fetchImpl: net.fetch,
-      onProgress: (progress) => {
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:progress', progress);
-      }
-    });
-    const updateState = await promptAndLaunchPreparedUpdate({
-      prepared,
-      version: result.latestVersion,
-      releaseUrl: result.releaseUrl
-    });
-    return { ...result, ...updateState };
   });
-
 
   ipcMain.handle('app:update-from-package', async (event) => {
     assertTrustedSender(event);
-    return runLocalPackageUpdate();
+    if (updateInstallInFlight) throw new Error(queueManager?.config?.language === 'en-US' ? 'Please check for updates again.' : '请重新检查更新。');
+    updateInstallInFlight = true;
+    try {
+      return await runLocalPackageUpdate(checkedUpdate);
+    } finally {
+      updateInstallInFlight = false;
+    }
   });
 
   ipcMain.handle('user-data:change-location', async (event) => {
@@ -1618,6 +1485,10 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     resolveProgramPath: (configuredPath) => resolveApplicationPath(workspaceRoot, configuredPath)
   });
   await queueManager.initialize();
+  if (!isSmokeTest && (process.argv.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1')) {
+    mcpServer = await require('./core/mcp-server').startMcpServer(queueManager, userDataLayout.root, app.getVersion());
+    queueManager.on('automation-error', (error) => console.error('MCP_QUEUE_ERROR', error.message));
+  }
   const pendingUpdateSuccess = await readUpdateSuccessNotice({
     userDataDirectory: userDataLayout.root,
     noticeFile: process.env.HAMSTER_UPDATE_NOTICE_FILE,
@@ -1875,6 +1746,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', (event) => {
+  if (mcpServer) { void mcpServer.close(); mcpServer = null; }
   if (scheduleTimer) clearInterval(scheduleTimer);
   if (queueManager?.running && !allowWindowClose) {
     event.preventDefault();

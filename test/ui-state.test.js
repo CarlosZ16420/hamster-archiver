@@ -7,6 +7,7 @@ const test = require('node:test');
 const {
   formatCatalogDate,
   formatItemCount,
+  newlyAutoSkippedJobIds,
   queueSimilarityEvidenceText,
   ratingButtonLabel,
   shouldApplyTaskProgress,
@@ -44,6 +45,36 @@ test('late running progress cannot overwrite a duplicate-review or auto-skip ter
   assert.equal(shouldApplyTaskProgress(
     { status: 'compressing' }, { stage: 'inventorying' }
   ), false);
+});
+
+test('only a fresh automatic duplicate skip is removed from the queue selection', () => {
+  const previousJobs = [
+    { id: 'fresh-skip', status: 'inventorying' },
+    { id: 'already-skipped', status: 'skipped_duplicate' },
+    { id: 'completed', status: 'verifying' }
+  ];
+  const nextJobs = [
+    { id: 'fresh-skip', status: 'skipped_duplicate' },
+    { id: 'already-skipped', status: 'skipped_duplicate' },
+    { id: 'completed', status: 'completed' }
+  ];
+
+  assert.deepEqual(newlyAutoSkippedJobIds(previousJobs, nextJobs), ['fresh-skip']);
+  assert.deepEqual(newlyAutoSkippedJobIds([], nextJobs), ['fresh-skip', 'already-skipped']);
+});
+
+test('running queue intake remains available while settings stay locked', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+
+  assert.match(app, /job\?\.deferredUntilNextRun === true\s*\? '等待下次入库'/);
+  assert.match(app, /for \(const jobId of uiState\.newlyAutoSkippedJobIds\(previousJobs, mergedState\.jobs \|\| \[\]\)\)/);
+  assert.match(app, /#scan-source'\)\.disabled = Boolean\(activeScanToken\)/);
+  assert.match(app, /#scan-source'\)\.addEventListener\('click', async \(\) => \{\s*if \(activeScanToken\) return;/);
+  assert.match(app, /#add-folder'\)\.disabled = false/);
+  assert.match(app, /#add-video'\)\.disabled = false/);
+  assert.match(app, /async function prepareQueueIntake\(\) \{\s*if \(currentState\?\.running\) return true;/);
+  assert.match(app, /job\.deferredUntilNextRun !== true[\s\S]*job\.status === 'queued'/);
+  assert.match(app, /setConfigControlsLocked\(state\.running\)/);
 });
 
 test('similarity evidence distinguishes identical content from a complete project duplicate', () => {
@@ -278,11 +309,12 @@ test('paused work exposes a toolbar cancel action and large-folder sampling is u
 
 test('manual package update is offered from check for updates instead of a separate header button', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
-  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+  const renderer = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const updateDialog = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'update-dialog.js'), 'utf8');
 
   assert.doesNotMatch(html, /id="install-local-update"/);
-  assert.match(main, /buttons: english \? \['Manual update', 'Close'\] : \['手动更新', '关闭'\]/);
-  assert.match(main, /\['Automatic update', 'Manual update', 'Open release page', 'Later'\]/);
+  assert.match(renderer, /window\.showUpdateDialog\(result/);
+  assert.match(updateDialog, /button\('手动更新',[^\n]+window\.archiveApp\.installUpdatePackage\(\)/);
 });
 
 test('manual update checks and successful restarts both surface release notes', () => {
@@ -291,7 +323,8 @@ test('manual update checks and successful restarts both surface release notes', 
   const manager = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'update-manager.js'), 'utf8');
 
   assert.match(checker, /releaseNotes:\s*compactReleaseNotesPayload\(release\.body\)/);
-  assert.match(main, /appendReleaseNotes\([\s\S]*result\.releaseNotes/);
+  assert.match(main, /appendReleaseNotes\([\s\S]*prepared\.releaseNotes/);
+  assert.match(main, /appendReleaseNotes\(versionDetail, notice\.releaseNotes, english\)/);
   assert.match(main, /showUpdateSuccessDialog\(pendingUpdateSuccess\)/);
   assert.match(manager, /HAMSTER_UPDATE_NOTICE_FILE:\s*noticeFile/);
 });
@@ -339,7 +372,7 @@ test('compact settings copy and activity colors follow the current UI specificat
   assert.match(html, /id="auto-skip-exact-duplicates"/);
   assert.match(html, /id="similarity-report-enabled"[^>]*checked/);
   assert.match(html, /id="queue-similarity-report-dialog"/);
-  assert.match(html, /每个文件都有有效 MD5[^<]*文件数量、相对路径、大小和 MD5 全部一致/);
+  assert.doesNotMatch(html, /每个文件都有有效 MD5[^<]*文件数量、相对路径、大小和 MD5 全部一致/);
   assert.match(html, /class="queue-threshold-clause"[\s\S]*?id="large-folder-file-threshold"[\s\S]*?>的文件夹，<\/span><\/span>/);
   assert.match(app, /actionButton\('相似报告', 'similarity-report'/);
   assert.doesNotMatch(app, /Ctrl.*多选/);

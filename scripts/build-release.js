@@ -116,6 +116,9 @@ async function main() {
     await fs.cp(readmeAssets, path.join(outputRoot, 'README.assets'), { recursive: true });
   }
   await fs.copyFile(path.join(projectRoot, 'LICENSE'), path.join(outputRoot, 'LICENSE'));
+  await fs.mkdir(path.join(outputRoot, 'docs'), { recursive: true });
+  await fs.copyFile(path.join(projectRoot, 'docs', 'MCP.md'), path.join(outputRoot, 'docs', 'MCP.md'));
+  await fs.copyFile(path.join(projectRoot, 'llms.txt'), path.join(outputRoot, 'llms.txt'));
   await fs.writeFile(path.join(appDirectory, 'package.json'), `${JSON.stringify({
     name: packageJson.name,
     productName: 'Hamster Archiver',
@@ -163,6 +166,9 @@ async function main() {
     'HamsterArchiver.exe',
     'resources/app/package.json',
     'resources/app/src/main.js',
+    'resources/app/src/core/mcp-server.js',
+    'resources/app/src/core/mcp-tools.js',
+    'resources/app/src/core/mcp-client.js',
     'resources/app/src/core/archive-engine.js',
     'resources/app/src/core/media-service.js',
     'resources/app/src/core/paths.js',

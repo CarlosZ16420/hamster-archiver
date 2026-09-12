@@ -4,6 +4,51 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { checkForUpdates, compareVersions } = require('../src/core/update-checker');
 
+test('history paginates, sorts numerically, filters releases and selects the requested language', async () => {
+  const release = { tag_name: 'v4.5.18', body: '## 中文\n- 修复归档。\n## English\n- Fix archives.' };
+  const calls = [];
+  const result = await checkForUpdates({
+    currentVersion: '4.5.9', includeHistory: true,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      const payload = url.endsWith('/latest') ? release : url.endsWith('page=1')
+        ? Array.from({ length: 100 }, () => ({ tag_name: 'v4.5.8' }))
+        : [release, { tag_name: 'v4.5.10', body: '## 中文\n十。\n## English\nTen.' },
+          { tag_name: 'v4.5.19' }, { tag_name: 'v4.5.9' }, { tag_name: 'v4.5.11', draft: true },
+          { tag_name: 'v4.5.12', prerelease: true }, { tag_name: 'v4.5.13-beta' }, { tag_name: 'invalid' }];
+      return { ok: true, json: async () => payload };
+    }
+  });
+  assert.equal(calls.length, 3);
+  assert.deepEqual(result.releases.map((item) => item.version), ['4.5.18', '4.5.10']);
+  assert.equal(result.historyIncomplete, false);
+  assert.equal(result.releases[0].notes['zh-CN'].text, '- 修复归档。');
+  assert.equal(result.releases[0].notes['en-US'].text, '- Fix archives.');
+  assert.equal(result.releases[0].notes['zh-CN'].untranslated, false);
+});
+
+test('failed history retains latest notes and explicitly reports incomplete history', async () => {
+  const result = await checkForUpdates({
+    currentVersion: '4.5.16', includeHistory: true,
+    fetchImpl: async (url) => {
+      if (!url.endsWith('/latest')) throw new Error('offline');
+      return { ok: true, json: async () => ({ tag_name: 'v4.5.18', body: '## English\n- English only.' }) };
+    }
+  });
+  assert.equal(result.historyIncomplete, true);
+  assert.equal(result.releases.length, 1);
+  assert.equal(result.releases[0].notes['zh-CN'].untranslated, true);
+  assert.equal(result.releases[0].notes['en-US'].untranslated, false);
+});
+
+test('display notes preserve long lists beyond the native-dialog summary limit', () => {
+  const { displayRelease } = require('../src/core/update-checker');
+  const lines = Array.from({ length: 30 }, (_, i) => `- Change ${i}`).join('\n');
+  const entry = displayRelease({ tag_name: 'v4.5.18', body: `## English\n${lines}` });
+  assert.match(entry.notes['en-US'].text, /Change 29/);
+  assert.equal(entry.truncated, false);
+});
+
 test('semantic versions are compared numerically', () => {
   assert.equal(compareVersions('2.0.0', '1.11.9'), 1);
   assert.equal(compareVersions('v2.0.0', '2.0.0'), 0);

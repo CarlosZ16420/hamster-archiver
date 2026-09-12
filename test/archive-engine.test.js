@@ -11,6 +11,7 @@ const {
   buildCompressArgs,
   buildVerifyArgs,
   createArchivePublicationReceipt,
+  publishArchiveFiles,
   recoverPublishedArchiveFiles
 } = require('../src/core/archive-engine');
 
@@ -94,6 +95,74 @@ test('disk-space guard rejects an impossibly large task instead of silently cont
     (error) => error.code === 'INSUFFICIENT_DISK_SPACE'
   );
   assert.ok(await fs.stat(os.tmpdir()));
+});
+
+test('EXDEV publication fallback checks target space and reports the actual copy mode', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-publication-exdev-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const staging = path.join(root, 'staging');
+  const output = path.join(root, 'output');
+  await fs.mkdir(staging, { recursive: true });
+  await fs.mkdir(output, { recursive: true });
+  await fs.writeFile(path.join(staging, 'owned.7z'), Buffer.alloc(64, 0x31));
+
+  const originalRename = fs.rename.bind(fs);
+  const originalCopyFile = fs.copyFile.bind(fs);
+  const events = [];
+  t.mock.method(fs, 'rename', async (sourcePath, targetPath) => {
+    if (sourcePath === path.join(staging, 'owned.7z') && targetPath === path.join(output, 'owned.7z')) {
+      events.push('rename-exdev');
+      const error = new Error('simulated mounted-volume boundary');
+      error.code = 'EXDEV';
+      throw error;
+    }
+    return originalRename(sourcePath, targetPath);
+  });
+  t.mock.method(fs, 'statfs', async (directory) => {
+    assert.equal(path.resolve(directory), path.resolve(output));
+    events.push('space-check');
+    return { bavail: 1024 ** 3, bsize: 4096 };
+  });
+  t.mock.method(fs, 'copyFile', async (...args) => {
+    events.push('copy');
+    return originalCopyFile(...args);
+  });
+
+  const publication = await publishArchiveFiles(staging, output, ['owned.7z']);
+  assert.equal(publication.mode, 'cross_disk_copy');
+  assert.deepEqual(events.slice(0, 3), ['rename-exdev', 'space-check', 'copy']);
+  assert.deepEqual(await fs.readFile(path.join(output, 'owned.7z')), Buffer.alloc(64, 0x31));
+  await assert.rejects(fs.stat(staging), (error) => error.code === 'ENOENT');
+});
+
+test('EXDEV publication fallback leaves the source intact when target space is insufficient', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-publication-exdev-space-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const staging = path.join(root, 'staging');
+  const output = path.join(root, 'output');
+  const sourcePath = path.join(staging, 'owned.7z');
+  const targetPath = path.join(output, 'owned.7z');
+  await fs.mkdir(staging, { recursive: true });
+  await fs.mkdir(output, { recursive: true });
+  await fs.writeFile(sourcePath, Buffer.alloc(64, 0x42));
+
+  const originalRename = fs.rename.bind(fs);
+  t.mock.method(fs, 'rename', async (fromPath, toPath) => {
+    if (fromPath === sourcePath && toPath === targetPath) {
+      const error = new Error('simulated mounted-volume boundary');
+      error.code = 'EXDEV';
+      throw error;
+    }
+    return originalRename(fromPath, toPath);
+  });
+  t.mock.method(fs, 'statfs', async () => ({ bavail: 0, bsize: 4096 }));
+
+  await assert.rejects(
+    publishArchiveFiles(staging, output, ['owned.7z']),
+    (error) => error.code === 'INSUFFICIENT_DISK_SPACE'
+  );
+  assert.deepEqual(await fs.readFile(sourcePath), Buffer.alloc(64, 0x42));
+  await assert.rejects(fs.stat(targetPath), (error) => error.code === 'ENOENT');
 });
 
 test('archive recovery refuses to move a published path whose file identity changed', async (t) => {

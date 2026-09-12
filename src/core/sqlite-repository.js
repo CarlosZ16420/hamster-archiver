@@ -447,10 +447,14 @@ function findCatalogIdsByProjectContent(database, fingerprint, limit = 20) {
   ).map((row) => row.record_id);
 }
 
-function findExactFileMatches(database, manifest, limit = 100) {
+function findExactFileMatches(database, manifest, limit = 100, excludedRecordId = '') {
   const sourceFiles = (manifest || []).map((file, sourceIndex) => ({ file, sourceIndex }))
     .filter(({ file }) => /^[a-f0-9]{32}$/i.test(String(file?.md5 || '')));
   const matches = [];
+  // Read project metadata once per matched project, never once per file. Large
+  // record_json values otherwise get copied and sorted thousands of times.
+  const records = new Map();
+  const readRecord = database.prepare('SELECT display_name, record_json FROM catalog_records WHERE id = ?');
   for (let offset = 0; offset < sourceFiles.length; offset += 200) {
     const chunk = sourceFiles.slice(offset, offset + 200);
     const values = chunk.map(() => '(?, ?, ?)').join(', ');
@@ -461,15 +465,15 @@ function findExactFileMatches(database, manifest, limit = 100) {
     ]);
     const rows = database.prepare(`
       WITH incoming(source_index, md5, size) AS (VALUES ${values}), ranked AS (
-        SELECT i.source_index, f.record_id, f.relative_path, r.display_name, r.record_json,
+        SELECT i.source_index, f.record_id, f.relative_path,
           ROW_NUMBER() OVER (PARTITION BY i.source_index ORDER BY f.record_id, f.ordinal) AS match_rank
         FROM incoming i
         JOIN catalog_files f ON f.md5 = i.md5 AND f.size = i.size
-        JOIN catalog_records r ON r.id = f.record_id
+        WHERE f.record_id != ?
       )
-      SELECT source_index, record_id, relative_path, display_name, record_json
+      SELECT source_index, record_id, relative_path
       FROM ranked WHERE match_rank <= 5 ORDER BY source_index, match_rank
-    `).all(...parameters);
+    `).all(...parameters, excludedRecordId);
     const rowsBySource = new Map();
     for (const row of rows) {
       if (!rowsBySource.has(row.source_index)) rowsBySource.set(row.source_index, []);
@@ -483,11 +487,18 @@ function findExactFileMatches(database, manifest, limit = 100) {
         md5: String(file.md5 || '').trim().toLowerCase(),
         size: file.size,
         previous: fileRows.map((row) => {
-          const record = JSON.parse(row.record_json);
+          if (!records.has(row.record_id)) {
+            const stored = readRecord.get(row.record_id);
+            records.set(row.record_id, {
+              archiveName: JSON.parse(stored.record_json).archiveBaseName,
+              archivedTask: stored.display_name
+            });
+          }
+          const record = records.get(row.record_id);
           return {
             archiveId: row.record_id,
-            archiveName: record.archiveBaseName,
-            archivedTask: row.display_name,
+            archiveName: record.archiveName,
+            archivedTask: record.archivedTask,
             relativePath: row.relative_path
           };
         })

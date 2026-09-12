@@ -182,7 +182,9 @@ function statusLabel(status) {
 }
 
 function jobStatusLabel(job) {
-  return job?.status === 'queued' && job?.intakeModeSelected === false
+  return job?.status === 'queued' && job?.deferredUntilNextRun === true
+    ? '等待下次入库'
+    : job?.status === 'queued' && job?.intakeModeSelected === false
     ? '待选入库方式'
     : statusLabel(job?.status);
 }
@@ -288,7 +290,8 @@ function formatRemainingTime(milliseconds) {
 function queueEstimateText(activeJob, percentage = activeJob.progress || 0) {
   if (!currentState || activeJob.status !== 'compressing') return '';
   const eligible = currentState.jobs.filter((job) =>
-    job.status === 'queued' || job.status === 'compressing' || String(job.status || '').startsWith('completed'));
+    job.deferredUntilNextRun !== true &&
+    (job.status === 'queued' || job.status === 'compressing' || String(job.status || '').startsWith('completed')));
   const completed = eligible.filter((job) => String(job.status || '').startsWith('completed')).length;
   const history = currentState.config?.compressionHistory || [];
   const compressionRates = history
@@ -418,6 +421,7 @@ async function runUpdateCheck({ automatic = false } = {}) {
   }
   try {
     const result = await window.archiveApp.checkForUpdates({ silent: automatic });
+    if (!automatic) Object.assign(result, await window.showUpdateDialog(result, { t, locale: i18n?.getLocale?.() || 'zh-CN' }));
     if (!automatic) {
       if (result?.updateAvailable) setUpdateStatus('available', '检查更新');
       else setUpdateStatus('current', '检查更新');
@@ -427,6 +431,7 @@ async function runUpdateCheck({ automatic = false } = {}) {
     if (!automatic) {
       setUpdateStatus('failed', '检查更新');
       showToast(`检查更新失败：${error.message || String(error)}`, true);
+      await window.showUpdateDialog({ checkFailed: true }, { t, locale: i18n?.getLocale?.() || 'zh-CN' });
     }
     return null;
   } finally {
@@ -1147,6 +1152,7 @@ function catalogPageSize() {
 }
 
 function renderCatalog(catalog) {
+  releaseDetailThumbnails(elements.catalogList);
   currentCatalogResults = catalog;
   if (catalog.length === 0) {
     currentCatalogPageRecords = [];
@@ -1462,16 +1468,48 @@ async function loadThumbnail(image, recordId, relativePath) {
   return dataUrl;
 }
 
+const thumbnailLoadQueue = [];
+let thumbnailLoadsActive = 0;
+const thumbnailObserver = new IntersectionObserver((entries) => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    thumbnailObserver.unobserve(entry.target);
+    thumbnailLoadQueue.push(entry.target);
+  }
+  pumpThumbnailLoads();
+}, { rootMargin: '300px' });
+
+function pumpThumbnailLoads() {
+  while (thumbnailLoadsActive < 4 && thumbnailLoadQueue.length) {
+    const image = thumbnailLoadQueue.shift();
+    if (!image.isConnected) continue;
+    thumbnailLoadsActive += 1;
+    void loadThumbnail(image, image.dataset.thumbnailRecord, image.dataset.thumbnailPath)
+      .then((dataUrl) => {
+        if (dataUrl && image.isConnected) image.previousElementSibling.src = dataUrl;
+      })
+      .finally(() => { thumbnailLoadsActive -= 1; pumpThumbnailLoads(); });
+  }
+}
+
+function releaseDetailThumbnails(container = elements.catalogDetail) {
+  for (const image of container.querySelectorAll('[data-thumbnail-record]')) {
+    thumbnailObserver.unobserve(image);
+  }
+}
+
 function appendContainedThumbnail(container, recordId, relativePath, title, frameClass = '') {
   const frame = make('div', `contained-thumbnail-frame${frameClass ? ` ${frameClass}` : ''}`);
   const backdrop = document.createElement('img');
   backdrop.className = 'contained-thumbnail-image contained-thumbnail-backdrop';
   backdrop.alt = '';
+  backdrop.decoding = 'async';
   backdrop.setAttribute('aria-hidden', 'true');
 
   const image = document.createElement('img');
   image.className = 'contained-thumbnail-image contained-thumbnail-foreground';
   image.loading = 'lazy';
+  image.decoding = 'async';
   image.alt = title;
   image.dataset.thumbnailRecord = recordId;
   image.dataset.thumbnailPath = relativePath;
@@ -1479,9 +1517,7 @@ function appendContainedThumbnail(container, recordId, relativePath, title, fram
   frame.append(backdrop, image);
   container.append(frame);
 
-  void loadThumbnail(image, recordId, relativePath).then((dataUrl) => {
-    if (dataUrl) backdrop.src = dataUrl;
-  });
+  thumbnailObserver.observe(image);
   return image;
 }
 
@@ -2220,6 +2256,7 @@ function renderSimilarProjects(record) {
 function renderCatalogDetail(record) {
   if (!record || record.id !== activeCatalogId) return;
   hideSimilarityWhitelistAction();
+  releaseDetailThumbnails();
   elements.catalogDetail.replaceChildren();
   const heading = make('div', 'archive-heading');
   heading.append(makeUserText('h3', '', catalogTitle(record)));
@@ -2369,13 +2406,15 @@ async function loadCatalogDetails(recordId) {
   activeCatalogId = recordId;
   syncCatalogItemState();
   elements.catalogDetail.setAttribute('aria-busy', 'true');
-  if (elements.catalogDetail.querySelector('.empty-library')) {
-    elements.catalogDetail.replaceChildren(make('p', 'muted', '正在读取完整目录和缩略图…'));
-  }
+  releaseDetailThumbnails();
+  const loading = make('p', 'muted', '正在读取完整目录和缩略图…');
+  loading.setAttribute('role', 'status');
+  elements.catalogDetail.replaceChildren(loading);
   const record = await safely(() => window.archiveApp.getCatalogDetails(recordId));
   if (requestId !== catalogDetailRequest || activeCatalogId !== recordId) return;
   elements.catalogDetail.removeAttribute('aria-busy');
   if (record) renderCatalogDetail(record);
+  else elements.catalogDetail.replaceChildren(make('p', 'muted', '详情读取失败，请重新选择项目重试。'));
 }
 
 function renderSummary(state) {
@@ -2404,9 +2443,9 @@ function renderSummary(state) {
     !job.sourceCatalogRecordId && ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
   if (state.safetyHalt) document.querySelector('#start-queue').disabled = true;
   if (state.safetyHalt) document.querySelector('#start-inventory-only').disabled = true;
-  document.querySelector('#scan-source').disabled = state.running;
-  document.querySelector('#add-folder').disabled = state.running;
-  document.querySelector('#add-video').disabled = state.running;
+  document.querySelector('#scan-source').disabled = Boolean(activeScanToken);
+  document.querySelector('#add-folder').disabled = false;
+  document.querySelector('#add-video').disabled = false;
   setConfigControlsLocked(state.running);
   document.querySelector('#clear-completed').disabled = !jobs.some((job) => String(job.status).startsWith('completed'));
   document.querySelector('#clear-cancelled').disabled = !jobs.some((job) => job.status === 'cancelled');
@@ -2454,9 +2493,13 @@ function renderSummary(state) {
 }
 
 function render(state, includeConfig = false) {
+  const previousJobs = currentState?.jobs || [];
   const mergedState = currentState
     ? { ...currentState, ...state, catalog: state.catalog || currentState.catalog }
     : state;
+  for (const jobId of uiState.newlyAutoSkippedJobIds(previousJobs, mergedState.jobs || [])) {
+    selectedJobIds.delete(jobId);
+  }
   currentState = mergedState;
   state = mergedState;
   if (includeConfig) renderConfig(state.config);
@@ -2501,6 +2544,11 @@ async function saveConfig() {
     setConfigControlsLocked(Boolean(currentState.running));
   }
   return state;
+}
+
+async function prepareQueueIntake() {
+  if (currentState?.running) return true;
+  return Boolean(await saveConfig());
 }
 
 document.querySelectorAll('.nav-button').forEach((button) => {
@@ -2574,6 +2622,8 @@ window.archiveApp.onUpdateProgress((progress) => {
       ? `下载更新 ${progress.percentage}%`
       : '正在下载更新…');
   }
+  const dialogProgress = document.querySelector('.update-dialog-error[data-busy="true"]');
+  if (dialogProgress) dialogProgress.textContent = elements.updateStatusLabel.textContent;
 });
 elements.updateStatusChip?.addEventListener('click', async () => {
   const result = await runUpdateCheck();
@@ -2710,28 +2760,29 @@ document.querySelector('#select-user-data').addEventListener('click', async () =
 });
 
 document.querySelector('#scan-source').addEventListener('click', async () => {
+  if (activeScanToken) return;
   if (!elements.intakeDirectory.value.trim()) {
     const selected = await safely(() => window.archiveApp.chooseDirectory(''));
     if (!selected) return;
     elements.intakeDirectory.value = selected;
   }
-  const saved = await saveConfig();
-  if (!saved) return;
+  if (!await prepareQueueIntake()) return;
   elements.notice.textContent = t('正在扫描下一级目录，请稍候…');
   elements.notice.hidden = false;
   const scanToken = String(++nextScanToken);
   activeScanToken = scanToken;
+  document.querySelector('#scan-source').disabled = true;
   const state = await safely(() => window.archiveApp.scanSource(elements.intakeDirectory.value.trim(), scanToken));
   if (activeScanToken === scanToken) {
     activeScanToken = null;
     elements.notice.hidden = true;
+    document.querySelector('#scan-source').disabled = false;
   }
   if (state) render(state);
 });
 
 async function addSingle(kind) {
-  const saved = await saveConfig();
-  if (!saved) return;
+  if (!await prepareQueueIntake()) return;
   const selected = await safely(() => window.archiveApp.chooseSingle(kind));
   if (!selected) return;
   const state = await safely(() => window.archiveApp.addSingle(selected));
@@ -2754,8 +2805,7 @@ document.addEventListener('dragleave', (event) => {
 async function addPathsToQueue(paths, sourceLabel) {
   const uniquePaths = [...new Set((paths || []).map((value) => String(value).trim()).filter(Boolean))];
   if (uniquePaths.length === 0) return;
-  const saved = await saveConfig();
-  if (!saved) return;
+  if (!await prepareQueueIntake()) return;
   let added = 0;
   for (const sourcePath of uniquePaths) {
     const state = await safely(() => window.archiveApp.addSingle(sourcePath));
@@ -3536,6 +3586,8 @@ elements.deleteCatalogForm.addEventListener('submit', async (event) => {
   if (activeCatalogId && result.deletedIds.includes(activeCatalogId)) {
     activeCatalogId = null;
     catalogDetailRequest += 1;
+    releaseDetailThumbnails();
+    elements.catalogDetail.removeAttribute('aria-busy');
     elements.catalogDetail.replaceChildren(make('div', 'empty-library', '所选仓库内容已删除。'));
   }
   render(result.state);

@@ -158,8 +158,8 @@ class AppStore {
     return findCatalogIdsByProjectContent(this.getRepository(repositoryDirectory).database, fingerprint, limit);
   }
 
-  findExactFileMatches(repositoryDirectory, manifest, limit) {
-    return findExactFileMatches(this.getRepository(repositoryDirectory).database, manifest, limit);
+  findExactFileMatches(repositoryDirectory, manifest, limit, excludedRecordId = '') {
+    return findExactFileMatches(this.getRepository(repositoryDirectory).database, manifest, limit, excludedRecordId);
   }
 
   async loadPendingManifest(repositoryDirectory, jobId) {

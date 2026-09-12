@@ -10,7 +10,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 本地优先 · 批量归档 · 媒体预览 · 便携数据
 
-![Version](https://img.shields.io/badge/version-4.5.18-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.0-d45f3c?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
@@ -22,6 +22,12 @@ Local-first batch archiver and searchable media vault for Windows.
 </div>
 
 ---
+
+## AI / MCP 接入
+
+支持可选的本机 MCP：AI 可批量入库、查询项目和文件清单、轮询进度，并根据相似提示继续、跳过或重试。默认关闭，通过 `--enable-mcp` 启用；AI 入库保留原文件，旧仓库无需迁移。详见 [连接示例和工具说明](docs/MCP.md) · [AI 文档入口](llms.txt)。
+
+大项目详情查询避免重复读取整份项目数据，媒体预览按可见区域加载，并限制同时读取图片的数量。
 
 ##  这是一个什么样的工具
 
@@ -157,7 +163,7 @@ npm start
 ## 便携数据布局
 
 ```text
-HamsterArchiver-v4.5.18-win-x64/
+HamsterArchiver-v4.6.0-win-x64/
 ├─ HamsterArchiver.exe
 ├─ tools/
 │  ├─ 7zip/

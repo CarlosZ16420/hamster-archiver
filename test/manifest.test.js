@@ -80,6 +80,26 @@ test('skipping tiny MD5 keeps every file in the archive manifest', async (t) => 
   assert.match(manifest.find((file) => file.name === 'content.bin').md5, /^[a-f0-9]{32}$/);
 });
 
+test('metadata hook sees the complete file and directory tree before any MD5 is generated', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-manifest-metadata-hook-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'empty', 'nested'), { recursive: true });
+  await fs.writeFile(path.join(root, 'content.bin'), Buffer.alloc(1024, 0x5a));
+  const stop = new Error('stop-before-hash');
+  let observed = false;
+
+  await assert.rejects(buildManifest(root, 'directory', {
+    onMetadataReady: async (manifest, directories) => {
+      observed = true;
+      assert.equal(manifest.length, 1);
+      assert.equal(manifest[0].md5, undefined);
+      assert.deepEqual(directories, ['empty', 'empty/nested']);
+      throw stop;
+    }
+  }), (error) => error === stop);
+  assert.equal(observed, true);
+});
+
 test('completing MD5 normalizes already hashed entries without retaining skip metadata', async () => {
   const [completed] = await completeManifestMd5('unused', 'directory', [{
     relativePath: 'already-hashed.bin',

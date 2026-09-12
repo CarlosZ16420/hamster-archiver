@@ -96,7 +96,7 @@ async function collectFiles(sourcePath, sourceType, options = {}) {
   const { signal, pauseController, onSkippedFile = () => {} } = options;
   if (sourceType === 'video') {
     const stats = await fs.stat(sourcePath);
-    return [{
+    const files = [{
       absolutePath: sourcePath,
       relativePath: path.basename(sourcePath),
       name: path.basename(sourcePath),
@@ -106,9 +106,12 @@ async function collectFiles(sourcePath, sourceType, options = {}) {
       modifiedAt: stats.mtime.toISOString(),
       mediaType: 'video'
     }];
+    Object.defineProperty(files, 'directories', { value: [], enumerable: false });
+    return files;
   }
 
   const files = [];
+  const directories = [];
   const pending = [sourcePath];
   while (pending.length > 0) {
     await pauseController?.waitIfPaused(signal);
@@ -125,6 +128,7 @@ async function collectFiles(sourcePath, sourceType, options = {}) {
       if (entry.isSymbolicLink()) continue;
       const entryPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
+        directories.push(portableRelativePath(path.relative(sourcePath, entryPath)));
         pending.push(entryPath);
       } else if (entry.isFile()) {
         let stats;
@@ -148,6 +152,8 @@ async function collectFiles(sourcePath, sourceType, options = {}) {
     }
   }
   files.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN'));
+  directories.sort((left, right) => left.localeCompare(right, 'zh-CN'));
+  Object.defineProperty(files, 'directories', { value: directories, enumerable: false });
   return files;
 }
 
@@ -165,6 +171,7 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
     onSkippedFile(item);
   };
   const files = await collectFiles(sourcePath, sourceType, { signal, pauseController, onSkippedFile: recordSkipped });
+  const directories = Array.isArray(files.directories) ? files.directories : [];
   const skipTinyMd5Files = options.skipTinyMd5Files === true;
   const plan = createFingerprintPlan(files, sourceType, options);
   const { md5Candidates, selectedFiles, selectedPaths, simplified, sampleLimit, tinyFileMd5ThresholdBytes, threshold } = plan;
@@ -182,6 +189,13 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
     threshold,
     simplified
   });
+
+  if (typeof options.onMetadataReady === 'function') {
+    const metadataManifest = files.map(({ absolutePath: _absolutePath, ...file }) => ({ ...file }));
+    Object.defineProperty(metadataManifest, 'directories', { value: directories, enumerable: false });
+    Object.defineProperty(metadataManifest, 'skippedFiles', { value: skippedFiles, enumerable: false });
+    await options.onMetadataReady(metadataManifest, directories);
+  }
 
   for (let index = 0; index < files.length; index += 1) {
     if (signal?.aborted) throw new CancelledError();
@@ -239,6 +253,7 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
     onProgress({ processedFiles: 0, totalFiles: 0, processedBytes: 0, totalBytes: 0, percent: 100 });
   }
   Object.defineProperty(manifest, 'skippedFiles', { value: skippedFiles, enumerable: false });
+  Object.defineProperty(manifest, 'directories', { value: directories, enumerable: false });
   return manifest;
 }
 

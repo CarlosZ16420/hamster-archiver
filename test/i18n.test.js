@@ -69,6 +69,7 @@ if (!rendererDir) {
       i18n.translate('与仓库内项目完全一致，已自动跳过'),
       'Identical to a warehouse project; auto-skipped'
     );
+    assert.equal(i18n.translate('等待下次入库'), 'Waiting for next intake run');
     assert.equal(i18n.translate('2 个低于 100 MB 的小项目'), '2 small items below 100 MB');
     assert.equal(
       i18n.translate('“PRESTIGE”已加入相似度白名单；已有关系不会自动重算'),
@@ -88,6 +89,14 @@ if (!rendererDir) {
       i18n.translate('已完成 2/5 项 · 预计还需 3 小时 12 分钟'),
       'Completed 2/5 items · estimated time remaining: 3 hours 12 minutes'
     );
+    assert.equal(
+      i18n.translate('已验证成品发布完成：同盘重命名 3 个文件，用时 42 毫秒。'),
+      'Verified archive publication complete: renamed 3 file(s) on the same volume in 42 ms.'
+    );
+    assert.equal(
+      i18n.translate('已验证成品发布完成：跨盘复制 2 个文件，用时 125.5 毫秒。'),
+      'Verified archive publication complete: copied 2 file(s) across volumes in 125.5 ms.'
+    );
   });
 
   test('stage fragments translate queue stage wording', () => {
@@ -100,6 +109,7 @@ if (!rendererDir) {
       i18n.translateStage('已确认，等待库内项目压缩'),
       'Confirmed; queued for warehouse item compression'
     );
+    assert.equal(i18n.translateStage('等待下次入库'), 'Waiting for next intake run');
     assert.equal(
       i18n.translateStage('发现 3 个相似项目 · 等待手动确认'),
       'Found 3 similar items · Awaiting manual confirmation'

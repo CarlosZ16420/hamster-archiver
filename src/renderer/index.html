@@ -260,7 +260,6 @@
                     <label><input type="radio" name="auto-skip-exact-duplicate-action" value="remove"> <span>在队列中删除对应项（日志中仍保留）</span></label>
                     <label><input type="radio" name="auto-skip-exact-duplicate-action" value="keep" checked> <span>在队列中保留对应项</span></label>
                   </fieldset>
-                  <p class="queue-setting-note">只有完整清单中每个文件都有有效 MD5，且文件数量、相对路径、大小和 MD5 全部一致时，才会判定为项目完全重复。名称或大小相同只会提示可能相似，不会报为项目完全重复。</p>
                 </div></details>
                 <details class="action-menu"><summary class="button ghost">重复项处理</summary><div class="action-menu-popover"><button id="clear-duplicates" class="menu-button">清除可能重复项</button><button id="clear-exact-duplicates" class="menu-button">清除完全重复项</button><button id="confirm-all-duplicates" class="menu-button">同意全部重复项</button></div></details>
                 <details class="action-menu"><summary class="button ghost">清理队列</summary><div class="action-menu-popover"><button id="clear-completed" class="menu-button">清空已完成队列</button><button id="clear-cancelled" class="menu-button">清空已取消队列</button><button id="clear-queue" class="menu-button danger">一键清空队列…</button></div></details>
@@ -570,6 +569,7 @@
   <script src="ui-state.js"></script>
   <script src="i18n.js"></script>
   <script src="tag-autocomplete.js"></script>
+  <script src="update-dialog.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

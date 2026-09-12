@@ -10,7 +10,7 @@ Local-first batch archiver and searchable media vault for Windows.
 
 Local-first · Batch archiving · Media previews · Portable data
 
-![Version](https://img.shields.io/badge/version-4.5.18-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.0-d45f3c?style=flat-square)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 ![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
@@ -22,6 +22,12 @@ Local-first · Batch archiving · Media previews · Portable data
 </div>
 
 ---
+
+## AI / MCP integration
+
+Optional local MCP tools let AI import batches, query projects and manifests, poll progress, and continue, skip or retry after reviewing similarity evidence. Enable with `--enable-mcp`; disabled by default. AI intake keeps original files and existing warehouses require no migration. See [setup and tools](docs/MCP.md) · [AI documentation entry point](llms.txt).
+
+Large-project details avoid repeatedly reading whole project records. Media previews load near the visible area with bounded concurrent image reads.
 
 ## What kind of tool is this?
 
@@ -151,7 +157,7 @@ The source repository does not commit the large `ffmpeg.exe`. `dependency-lock.j
 ## Portable data layout
 
 ```text
-HamsterArchiver-v4.5.18-win-x64/
+HamsterArchiver-v4.6.0-win-x64/
 ├─ HamsterArchiver.exe
 ├─ tools/
 │  ├─ 7zip/

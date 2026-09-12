@@ -10,6 +10,24 @@
 // lets composed sentences such as “无法打开仓库：…” translate their inner labels.
 
 const exactSections = [
+  ['更新窗口', [
+    ['暂无正式发行版。', 'No stable release has been published.'],
+    ['更新说明过长，请在发布页查看全文。', 'These release notes are too long. Open the release page to read the full text.'],
+    ['发现新版本', 'New version available'],
+    ['更新内容', 'Release notes'],
+    ['当前版本', 'Current version'],
+    ['当前已是最新版本。', 'You are using the latest version.'],
+    ['下载并校验更新后再安装，用户数据会保留。', 'The update is downloaded and verified before installation. Your data is preserved.'],
+    ['部分历史更新说明未能加载，请在发布页查看完整记录。', 'Some release history could not be loaded. Open the release page for the complete record.'],
+    ['此版本没有匹配的更新包，请手动更新或打开发布页。', 'No matching update package is available. Update manually or open the release page.'],
+    ['此版本未提供当前语言的独立说明，以下显示原文。', 'This release has no separate notes in your language. The original text is shown below.'],
+    ['此版本未附带更新说明。', 'This release does not include release notes.'],
+    ['稍后', 'Later'],
+    ['打开发布页', 'Open release page'],
+    ['立即更新', 'Update now'],
+    ['正在准备更新…', 'Preparing update…'],
+    ['请重新检查更新。', 'Please check for updates again.']
+  ]],
   ['全局与品牌', [
     ['仓鼠症大结局', 'Hamster Archiver'],
     ['Hamster Archive', 'Hamster Archiver'],
@@ -267,7 +285,7 @@ const exactSections = [
     ['跳过后', 'After skipping'],
     ['在队列中删除对应项（日志中仍保留）', 'Remove the matching queue item (keep it in the log)'],
     ['在队列中保留对应项', 'Keep the matching queue item'],
-    ['只有完整清单中每个文件都有有效 MD5，且文件数量、相对路径、大小和 MD5 全部一致时，才会判定为项目完全重复。名称或大小相同只会提示可能相似，不会报为项目完全重复。', 'A project is reported as a complete project duplicate only when every file has a valid MD5 and the complete file count, relative paths, sizes and MD5 values all match. Matching names or sizes alone are only similarity hints.'],
+    ['等待下次入库', 'Waiting for next intake run'],
     ['重复项处理', 'Duplicate handling'],
     ['清除可能重复项', 'Clear possible duplicate items'],
     ['清除完全重复项', 'Clear complete duplicate items'],
@@ -583,6 +601,7 @@ const exactSections = [
     ['扫描未入队', 'Not queued from scan:'],
     ['这些内容不会移动。', 'These items will not be moved.'],
     ['正在读取完整目录和缩略图…', 'Reading the complete directory and thumbnails…'],
+    ['详情读取失败，请重新选择项目重试。', 'Could not load details. Select the project again to retry.'],
     ['仓库整理信息已保存', 'Warehouse details saved'],
     ['仓库已刷新', 'Warehouse refreshed'],
     ['仓库已复制并切换；原位置仍保留', 'Warehouse copied and switched; the original remains'],
@@ -961,7 +980,9 @@ const patternSections = [
     [/^卡顿规避：已跳过 (\d+) 个小于 (\d+) KB 的极小文件，不计算 MD5。$/, 'Performance safeguard: skipped MD5 calculation for $1 tiny files under $2 KB.'],
     [/^内容完全一致补充核验未完成，继续使用常规重复保护：(.+)$/, 'Additional identical-content verification did not finish; continuing with normal duplicate protection: $1'],
     [/^内容完全一致核验前源文件发生变化：(.+)$/, 'The source changed before identical-content verification: $1'],
-    [/^内容完全一致核验期间源文件发生变化：(.+)$/, 'The source changed during identical-content verification: $1']
+    [/^内容完全一致核验期间源文件发生变化：(.+)$/, 'The source changed during identical-content verification: $1'],
+    [/^已验证成品发布完成：同盘重命名 ([\d.]+) 个文件，用时 ([\d.]+) 毫秒。$/, 'Verified archive publication complete: renamed $1 file(s) on the same volume in $2 ms.'],
+    [/^已验证成品发布完成：跨盘复制 ([\d.]+) 个文件，用时 ([\d.]+) 毫秒。$/, 'Verified archive publication complete: copied $1 file(s) across volumes in $2 ms.']
   ]],
   ['进度与剩余时间', [
     [/^已完成 (\d+)\/(\d+) 项 · 预计还需 (\d+) 分钟$/, 'Completed $1/$2 items · estimated time remaining: $3 minutes'],
@@ -1174,6 +1195,10 @@ const stageFragmentSections = [
     ['正在生成逐文件清单与 MD5', 'Generating file manifest and MD5'],
     ['正在生成未压缩入库清单与 MD5', 'Generating uncompressed inventory manifest and MD5'],
     ['正在生成 MD5：', 'Generating MD5: '],
+    ['正在生成缩略图并整理入库信息', 'Generating thumbnails and organizing intake information'],
+    ['正在更新相似关系并写入仓库记录', 'Updating similarity relationships and saving warehouse records'],
+    ['正在移动已完成的源项目', 'Moving the completed source project'],
+    ['正在把已完成的源项目移入回收站', 'Moving the completed source project to the Recycle Bin'],
     ['正在核验内容完全一致：', 'Verifying identical content: '],
     ['正在筛选内容完全一致候选：', 'Filtering identical-content candidates: '],
     ['正在加密压缩', 'Encrypting and compressing'],
