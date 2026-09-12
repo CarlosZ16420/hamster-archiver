@@ -390,15 +390,23 @@ function saveCatalogRecords(database, records, sortIndexById) {
   return saveCatalog(database, records, { deleteMissing: false, sortIndexById });
 }
 
+const QUERY_IDS_STATEMENTS = {
+  'catalog_search_terms.term': 'SELECT record_id, COUNT(*) AS hits FROM catalog_search_terms WHERE term IN (%PLACEHOLDERS%) GROUP BY record_id ORDER BY hits DESC LIMIT ?',
+  'catalog_similarity_keys.candidate_key': 'SELECT record_id, COUNT(*) AS hits FROM catalog_similarity_keys WHERE candidate_key IN (%PLACEHOLDERS%) GROUP BY record_id ORDER BY hits DESC LIMIT ?'
+};
+
 function queryIdsByValues(database, table, column, values, limit = 2000) {
+  const statementTemplate = QUERY_IDS_STATEMENTS[table + '.' + column];
+  if (!statementTemplate) {
+    throw new Error('Unsupported table/column combination: ' + table + '.' + column);
+  }
   const normalized = [...new Set((values || []).filter(Boolean))];
   if (normalized.length === 0) return [];
   const placeholders = normalized.map(() => '?').join(', ');
-  return database.prepare(`
-    SELECT record_id, COUNT(*) AS hits FROM ${table}
-    WHERE ${column} IN (${placeholders})
-    GROUP BY record_id ORDER BY hits DESC LIMIT ?
-  `).all(...normalized, Math.max(1, Math.min(10000, Number(limit) || 2000))).map((row) => row.record_id);
+  const statement = statementTemplate.replace('%PLACEHOLDERS%', placeholders);
+  return database.prepare(statement)
+    .all(...normalized, Math.max(1, Math.min(10000, Number(limit) || 2000)))
+    .map((row) => row.record_id);
 }
 
 function findCatalogIdsByExactName(database, nameKey, limit = 20) {
