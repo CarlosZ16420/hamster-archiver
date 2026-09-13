@@ -22,7 +22,7 @@ ReadmeGlmversion.md export-ignore
 
 # 本地运行数据、日志、用户资料
 userdata/ export-ignore
-config/ export-ignore
+/config/ export-ignore
 saves/ export-ignore
 nuts/ export-ignore
 nuts-staging/ export-ignore
