@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.1",
+  "notes": {
+    "zh-CN": [
+      "新增免单独安装 Node.js 的 MCP 启动器和扩展应用操作。",
+      "AI 入库偏好与高风险确认流程完善；迁移保留恢复路径。",
+      "完善发行与更新基础设施；CNB 下载回退尚未配置启用。"
+    ],
+    "en-US": [
+      "Added a bundled-runtime MCP launcher and expanded application operations.",
+      "Improved AI intake preferences, high-risk confirmations and recoverable migration.",
+      "Improved release infrastructure; CNB download fallback remains unconfigured."
+    ]
+  }
+}

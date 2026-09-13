@@ -7,7 +7,7 @@
 
 把散乱的本地资源，整理成自己的可视化资源仓库。
 
-![Version](https://img.shields.io/badge/version-4.6.0-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.1-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -113,7 +113,7 @@
 2. 在“归档工作台”扫描目录，或拖入文件夹、视频，查看待处理内容。
 3. 想先做**本地整理**，点击“不压缩直接入库”；准备**打包备份**，填写“压缩后保存在”，点击“开始压缩入库”。完成后到“仓库”浏览和整理。
 
-便携版请保留完整目录，例如 `HamsterArchiver-v4.6.0-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供。
+便携版请保留完整目录，例如 `HamsterArchiver-v4.6.1-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供。
 
 ## AI 可以直接调用
 

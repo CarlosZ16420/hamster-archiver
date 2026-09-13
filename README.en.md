@@ -8,7 +8,7 @@
 
 Turn scattered local files into your own visual resource library.
 
-![Version](https://img.shields.io/badge/version-4.6.0-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.1-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -145,7 +145,7 @@ The application itself does not upload media. Metadata returned through MCP, suc
 2. In the archive workbench, scan a directory or drop folders and videos, then review the pending resources.
 3. For **local organization**, choose uncompressed intake. To **prepare backups**, set the archive output directory and start compressed intake. Open the library afterward to browse and organize the results.
 
-Keep the full portable directory, such as `HamsterArchiver-v4.6.0-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included.
+Keep the full portable directory, such as `HamsterArchiver-v4.6.1-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included.
 
 ## Frequently asked questions
 

@@ -67,6 +67,7 @@ test('release lookup returns null for a short page and rejects malformed pages',
 });
 
 test('preflight preserves published refusal and returns a draft through injected GitHub calls', () => {
+  const tag = `v${require('../package.json').version}`;
   const runnerFor = release => (command, args) => {
     if (command === 'git' && args[0] === 'status') return '';
     if (command === 'git' && args[0] === 'rev-parse') return 'abc123';
@@ -74,8 +75,8 @@ test('preflight preserves published refusal and returns a draft through injected
     if (command === 'gh' && args[0] === 'api' && args[1].includes('/releases?')) return JSON.stringify([release]);
     throw new Error(`unexpected call: ${command} ${args.join(' ')}`);
   };
-  assert.throws(() => preflight('CarlosZ16420/hamster-archiver', 'v4.6.0', runnerFor({ tag_name: 'v4.6.0', draft: false })), /already published/);
-  assert.equal(preflight('CarlosZ16420/hamster-archiver', 'v4.6.0', runnerFor({ tag_name: 'v4.6.0', draft: true })).draft, true);
+  assert.throws(() => preflight('CarlosZ16420/hamster-archiver', tag, runnerFor({ tag_name: tag, draft: false })), /already published/);
+  assert.equal(preflight('CarlosZ16420/hamster-archiver', tag, runnerFor({ tag_name: tag, draft: true })).draft, true);
 });
 
 test('draft resume skips identical assets and uploads only missing files', () => {
