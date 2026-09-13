@@ -4,13 +4,13 @@
 
 正式发行选择一次构建方式：默认 `npm run release`，或 `npm run release -- --mode local`。在需要发布的仓库工作树中执行；默认从该仓库的 origin 识别目标，也可明确指定 `--repo CarlosZ16420/hamster-archive` 或 `--repo CarlosZ16420/hamster-archiver`。目标远端标签必须与当前已提交 HEAD 完全一致，版本必须匹配 package.json；禁止移动历史标签。
 
-- 云端：显式触发 `package.yml`，执行完整检查、便携 ZIP/隔离启动验收、安装 EXE 构建以及两份 SHA-256 校验，然后直接上传四个文件到同仓库 Release 草稿。不会先下载到本机，也不依赖 Actions artifact 存储。
-- 本地：`npm run release -- --mode local` 执行相同完整构建和校验，直接从本机上传 Release 草稿，不触发云端打包。执行前准备依赖、Electron 运行时和锁定工具，见开发文档。该命令用于正式发行；日常维护后的手动测试 Current 使用 `npm run release:local`。
+- 云端：显式触发 `package.yml`，执行完整检查、便携 ZIP/隔离启动验收、安装 EXE 构建以及两份 SHA-256 校验，直接上传四个文件到同仓库 Release 草稿，并在完整后立即发布。产物不会先下载到本机，也不依赖 Actions artifact 存储。
+- 本地：只在云端任务已经停止且确实失败，或用户明确选择本地方式时，运行 `npm run release -- --mode local`。它执行相同完整构建和校验，上传完整草稿后立即发布，不触发云端打包。执行前准备依赖、Electron 运行时和锁定工具，见开发文档。该命令用于正式发行；日常维护后的手动测试 Current 使用 `npm run release:local`。
 - 云端任务最长运行 25 分钟；启动器连同排队默认最多等 30 分钟，超时请求取消并退出，提供明确的本地命令。不会无限查找运行、自动重复提交或暗中启动本地构建。切换前必须确认同版本云端任务已结束；本地入口会拒绝与活动云端任务同时发行。
 - Actions 分钟数/执行额度不足时，可直接选本地模式；仅 artifact 存储不足不妨碍直接上传 Release。GitHub 本身或登录不可用时，上传仍会失败，此时先保留本地产物并修复连接。
-- 任务成功必须具备 EXE、ZIP 及对应的两份校验文件。任何上传中断都只留下草稿，不把缺文件的版本公开。已发布 Release 一律拒绝覆盖；草稿已有同名同摘要文件则跳过，冲突则停止并提示检查，绝不覆盖不明文件。
+- 任务成功必须具备 EXE、ZIP 及对应的两份校验文件。任何上传中断都只留下草稿，不把缺文件的版本公开。已发布且完整的 Release 视为幂等成功，一律不重建或覆盖；已发布但不完整或为预发行时安全停止。草稿已有同名同摘要文件则跳过，冲突则停止并提示检查，绝不覆盖不明文件。
 - 上传中断后可保留现有构建，执行 `node scripts/release-publish.js upload --repo OWNER/REPO --tag vX.Y.Z` 继续上传，不必重新打包。若从云端部分草稿切换到本地新构建，应先检查并删除该未发布草稿中冲突的附件，再重试上传；不得删除历史正式 Release。
-- 成功后检查草稿页面并发布；应用的自动更新只读取正式 Release。安装版和便携版历史附件不受 Actions 清理影响。
+- 若发布入口发现完整草稿，先确认标签/提交、双语正文以及远端恰好四个非空且带 GitHub SHA-256 摘要的预期附件，然后直接发布，不重新构建、不读取本地产物、不重复上传；发布后只做一次远端状态回读。部分草稿才进入构建、续传和冲突核验。云端任务成功后，本地启动器接受“完整正式 Release”为成功状态，不再错误等待草稿。应用的自动更新只读取正式 Release，安装版和便携版历史附件不受 Actions 清理影响。
 
 Git 标签推送不再触发打包；两个仓库不会因同步同一版本而自动各打一次。普通 CI 仍自动运行。公开仓库仍只接受私有源码的受控快照，只有需要向公开用户发行时才选择公开仓库构建；不要同时对两个仓库启动同版本发布。
 
@@ -18,13 +18,13 @@ Git 标签推送不再触发打包；两个仓库不会因同步同一版本而�
 
 GitHub Release 是唯一权威发行源。CNB 只镜像同一正式版本的原始双语正文、便携 ZIP、安装 EXE 和对应两份 SHA-256，不在 CNB 重建产物，也不向 CNB 推送私有源码。已发布的 4.6.0 客户端没有 CNB 检查或下载回退能力；该能力只能由后续包含本实现的版本提供。
 
-应用始终先请求 GitHub；GitHub 成功（包括已经是最新版）时不请求 CNB。只有 GitHub 超时、连接失败、HTTP 错误（包括 404）或响应解析失败时才尝试 CNB，两边都失败才向用户报错。版本化只读配置 `src/config/update-providers.json` 随应用打包，当前 CNB 端点保持为空，不能宣称回退已对用户生效；确认真实目标后才可在后续版本填写。运行环境可用 `HAMSTER_CNB_LATEST_RELEASE_API`、`HAMSTER_CNB_RELEASES_API`、`HAMSTER_CNB_RELEASES_URL` 和 `HAMSTER_CNB_DOWNLOAD_HOSTS` 显式覆盖。缺失或不完整配置只会在 GitHub 失败后明确说明 CNB 已安全跳过。
+应用始终先请求 GitHub；GitHub 成功（包括已经是最新版）时不请求 CNB。只有 GitHub 超时、连接失败、HTTP 错误（包括 404）或响应解析失败时才尝试 CNB，两边都失败才向用户报错。版本化只读配置 `src/config/update-providers.json` 随应用打包，内置目标是公开仓库 `carlosz16420/hamster-archive`：通过匿名可访问的 `/releases/latest` 跳转取得正式版本标签，再使用 `/releases/latest/download/<文件名>` 下载便携 ZIP、安装 EXE 和对应 SHA-256；客户端不携带 CNB Token。CNB OpenAPI Release 元数据需要鉴权，因此不作为公开客户端的默认入口；该后备只提供 latest，历史列表标为不完整并链接公开发布页。运行环境仍可用 `HAMSTER_CNB_DISCOVERY_MODE`、`HAMSTER_CNB_LATEST_RELEASE_API`、`HAMSTER_CNB_RELEASES_API`、`HAMSTER_CNB_RELEASES_URL` 和 `HAMSTER_CNB_DOWNLOAD_HOSTS` 显式覆盖。下载和每一跳重定向继续受 CNB 主机白名单约束，实际文件必须通过 SHA-256 旁车校验。
 
-正式 GitHub Release 发布后，独立的 `sync-cnb-release.yml` 才具备镜像入口，但 CNB 写入默认关闭。只有真实目标、当前官方 API 契约、上传主机和 Token 权限已独立核实后，才可把仓库变量 `CNB_SYNC_ENABLED` 明确设为 `true`；未启用时 workflow 安全跳过并说明原因，脚本也不会发出 CNB 请求。workflow 的同步 job 和写入 step 同时限制为 `CarlosZ16420/hamster-archiver`，执行代码固定检出本次 workflow 的 `github.sha`，目标 Release 标签仅作为 GitHub API 参数；CNB Token 只注入同步步骤，失败不改变 GitHub 发布结果。脚本不再把环境声明当成权限证明：必须按当时 CNB 官方契约给 Token 配置实际所需权限并在启用前验证，不能声称脚本已验证授权。
+正式 GitHub Release 发布后，独立的 `sync-cnb-release.yml` 才具备镜像入口。CNB 写入由公开仓库变量 `CNB_SYNC_ENABLED=true` 显式启用；未启用时 workflow 安全跳过并说明原因。启用前仍必须独立核实真实目标、当前官方 API 契约、上传主机和 Token 实际权限。workflow 的同步 job 和写入 step 同时限制为 `CarlosZ16420/hamster-archiver`，执行代码固定检出本次 workflow 的 `github.sha`，目标 Release 标签仅作为 GitHub API 参数；CNB Token 只注入同步步骤，失败不改变 GitHub 发布结果。脚本不把环境声明当成权限证明。
 
-手动重试同一标签时，在环境中显式设置 `CNB_SYNC_ENABLED=true`、`CNB_REPO_SLUG`、`CNB_TOKEN` 和精确的 `CNB_UPLOAD_HOSTS`，再运行 `npm run release:sync:cnb -- --tag vX.Y.Z --github-repo CarlosZ16420/hamster-archiver --cnb-repo GROUP/REPO --make-latest false`；`CNB_API_BASE`、`CNB_WEB_BASE` 可覆盖经核实的 SaaS 基址。目标公开快照仓库必须已有同名标签。历史版本手动补同步默认 `makeLatest=false`，不会改变 CNB latest；只有确认目标就是当前最新正式版本时才显式传 `--make-latest true`，发布事件 workflow 会明确传入该值。脚本先创建或接续隐藏草稿，创建阶段始终保持 `make_latest=false`，只读取已发布 GitHub 正文和四附件并逐项校验名称、大小和 SHA-256；完整回读通过后才按显式 latest 选择发布 CNB Release。同名同摘要附件会跳过，正文、标题、大小或摘要冲突会停止且不覆盖。网络、上传或确认响应不明时先回读远端状态，再决定是否重试，不重新构建或盲目补传。当前 CNB 目标和协议尚未完成真实验证，因此保持默认关闭，不能宣称镜像或客户端回退已经生效。
+手动重试同一标签时，在环境中显式设置 `CNB_SYNC_ENABLED=true`、`CNB_REPO_SLUG`、`CNB_TOKEN` 和精确的 `CNB_UPLOAD_HOSTS`，再运行 `npm run release:sync:cnb -- --tag vX.Y.Z --github-repo CarlosZ16420/hamster-archiver --cnb-repo GROUP/REPO --make-latest false`；`CNB_API_BASE`、`CNB_WEB_BASE` 可覆盖经核实的 SaaS 基址。目标公开快照仓库必须已有同名标签。历史版本手动补同步默认 `makeLatest=false`，不会改变 CNB latest；只有确认目标就是当前最新正式版本时才显式传 `--make-latest true`，发布事件 workflow 会明确传入该值。脚本先创建或接续隐藏草稿，创建阶段始终保持 `make_latest=false`，只读取已发布 GitHub 正文和四附件并逐项校验名称、大小和 SHA-256；完整回读通过后才按显式 latest 选择发布 CNB Release。同名同摘要附件会跳过，正文、标题、大小或摘要冲突会停止且不覆盖。网络、上传或确认响应不明时先回读远端状态，再决定是否重试，不重新构建或盲目补传。公开客户端的匿名下载回退与同步 workflow 的写权限彼此独立：前者不使用 Token，后者的 Token 仍不得进入源码或发行包。
 
-Actions 页面也可手动运行：`tag` 填现有版本标签，`publish=true` 创建草稿。`publish=false` 只构建验证，允许 `tag=main`，不创建 Release。`retain_artifact` 默认关闭，确有临时下载需要才开启，保留 3 天；其上传失败不阻断已完成的 Release 草稿。不要用验证模式绕过正式发布的标签核验。
+Actions 页面也可手动运行：`tag` 填现有版本标签，`publish=true` 构建、上传并发布；若目标已有完整草稿则直接发布，若已有完整正式 Release 则幂等成功，两种情况都跳过构建。`publish=false` 只构建验证，允许 `tag=main`，不创建 Release。`retain_artifact` 默认关闭，确有临时下载需要才开启，保留 3 天；其上传失败不阻断已完成的正式 Release。不要用验证模式绕过正式发布的标签核验。
 
 ## 版本文件
 

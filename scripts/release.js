@@ -1,7 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
-const { completeDraft, getRelease, getReleaseByTag, preflight, run, upload } = require('./release-publish');
+const { completeDraft, completePublishedRelease, getReleaseByTag, publishCompleteDraft, releaseState, run, upload } = require('./release-publish');
 const version = require('../package.json').version;
 
 function optionsFrom(argv) {
@@ -38,11 +38,15 @@ async function cloud(options) {
       if (current.status === 'completed') {
         if (current.conclusion !== 'success') throw new Error(`Cloud build ${runId} ended: ${current.conclusion}.`);
         const release = getReleaseByTag(options.repo, options.tag);
-        if (!completeDraft(release, options.tag)) {
-          throw new Error('Cloud run succeeded but complete Release draft was not found.');
+        if (completePublishedRelease(release, options.tag)) {
+          console.log(`Cloud Release published: ${release.html_url}`);
+          return;
         }
-        console.log(`Complete draft: ${release.html_url}`);
-        return;
+        if (completeDraft(release, options.tag)) {
+          await publishCompleteDraft(options.repo, options.tag, release);
+          return;
+        }
+        throw new Error('Cloud run succeeded but neither a complete published Release nor a complete draft was found.');
       }
     }
     await delay(10000);
@@ -66,15 +70,20 @@ async function local(options) {
   for (const args of [['release:local', '--', '--full-checks'], ['build:installer']]) {
     run(process.execPath, [npmCli, 'run', ...args], { stdio: 'inherit', timeout: 1800000 });
   }
-  await upload(options.repo, options.tag);
+  const draft = await upload(options.repo, options.tag);
+  await publishCompleteDraft(options.repo, options.tag, draft);
 }
 
 async function main() {
   const options = optionsFrom(process.argv.slice(2));
   options.repo ||= run('gh', ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']);
-  const existing = preflight(options.repo, options.tag);
-  if (completeDraft(existing, options.tag)) {
-    console.log(`Complete draft already exists; no rebuild: ${existing.html_url}`);
+  const existing = releaseState(options.repo, options.tag);
+  if (existing.state === 'complete-published') {
+    console.log(`Release is already published and complete: ${existing.release.html_url}`);
+    return;
+  }
+  if (existing.state === 'complete-draft') {
+    await publishCompleteDraft(options.repo, options.tag, existing.release);
     return;
   }
   try {
@@ -82,7 +91,7 @@ async function main() {
     else await local(options);
   } catch (error) {
     console.error(`Release did not complete: ${error.message}`);
-    console.error(`Inspect Actions and any draft first. Local fallback: npm run release -- --mode local --repo ${options.repo}`);
+    console.error(`Inspect the Actions run and remote Release state first. Use local fallback only after the cloud run has stopped and no complete published Release exists: npm run release -- --mode local --repo ${options.repo}`);
     throw error;
   }
 }

@@ -50,17 +50,28 @@ jobs:
       - name: Set isolated build directory
         shell: pwsh
         run: '"HAMSTER_LOCAL_ROOT=$env:RUNNER_TEMP\HamsterArchiver-Local" >> $env:GITHUB_ENV'
-      - name: Validate target before building
+      - name: Inspect Release state before building
+        id: release_state
+        if: inputs.publish
         shell: pwsh
         run: |
-          if ($env:RELEASE_PUBLISH -eq 'true') {
-            node scripts/release-publish.js preflight --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-      - run: npm ci
+          $state = node scripts/release-publish.js state --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "value=$state" >> $env:GITHUB_OUTPUT
+      - name: Publish an already complete draft without rebuilding
+        if: inputs.publish && steps.release_state.outputs.value == 'complete-draft'
+        run: node scripts/release-publish.js publish --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
+      - name: Report an already published complete Release
+        if: inputs.publish && steps.release_state.outputs.value == 'complete-published'
+        shell: pwsh
+        run: "'The requested GitHub Release was already published and complete; no rebuild or upload was needed.' >> $env:GITHUB_STEP_SUMMARY"
+      - if: ${{ !inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft' }}
+        run: npm ci
       - name: Install locked Electron runtime
+        if: ${{ !inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft' }}
         run: node node_modules/electron/install.js
       - name: Prepare locked bundled tools
+        if: ${{ !inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft' }}
         shell: pwsh
         run: |
           $bootstrap = "${env:ProgramFiles}\7-Zip\7z.exe"
@@ -70,26 +81,23 @@ jobs:
           npm run tools:prepare
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build portable package with full checks
+        if: ${{ !inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft' }}
         run: npm run release:local -- --full-checks
       - name: Build installer
+        if: ${{ !inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft' }}
         run: npm run build:installer
       - name: Verify complete release files
+        if: ${{ !inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft' }}
         run: node scripts/release-publish.js verify
       - name: Upload Release draft directly without Actions storage
-        if: inputs.publish
+        if: inputs.publish && (steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft')
         shell: pwsh
         run: node scripts/release-publish.js upload --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
       - name: Publish verified GitHub Release
-        if: inputs.publish
-        shell: pwsh
-        run: |
-          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false --latest
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
-          if ($release.draft -or $release.prerelease -or $release.assets.Count -ne 4) { throw 'Published Release verification failed.' }
-          'GitHub Release is published with four verified attachments.' >> $env:GITHUB_STEP_SUMMARY
+        if: inputs.publish && (steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft')
+        run: node scripts/release-publish.js publish --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
       - name: Optionally retain temporary package
-        if: inputs.retain_artifact
+        if: inputs.retain_artifact && (!inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft')
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -103,4 +111,4 @@ jobs:
         if: failure()
         shell: pwsh
         run: |
-          'Cloud build failed. No release was published. Use npm run release -- --mode local after this run has stopped. Partial uploads remain drafts; published releases are never overwritten.' >> $env:GITHUB_STEP_SUMMARY
+          'Cloud release workflow failed. Inspect the remote Release state first: a complete published Release needs no fallback, and a complete draft can be published directly. Use local mode only after this run has stopped and only when the cloud build or upload genuinely did not complete. Published releases are never overwritten.' >> $env:GITHUB_STEP_SUMMARY

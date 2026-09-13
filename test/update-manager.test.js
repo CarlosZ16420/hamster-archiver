@@ -211,10 +211,11 @@ test('GitHub and CNB downloads use provider-specific host allowlists, including 
 
   const cnbConfig = {
     configured: true,
+    discoveryMode: 'api',
     latestApiUrl: 'https://api.cnb.test/acme/app/-/releases/latest',
     releasesApiUrl: 'https://api.cnb.test/acme/app/-/releases',
     releasesUrl: 'https://cnb.test/acme/app/-/releases',
-    configSchemaVersion: 1,
+    configSchemaVersion: 2,
     downloadHosts: ['downloads.cnb.test', 'cdn.cnb.test']
   };
   const release = { provider: 'cnb', source: { provider: 'cnb', ...cnbConfig } };
@@ -245,10 +246,11 @@ test('GitHub and CNB downloads use provider-specific host allowlists, including 
 test('CNB download metadata must match the locally configured source exactly', () => {
   const config = {
     configured: true,
+    discoveryMode: 'api',
     latestApiUrl: 'https://api.cnb.test/a/latest',
     releasesApiUrl: 'https://api.cnb.test/a/releases',
     releasesUrl: 'https://cnb.test/a/releases',
-    configSchemaVersion: 1,
+    configSchemaVersion: 2,
     downloadHosts: ['cnb.test']
   };
   assert.throws(() => resolveDownloadTrust({

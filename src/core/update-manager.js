@@ -268,7 +268,7 @@ function resolveDownloadTrust(release, providerConfig, environment = process.env
   const config = providerConfig || resolveCnbConfig(undefined, environment);
   if (!config?.configured) throw new Error(config?.reason || 'CNB 下载信任配置不可用。');
   if (release?.source?.provider !== 'cnb') throw new Error('CNB 更新元数据缺少受信任的来源标记。');
-  for (const key of ['latestApiUrl', 'releasesApiUrl', 'releasesUrl', 'configSchemaVersion']) {
+  for (const key of ['latestApiUrl', 'releasesApiUrl', 'releasesUrl', 'configSchemaVersion', 'discoveryMode']) {
     if (release.source[key] !== config[key]) throw new Error('CNB 更新元数据与本机信任配置不一致。');
   }
   return { provider, hosts: new Set(config.downloadHosts) };

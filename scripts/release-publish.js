@@ -67,7 +67,7 @@ function getReleaseByTag(repo, tag, commandRunner = run) {
 
 function preflight(repo, tag, commandRunner = run) {
   validateTarget(repo, tag, commandRunner);
-  const release = getRelease(repo, tag, commandRunner);
+  const release = getReleaseByTag(repo, tag, commandRunner);
   if (release && !release.draft) throw new Error('This version is already published; historical releases will not be overwritten.');
   return release;
 }
@@ -117,9 +117,29 @@ function expectedReleaseAssetNames(tag) {
   return names.flatMap(name => [name, `${name}.sha256`]);
 }
 
+function hasCompleteReleaseAssets(release, tag) {
+  const expected = expectedReleaseAssetNames(tag);
+  const assets = Array.isArray(release?.assets) ? release.assets : [];
+  return assets.length === expected.length && expected.every(name =>
+    assets.some(asset => asset.name === name && asset.size > 0 && /^sha256:[a-f0-9]{64}$/.test(asset.digest || '')));
+}
+
 function completeDraft(release, tag) {
-  return Boolean(release?.draft && expectedReleaseAssetNames(tag).every(name =>
-    release.assets?.some(asset => asset.name === name && asset.size > 0 && /^sha256:[a-f0-9]{64}$/.test(asset.digest || ''))));
+  return Boolean(release?.draft && !release.prerelease && hasCompleteReleaseAssets(release, tag));
+}
+
+function completePublishedRelease(release, tag) {
+  return Boolean(release && !release.draft && !release.prerelease && hasCompleteReleaseAssets(release, tag));
+}
+
+function releaseState(repo, tag, commandRunner = run) {
+  validateTarget(repo, tag, commandRunner);
+  const release = getReleaseByTag(repo, tag, commandRunner);
+  if (!release) return { state: 'missing', release: null };
+  if (completeDraft(release, tag)) return { state: 'complete-draft', release };
+  if (release.draft) return { state: 'partial-draft', release };
+  if (completePublishedRelease(release, tag)) return { state: 'complete-published', release };
+  throw new Error('A published Release exists but is incomplete or marked as a prerelease; it will not be overwritten.');
 }
 
 async function readReleaseNotes(repo, tag, sourceRoot = root) {
@@ -137,8 +157,22 @@ async function readReleaseNotes(repo, tag, sourceRoot = root) {
 
 function assertDraftNotes(release, body) {
   if (release && String(release.body || '').replace(/\r\n?/g, '\n').trim() !== body.replace(/\r\n?/g, '\n').trim()) {
-    throw new Error('Draft notes differ from the reviewed release notes. Reconcile the draft before uploading assets.');
+    throw new Error('Release notes differ from the reviewed release notes. Reconcile them before continuing.');
   }
+}
+
+async function publishCompleteDraft(repo, tag, release = getReleaseByTag(repo, tag), commandRunner = run, sourceRoot = root) {
+  if (!completeDraft(release, tag)) throw new Error('A complete Release draft was not found.');
+  const { body } = await readReleaseNotes(repo, tag, sourceRoot);
+  assertDraftNotes(release, body);
+  commandRunner('gh', ['release', 'edit', tag, '--repo', repo, '--draft=false', '--latest']);
+  const published = getReleaseByTag(repo, tag, commandRunner);
+  assertDraftNotes(published, body);
+  if (!completePublishedRelease(published, tag)) {
+    throw new Error('GitHub Release publication was not visible as a complete stable release during read-back.');
+  }
+  console.log(`Published GitHub Release (EXE + ZIP + two checksums): ${published.html_url}`);
+  return published;
 }
 
 async function upload(repo, tag) {
@@ -160,20 +194,26 @@ async function upload(repo, tag) {
   assertDraftNotes(final, body);
   if (!final?.draft || planUploads(assets, final.assets || []).length) throw new Error('Release draft verification failed.');
   console.log(`Complete Release draft (EXE + ZIP + two checksums): ${final.html_url}`);
-  console.log('Review the draft and publish it when ready. Nothing was published automatically.');
+  console.log('The complete draft is ready for immediate publication by the release command.');
+  return final;
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.command === 'verify') console.log(JSON.stringify(await verifyFiles(), null, 2));
+  else if (options.command === 'state') console.log(releaseState(options.repo, options.tag).state);
   else if (options.command === 'preflight') {
     if (completeDraft(preflight(options.repo, options.tag), options.tag)) {
-      throw new Error('A complete draft already exists. Review it instead of building again.');
+      throw new Error('A complete draft already exists. Publish it directly instead of building again.');
     }
   }
   else if (options.command === 'upload') await upload(options.repo, options.tag);
-  else throw new Error('Use preflight, verify, or upload.');
+  else if (options.command === 'publish') {
+    validateTarget(options.repo, options.tag);
+    await publishCompleteDraft(options.repo, options.tag);
+  }
+  else throw new Error('Use state, preflight, verify, upload, or publish.');
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, parseArgs, planUploads, preflight, run, upload, validateTarget, verifyFiles };
+module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, completePublishedRelease, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, parseArgs, planUploads, preflight, publishCompleteDraft, releaseState, run, upload, validateTarget, verifyFiles };

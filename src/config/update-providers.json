@@ -1,9 +1,12 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "cnb": {
-    "latestApiUrl": "",
+    "discoveryMode": "release-page-redirect",
+    "latestApiUrl": "https://cnb.cool/carlosz16420/hamster-archive/-/releases/latest",
     "releasesApiUrl": "",
-    "releasesUrl": "",
-    "downloadHosts": []
+    "releasesUrl": "https://cnb.cool/carlosz16420/hamster-archive/-/releases",
+    "downloadHosts": [
+      "asset.cnb.cool"
+    ]
   }
 }

@@ -42,28 +42,35 @@ function parseHostList(value) {
 }
 
 function resolveCnbConfig(cnb = UPDATE_PROVIDER_CONFIG.cnb, environment = process.env) {
-  if (UPDATE_PROVIDER_CONFIG.schemaVersion !== 1) {
+  if (UPDATE_PROVIDER_CONFIG.schemaVersion !== 2) {
     return { configured: false, reason: '内置更新来源配置版本不受支持，已安全跳过 CNB 回退。' };
   }
+  const discoveryMode = environment.HAMSTER_CNB_DISCOVERY_MODE || cnb?.discoveryMode || 'api';
   const latestApiUrl = environment.HAMSTER_CNB_LATEST_RELEASE_API || cnb?.latestApiUrl || '';
   const releasesApiUrl = environment.HAMSTER_CNB_RELEASES_API || cnb?.releasesApiUrl || '';
   const releasesUrl = environment.HAMSTER_CNB_RELEASES_URL || cnb?.releasesUrl || '';
-  if (!latestApiUrl && !releasesApiUrl && !releasesUrl) {
-    return { configured: false, reason: '未配置 CNB Release API、历史 API 和发布页，已安全跳过 CNB 回退。' };
+  if (!['api', 'release-page-redirect'].includes(discoveryMode)) {
+    return { configured: false, reason: 'CNB 回退配置使用了不受支持的版本发现方式。' };
   }
-  if (!latestApiUrl || !releasesApiUrl || !releasesUrl) {
-    return { configured: false, reason: 'CNB 回退配置不完整；必须同时配置最新 Release API、历史 API 和发布页。' };
+  if (!latestApiUrl && !releasesApiUrl && !releasesUrl) {
+    return { configured: false, reason: '未配置 CNB 最新版本地址和发布页，已安全跳过 CNB 回退。' };
+  }
+  if (!latestApiUrl || !releasesUrl || (discoveryMode === 'api' && !releasesApiUrl)) {
+    return { configured: false, reason: discoveryMode === 'api'
+      ? 'CNB API 回退配置不完整；必须同时配置最新 Release API、历史 API 和发布页。'
+      : 'CNB 公开发布页回退配置不完整；必须同时配置 latest 跳转地址和发布页。' };
   }
   try {
     const normalized = {
       configured: true,
+      discoveryMode,
       latestApiUrl: requireHttpsUrl(latestApiUrl, 'CNB 最新 Release API'),
-      releasesApiUrl: requireHttpsUrl(releasesApiUrl, 'CNB Release 历史 API'),
+      releasesApiUrl: releasesApiUrl ? requireHttpsUrl(releasesApiUrl, 'CNB Release 历史 API') : '',
       releasesUrl: requireHttpsUrl(releasesUrl, 'CNB 发布页')
     };
     normalized.configSchemaVersion = UPDATE_PROVIDER_CONFIG.schemaVersion;
     normalized.downloadHosts = parseHostList(environment.HAMSTER_CNB_DOWNLOAD_HOSTS || cnb?.downloadHosts);
-    for (const url of [normalized.latestApiUrl, normalized.releasesApiUrl, normalized.releasesUrl]) {
+    for (const url of [normalized.latestApiUrl, normalized.releasesApiUrl, normalized.releasesUrl].filter(Boolean)) {
       normalized.downloadHosts.push(new URL(url).hostname.toLowerCase());
     }
     normalized.downloadHosts = [...new Set(normalized.downloadHosts)];
@@ -120,12 +127,57 @@ function createGithubAdapter() {
 }
 
 function createCnbAdapter(config) {
+  const redirectDiscovery = config.discoveryMode === 'release-page-redirect';
   return {
     provider: 'cnb',
     label: 'CNB',
     ...config,
-    headers: { Accept: 'application/vnd.cnb.api+json', 'User-Agent': USER_AGENT },
-    historyUrl: (page) => appendQuery(config.releasesApiUrl, { page, page_size: 100 })
+    headers: { Accept: redirectDiscovery ? 'text/html' : 'application/vnd.cnb.api+json', 'User-Agent': USER_AGENT },
+    historyUrl: config.releasesApiUrl ? (page) => appendQuery(config.releasesApiUrl, { page, page_size: 100 }) : null
+  };
+}
+
+function releaseFromCnbRedirect(response, adapter) {
+  const location = response.headers?.get?.('location');
+  if (!location) throw new Error('CNB latest 跳转缺少 Location');
+  let target;
+  let releases;
+  try {
+    target = new URL(location, adapter.latestApiUrl);
+    releases = new URL(adapter.releasesUrl);
+  } catch {
+    throw new Error('CNB latest 跳转地址无效');
+  }
+  const prefix = `${releases.pathname.replace(/\/$/, '')}/tag/`;
+  if (target.protocol !== 'https:' || target.username || target.password || target.origin !== releases.origin ||
+      !target.pathname.startsWith(prefix)) {
+    throw new Error('CNB latest 跳转离开了配置的公开 Release 页面');
+  }
+  let tag;
+  try { tag = decodeURIComponent(target.pathname.slice(prefix.length)); } catch { tag = ''; }
+  if (!/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
+    throw new Error('CNB latest 跳转缺少有效版本标签');
+  }
+  const version = tag.slice(1);
+  const names = [
+    `HamsterArchiver-v${version}-win-x64.zip`,
+    `HamsterArchiver-Setup-v${version}-win-x64.exe`
+  ];
+  const downloadBase = `${adapter.releasesUrl.replace(/\/$/, '')}/latest/download/`;
+  const assets = names.flatMap(name => [name, `${name}.sha256`]).map(name => ({
+    name,
+    browser_download_url: `${downloadBase}${encodeURIComponent(name)}`,
+    size: 0
+  }));
+  return {
+    tag_name: tag,
+    name: `Hamster Archiver ${tag}`,
+    body: '',
+    published_at: '',
+    draft: false,
+    prerelease: false,
+    html_url: target.href,
+    assets
   };
 }
 
@@ -134,11 +186,15 @@ async function fetchLatestRelease(adapter, fetchImpl, timeoutMs) {
   try {
     response = await fetchImpl(adapter.latestApiUrl, {
       headers: adapter.headers,
+      redirect: adapter.discoveryMode === 'release-page-redirect' ? 'manual' : 'follow',
       signal: AbortSignal.timeout(timeoutMs)
     });
   } catch (error) {
     const kind = error.name === 'TimeoutError' || error.name === 'AbortError' ? '请求超时' : `连接失败：${error.message}`;
     throw new Error(`${adapter.label} ${kind}`);
+  }
+  if (adapter.discoveryMode === 'release-page-redirect' && [301, 302, 303, 307, 308].includes(response.status)) {
+    return releaseFromCnbRedirect(response, adapter);
   }
   if (!response.ok) throw new Error(`${adapter.label} 更新检查失败（HTTP ${response.status}）`);
   let release;
@@ -156,6 +212,9 @@ async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeo
   const versions = new Map([[latest.version, latest]]);
   const signal = AbortSignal.timeout(timeoutMs);
   let complete = false;
+  if (typeof adapter.historyUrl !== 'function') {
+    return { releases: [...versions.values()], historyIncomplete: true };
+  }
   try {
     for (let page = 1; page <= 10; page += 1) {
       const response = await fetchImpl(adapter.historyUrl(page), { headers: adapter.headers, signal });
@@ -219,6 +278,7 @@ function normalizeRelease({ release, adapter, currentVersion, distributionMode, 
       releasesApiUrl: adapter.releasesApiUrl,
       releasesUrl: adapter.releasesUrl,
       configSchemaVersion: adapter.configSchemaVersion || 1,
+      discoveryMode: adapter.discoveryMode || 'api',
       downloadHosts: [...adapter.downloadHosts]
     }
   };
@@ -273,6 +333,7 @@ module.exports = {
   createGithubAdapter,
   displayRelease,
   normalizeRelease,
+  releaseFromCnbRedirect,
   resolveCnbConfig,
   selectReleaseAsset
 };

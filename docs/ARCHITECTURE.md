@@ -25,7 +25,7 @@ Main process
 
 ## 数据边界
 
-更新检查通过来源适配器统一生成版本、说明、历史、附件、摘要、`provider` 与发布页。版本化只读配置位于 `src/config/update-providers.json` 并随包进入完整性清单；当前真实 CNB 目标未提供，因此内置字段为空，环境变量可显式覆盖。主进程先查权威 GitHub，只有网络、超时、HTTP 或解析失败才查已配置 CNB；GitHub 成功（含已最新）即短路。手动检查从同一成功来源分页获取历史（100 条/页，最多 10 页，共用超时）；历史失败保留 latest。渲染层 `update-dialog.js` 负责安全呈现双语 Markdown 子集，主进程缓存包含来源标记的下载元数据；安装 IPC 仅接收目标版本并校验缓存，不接受渲染层提供地址。下载管理器按 `provider` 使用相互独立的主机白名单，所有重定向均使用 manual 模式并在请求下一跳前校验 `Location` 主机，仍执行版本、manifest、SHA-256 和回滚约束。静默检查不弹窗、不加载历史，也不覆盖用户已查看的安装目标。
+更新检查通过来源适配器统一生成版本、说明、历史、附件、摘要、`provider` 与发布页。版本化只读配置位于 `src/config/update-providers.json` 并随包进入完整性清单；内置 CNB 目标使用公开 Release 页的 latest 跳转发现版本，并从公开 latest/download 直链取得附件和 SHA-256，不向客户端提供 Token。主进程先查权威 GitHub，只有网络、超时、HTTP 或解析失败才查 CNB；GitHub 成功（含已最新）即短路。GitHub 手动检查从同一来源分页获取历史（100 条/页，最多 10 页，共用超时）；CNB 公开回退不调用需鉴权的 OpenAPI，保留 latest 并把历史标为不完整。渲染层 `update-dialog.js` 负责安全呈现双语 Markdown 子集，主进程缓存包含来源标记的下载元数据；安装 IPC 仅接收目标版本并校验缓存，不接受渲染层提供地址。下载管理器按 `provider` 使用相互独立的主机白名单，所有重定向均使用 manual 模式并在请求下一跳前校验 `Location` 主机，仍执行版本、manifest、SHA-256 和回滚约束。静默检查不弹窗、不加载历史，也不覆盖用户已查看的安装目标。
 
 打包应用通过同目录 `user-data-location.json` 解析用户数据；没有指针时保持普通便携版的同目录 `userdata/` 行为。本项目维护机上的 `builds/current` 使用相对指针连接仓库外 `data/production`。开发模式固定使用仓库外 `data/development`，不会再读写源码根目录。
 
@@ -37,7 +37,7 @@ Main process
 
 可选 MCP 入口由 `src/core/mcp-server.js` 在显式启用后监听本机随机端口；发行包根目录的薄 `.cmd` 使用 Electron 内置 Node 运行 `mcp-client.js`，自动启动后台主进程或通过 Electron 单实例事件复用已运行的普通实例，不建立第二个仓库写入者。stdio 客户端用租约心跳管理后台实例生命周期，旧连接文件不会阻止新会话恢复；`--show-ui` 才主动显示窗口。`mcp-tools.js` 只公开发现、描述和调用三个紧凑工具，`mcp-capabilities.js` 验证参数并复用同一个 QueueManager，主进程把界面、更新、受控路径和用户数据迁移的真实应用服务接入能力层。随机连接凭证只保存在用户数据区 `mcp/connection.json`。AI 任务增加可选请求标识和源文件处理快照，沿用旧 JSON 存储，无数据库迁移。接口通过字段白名单、分页、并发写入限制和一次性状态确认令牌控制返回与决策范围。详见 [MCP](MCP.md)。
 
-`scripts/build-release.js` 只写入仓库外 staging。`scripts/release-local.js` 从干净提交构建、检查、打包、烟雾启动，再原子提升为 current；旧 current 进入 history。源码根目录不保存 Electron 运行时副本。
+`scripts/build-release.js` 只写入仓库外 staging。`scripts/release-local.js` 从干净提交构建、检查、打包、烟雾启动，再原子提升为 current；旧 current 进入 history。每次功能维护在私人 main 推送后刷新 Current。正式 Release 入口先识别远端状态：完整草稿直接发布，完整正式 Release 幂等结束，仅缺失或部分草稿进入云端构建和续传；本地正式构建只在云端失败且任务停止后显式执行。源码根目录不保存 Electron 运行时副本。
 
 每个发行包从 `docs/releases/release-summary-vX.Y.Z.json` 把中英文更新内容写入 `release-manifest.json`。在线检查读取成功来源的 Release 正文，手动 ZIP 读取包内清单；安装版在线升级选择同版本 Setup EXE 并校验同来源 SHA-256，手动升级只接受严格命名且高于当前版本的 Setup EXE。CNB 同步是 GitHub 正式发布后的独立两阶段流程，并采用默认拒绝写入边界：目标、当前官方 API 契约、上传主机和 Token 实际权限未独立验证前，`CNB_SYNC_ENABLED` 保持关闭，脚本不把权限声明字符串视为授权证明。启用后只能创建/接续草稿，复制权威正文和四个已校验附件，完整回读后再发布；创建草稿永不提升 latest，历史补同步默认也不提升，只有调用方确认目标为当前最新正式版本时才显式选择。workflow 固定运行 `github.sha` 中的同步代码，标签仅用于 API 选择；同步不参与构建，也不推送源码。上传或发布响应不明时先按名称、大小和 SHA-256 回读，确认缺失后才重试。两种发行形态都会在启动更新助手或安装程序前，把受限长度的说明写入本次用户数据区 `updates/` 运行目录。新版本只接受该受信任目录且目标版本与自身一致的提示文件，在首次启动时显示后移除本次临时目录，不新增长期用户状态。
 

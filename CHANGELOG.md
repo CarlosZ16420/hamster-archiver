@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Release automation now publishes complete drafts immediately, treats an already complete published Release as success, and keeps local formal builds as an explicit fallback after a stopped cloud failure.
+- The app now falls back to the public CNB latest redirect and tokenless release downloads, with the matching SHA-256 sidecar, when GitHub update checks are unavailable.
+
 ## 4.6.1
 
 # Hamster Archiver 4.6.1

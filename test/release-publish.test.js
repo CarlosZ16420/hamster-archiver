@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, planUploads, parseArgs, preflight } = require('../scripts/release-publish');
+const { completeDraft, completePublishedRelease, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, planUploads, parseArgs, preflight, publishCompleteDraft, releaseState } = require('../scripts/release-publish');
 const { optionsFrom, findRequest } = require('../scripts/release');
 const { readReleaseNotes, assertDraftNotes } = require('../scripts/release-publish');
 const fs = require('node:fs/promises');
@@ -27,7 +27,7 @@ test('public releases cannot fall back to latest private patch notes or empty tr
 });
 
 test('draft continuation and read-back reject stale release text', () => {
-  assert.throws(() => assertDraftNotes({ body: 'Old patch notes' }, 'Cumulative notes'), /Draft notes differ/);
+  assert.throws(() => assertDraftNotes({ body: 'Old patch notes' }, 'Cumulative notes'), /Release notes differ/);
   assert.doesNotThrow(() => assertDraftNotes({ body: '## 中文\r\n说明\r\n' }, '## 中文\n说明\n'));
 });
 
@@ -106,6 +106,69 @@ test('release publication and CNB mirroring share the exact four expected attach
     'HamsterArchiver-Setup-v4.6.1-win-x64.exe',
     'HamsterArchiver-Setup-v4.6.1-win-x64.exe.sha256'
   ]);
+});
+
+function completeRelease(tag, draft) {
+  return {
+    tag_name: tag,
+    draft,
+    prerelease: false,
+    body: '## 中文\n完整说明。\n## English\nComplete notes.',
+    html_url: `https://github.test/releases/tag/${tag}`,
+    assets: expectedReleaseAssetNames(tag).map((name, index) => ({
+      name,
+      size: index + 1,
+      digest: `sha256:${String(index + 1).repeat(64)}`
+    }))
+  };
+}
+
+test('complete means exactly four verified assets in either draft or published state', () => {
+  const tag = 'v4.6.1';
+  const draft = completeRelease(tag, true);
+  assert.equal(hasCompleteReleaseAssets(draft, tag), true);
+  assert.equal(completeDraft(draft, tag), true);
+  assert.equal(completePublishedRelease(draft, tag), false);
+  assert.equal(completePublishedRelease({ ...draft, draft: false }, tag), true);
+  assert.equal(hasCompleteReleaseAssets({ ...draft, assets: [...draft.assets, { name: 'unexpected.bin', size: 1, digest: `sha256:${'a'.repeat(64)}` }] }, tag), false);
+});
+
+test('release state treats complete published releases as success and complete drafts as publishable', () => {
+  const tag = `v${require('../package.json').version}`;
+  const runnerFor = release => (command, args) => {
+    if (command === 'git' && args[0] === 'status') return '';
+    if (command === 'git' && args[0] === 'rev-parse') return 'abc123';
+    if (command === 'gh' && args[0] === 'api' && args[1].includes('/commits/')) return JSON.stringify({ sha: 'abc123' });
+    if (command === 'gh' && args[0] === 'api' && args[1].includes('/releases/tags/')) return JSON.stringify(release);
+    throw new Error(`unexpected call: ${command} ${args.join(' ')}`);
+  };
+  assert.equal(releaseState('CarlosZ16420/hamster-archive', tag, runnerFor(completeRelease(tag, true))).state, 'complete-draft');
+  assert.equal(releaseState('CarlosZ16420/hamster-archive', tag, runnerFor(completeRelease(tag, false))).state, 'complete-published');
+  assert.throws(() => releaseState('CarlosZ16420/hamster-archive', tag, runnerFor({ ...completeRelease(tag, false), assets: [] })), /incomplete/);
+});
+
+test('a complete draft publishes directly with notes read-back and no local artifact verification', async () => {
+  const tag = 'v1.0.0';
+  const sourceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-direct-publish-'));
+  try {
+    const notesDir = path.join(sourceRoot, 'docs', 'releases');
+    await fs.mkdir(notesDir, { recursive: true });
+    await fs.writeFile(path.join(notesDir, `release-notes-${tag}.md`), '## 中文\n完整说明。\n## English\nComplete notes.');
+    let release = completeRelease(tag, true);
+    const calls = [];
+    const runner = (command, args) => {
+      calls.push([command, ...args]);
+      if (command === 'gh' && args[0] === 'release' && args[1] === 'edit') {
+        release = { ...release, draft: false };
+        return '';
+      }
+      if (command === 'gh' && args[0] === 'api' && args[1].includes('/releases/tags/')) return JSON.stringify(release);
+      throw new Error(`unexpected call: ${command} ${args.join(' ')}`);
+    };
+    const published = await publishCompleteDraft('CarlosZ16420/hamster-archive', tag, release, runner, sourceRoot);
+    assert.equal(published.draft, false);
+    assert.equal(calls.filter(call => call[0] === 'gh' && call[1] === 'release').length, 1);
+  } finally { await fs.rm(sourceRoot, { recursive: true, force: true }); }
 });
 
 test('draft resume refuses conflicting or unverifiable files without overwriting', () => {

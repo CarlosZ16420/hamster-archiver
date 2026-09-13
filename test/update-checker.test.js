@@ -199,21 +199,23 @@ test('update metadata ignores legacy or unrelated ZIP assets', async () => {
 });
 
 const cnbConfig = {
+  discoveryMode: 'api',
   latestApiUrl: 'https://api.cnb.test/acme/hamster/-/releases/latest',
   releasesApiUrl: 'https://api.cnb.test/acme/hamster/-/releases',
   releasesUrl: 'https://cnb.test/acme/hamster/-/releases',
   downloadHosts: ['downloads.cnb.test']
 };
 
-test('bundled CNB endpoint configuration is versioned, read-only and empty until a real target is supplied', () => {
-  assert.equal(UPDATE_PROVIDER_CONFIG.schemaVersion, 1);
+test('bundled CNB endpoint configuration uses the verified public Release redirect without a token', () => {
+  assert.equal(UPDATE_PROVIDER_CONFIG.schemaVersion, 2);
   assert.deepEqual(UPDATE_PROVIDER_CONFIG.cnb, {
-    latestApiUrl: '',
+    discoveryMode: 'release-page-redirect',
+    latestApiUrl: 'https://cnb.cool/carlosz16420/hamster-archive/-/releases/latest',
     releasesApiUrl: '',
-    releasesUrl: '',
-    downloadHosts: []
+    releasesUrl: 'https://cnb.cool/carlosz16420/hamster-archive/-/releases',
+    downloadHosts: ['asset.cnb.cool']
   });
-  assert.equal(resolveCnbConfig(undefined, {}).configured, false);
+  assert.equal(resolveCnbConfig(undefined, {}).configured, true);
   const overridden = resolveCnbConfig({ latestApiUrl: 'https://stale.test/latest' }, {
     HAMSTER_CNB_LATEST_RELEASE_API: cnbConfig.latestApiUrl,
     HAMSTER_CNB_RELEASES_API: cnbConfig.releasesApiUrl,
@@ -222,7 +224,7 @@ test('bundled CNB endpoint configuration is versioned, read-only and empty until
   });
   assert.equal(overridden.configured, true);
   assert.equal(overridden.latestApiUrl, cnbConfig.latestApiUrl);
-  assert.equal(overridden.configSchemaVersion, 1);
+  assert.equal(overridden.configSchemaVersion, 2);
 });
 
 function cnbRelease(version = '4.6.1') {
@@ -300,6 +302,60 @@ test('CNB adapter normalizes version, notes, asset and digest metadata', async (
   assert.match(result.asset.digestDownloadUrl, /\.sha256$/);
 });
 
+test('public CNB latest redirect discovers a release and constructs tokenless latest downloads', async () => {
+  const redirectConfig = UPDATE_PROVIDER_CONFIG.cnb;
+  const calls = [];
+  const result = await checkForUpdates({
+    currentVersion: '4.6.0',
+    cnb: redirectConfig,
+    fetchImpl: async (url, options) => {
+      calls.push({ url, redirect: options.redirect });
+      if (url.includes('api.github.com')) return { ok: false, status: 503 };
+      return {
+        ok: false,
+        status: 307,
+        headers: { get: name => name.toLowerCase() === 'location' ? '/carlosz16420/hamster-archive/-/releases/tag/v4.6.1' : null }
+      };
+    }
+  });
+  assert.equal(result.provider, 'cnb');
+  assert.equal(result.latestVersion, '4.6.1');
+  assert.equal(result.installable, true);
+  assert.equal(result.asset.digest, '');
+  assert.match(result.asset.downloadUrl, /\/releases\/latest\/download\/HamsterArchiver-v4\.6\.1-win-x64\.zip$/);
+  assert.match(result.asset.digestDownloadUrl, /\.zip\.sha256$/);
+  assert.equal(calls[1].redirect, 'manual');
+});
+
+test('public CNB latest redirect rejects another host or an unrelated path', async () => {
+  for (const location of ['https://evil.example/releases/tag/v4.6.1', '/carlosz16420/hamster-archive/-/issues/v4.6.1']) {
+    await assert.rejects(() => checkForUpdates({
+      currentVersion: '4.6.0',
+      cnb: UPDATE_PROVIDER_CONFIG.cnb,
+      fetchImpl: async (url) => url.includes('api.github.com')
+        ? { ok: false, status: 503 }
+        : { ok: false, status: 307, headers: { get: () => location } }
+    }), /CNB latest 跳转/);
+  }
+});
+
+test('redirect discovery keeps latest usable and marks history unavailable without an authenticated API call', async () => {
+  const calls = [];
+  const result = await checkForUpdates({
+    currentVersion: '4.6.0',
+    includeHistory: true,
+    cnb: UPDATE_PROVIDER_CONFIG.cnb,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      if (url.includes('api.github.com')) return { ok: false, status: 503 };
+      return { ok: false, status: 307, headers: { get: () => '/carlosz16420/hamster-archive/-/releases/tag/v4.6.1' } };
+    }
+  });
+  assert.equal(result.historyIncomplete, true);
+  assert.deepEqual(result.releases.map(item => item.version), ['4.6.1']);
+  assert.equal(calls.length, 2);
+});
+
 test('CNB history failures retain the latest mirrored release', async () => {
   const result = await checkForUpdates({
     currentVersion: '4.6.0',
@@ -319,6 +375,7 @@ test('CNB history failures retain the latest mirrored release', async () => {
 test('double-source failure reports both providers and missing CNB configuration safely', async () => {
   await assert.rejects(() => checkForUpdates({
     currentVersion: '4.6.0',
+    cnb: { discoveryMode: 'api', latestApiUrl: '', releasesApiUrl: '', releasesUrl: '', downloadHosts: [] },
     environment: {},
     fetchImpl: async () => ({ ok: false, status: 503 })
   }), /GitHub.*503.*未配置 CNB/s);
