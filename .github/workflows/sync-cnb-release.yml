@@ -1,0 +1,60 @@
+name: Sync published release to CNB
+run-name: Sync ${{ github.event.release.tag_name || inputs.tag }} to CNB
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing published GitHub Release tag to retry
+        required: true
+        type: string
+      make_latest:
+        description: Promote this mirrored release as CNB latest (leave off for historical backfills)
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cnb-release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  disabled:
+    if: github.repository == 'CarlosZ16420/hamster-archiver' && vars.CNB_SYNC_ENABLED != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain disabled CNB synchronization
+        run: echo 'CNB synchronization is disabled. Set the repository variable CNB_SYNC_ENABLED=true only after the target, API contract, upload hosts and token permissions have been independently verified.' >> "$GITHUB_STEP_SUMMARY"
+  sync:
+    if: github.repository == 'CarlosZ16420/hamster-archiver' && vars.CNB_SYNC_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Mirror the published body and four existing attachments
+        if: github.repository == 'CarlosZ16420/hamster-archiver' && vars.CNB_SYNC_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          CNB_SYNC_ENABLED: 'true'
+          CNB_MAKE_LATEST: ${{ github.event_name == 'release' || inputs.make_latest }}
+          CNB_REPO_SLUG: ${{ vars.CNB_REPO_SLUG }}
+          CNB_API_BASE: ${{ vars.CNB_API_BASE }}
+          CNB_WEB_BASE: ${{ vars.CNB_WEB_BASE }}
+          CNB_UPLOAD_HOSTS: ${{ vars.CNB_UPLOAD_HOSTS }}
+          CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
+        run: node scripts/release-sync-cnb.js --tag "$RELEASE_TAG" --github-repo "$GITHUB_REPOSITORY" --cnb-repo "$CNB_REPO_SLUG" --make-latest "$CNB_MAKE_LATEST"
+      - name: Explain safe retry after failure
+        if: failure()
+        run: echo 'CNB synchronization failed independently. The GitHub Release remains authoritative and published; fix configuration or the CNB conflict, then rerun this workflow for the same tag.' >> "$GITHUB_STEP_SUMMARY"

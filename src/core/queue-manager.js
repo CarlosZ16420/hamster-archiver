@@ -1974,7 +1974,7 @@ class QueueManager extends EventEmitter {
     await this.store.saveSettings(this.config);
   }
 
-  async updateConfig(config) {
+  async updateConfig(config, context = {}) {
     if (this.running) throw new Error('队列运行期间不能修改设置。');
     const backupLocation = String(config.backupLocation ?? this.config.backupLocation ?? '').trim();
     if (backupLocation.length > 200) throw new Error('备份位置不能超过 200 个字符。');
@@ -2141,6 +2141,16 @@ class QueueManager extends EventEmitter {
       archiveOutputDirectory,
       archiveStagingDirectory
     };
+    if (context.recordIntakePreferences !== false) {
+      this.config.intakePreferences = {
+        version: 1,
+        archiveOutputDirectory,
+        sourceDisposition: moveCompleted ? 'move' : autoTrashCompleted ? 'trash' : 'keep',
+        processedSourceDirectory: moveCompleted ? processedSourceDirectory : '',
+        source: context.source === 'mcp' ? 'mcp' : 'desktop',
+        savedAt: new Date().toISOString()
+      };
+    }
     if (this.config.intakeDirectory && this.config.archiveStagingDirectory && this.config.archiveOutputDirectory) {
       validatePathLayout(this.config, this.config.intakeDirectory);
     }
@@ -2471,7 +2481,27 @@ class QueueManager extends EventEmitter {
         if (!found) throw new Error('压缩包内没有找到 warehouse.sqlite。');
         workingDirectory = found;
       }
-    } else if (!sourceStat.isDirectory()) {
+    } else if (sourceStat.isDirectory()) {
+      // Never open an external/production warehouse in place: opening may run SQLite
+      // compatibility migrations. Work from a private snapshot so the import source is read-only.
+      tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-warehouse-import-'));
+      workingDirectory = path.join(tempRoot, 'snapshot');
+      await fs.mkdir(workingDirectory, { recursive: true });
+      for (const entry of ['warehouse.sqlite', 'warehouse.sqlite-wal', 'warehouse.sqlite-shm', 'thumbnails']) {
+        const sourceEntry = path.join(source, entry);
+        try {
+          await fs.access(sourceEntry);
+        } catch (error) {
+          if (error.code === 'ENOENT') continue;
+          throw error;
+        }
+        await fs.cp(sourceEntry, path.join(workingDirectory, entry), {
+          recursive: true,
+          force: false,
+          errorOnExist: true
+        });
+      }
+    } else {
       throw new Error('请选择仓库目录或 .zip 压缩包。');
     }
 
@@ -2952,7 +2982,12 @@ class QueueManager extends EventEmitter {
       ...summary,
       ...(automation ? {
         mcpRequestId: automation.requestId,
-        mcpPreserveSource: true,
+        mcpSourceDisposition: ['keep', 'move', 'trash'].includes(automation.sourceDisposition)
+          ? automation.sourceDisposition
+          : undefined,
+        mcpProcessedSourceDirectory: automation.sourceDisposition === 'move'
+          ? String(automation.processedSourceDirectory || '')
+          : '',
         processingMode: automation.mode,
         intakeModeSelected: true
       } : {})
@@ -3856,9 +3891,11 @@ class QueueManager extends EventEmitter {
       const shouldRecordPassword = !inventoryOnly && (typeof job.recordArchivePassword === 'boolean'
         ? job.recordArchivePassword
         : Boolean(this.config.recordArchivePassword));
-      const completionAction = inventoryOnly || job.mcpPreserveSource === true ? 'keep' : this.config.moveCompleted
-        ? 'move'
-        : this.config.autoTrashCompleted ? 'trash' : 'keep';
+      const completionAction = inventoryOnly || job.mcpPreserveSource === true
+        ? 'keep'
+        : ['keep', 'move', 'trash'].includes(job.mcpSourceDisposition)
+          ? job.mcpSourceDisposition
+          : this.config.moveCompleted ? 'move' : this.config.autoTrashCompleted ? 'trash' : 'keep';
       const preservedTags = existingRecord?.tags || [];
       const nextTags = inventoryOnly
         ? ['未压缩', ...preservedTags.filter((tag) => tag !== '未压缩')]
@@ -3914,7 +3951,9 @@ class QueueManager extends EventEmitter {
         skippedFiles: result.skippedFiles || job.skippedFiles || [],
         archiveState: inventoryOnly ? 'uncompressed' : 'compressed',
         completionAction,
-        completionDestination: completionAction === 'move' ? this.config.processedSourceDirectory : '',
+        completionDestination: completionAction === 'move'
+          ? String(job.mcpProcessedSourceDirectory || this.config.processedSourceDirectory || '')
+          : '',
         sourceDisposition: completionAction === 'keep'
           ? 'kept'
           : hasSkippedFiles ? `${completionAction}_skipped_unreadable`

@@ -13,6 +13,8 @@ const {
   INSTALL_STAGE_ITEMS_SCRIPT,
   UPDATE_LAUNCHER_SCRIPT,
   consumeUpdateFailure,
+  downloadFile,
+  fetchDigestSidecar,
   hashFile,
   installedPackageVersion,
   launchInstalledUpdate,
@@ -22,7 +24,9 @@ const {
   normalizeDigest,
   normalizeVersion,
   readUpdateSuccessNotice,
+  resolveDownloadTrust,
   resolvePowerShellExecutable,
+  validateProviderUrl,
   validateInstalledPackageVersion
 } = require('../src/core/update-manager');
 const { createFileIntegrityEntries } = require('../src/core/tool-integrity');
@@ -183,6 +187,75 @@ test('update launch waits for updater handshake before returning', async (t) => 
   assert.equal(notice.toVersion, '4.1.2');
   assert.equal(notice.source, 'package');
   assert.deepEqual(notice.releaseNotes['en-US'], ['Fixed updates.']);
+});
+
+test('GitHub and CNB downloads use provider-specific host allowlists, including approved redirects', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-update-download-trust-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const digest = 'e'.repeat(64);
+  const githubTrust = resolveDownloadTrust({ provider: 'github' });
+  assert.doesNotThrow(() => validateProviderUrl('https://github.com/acme/release.zip', githubTrust, '更新包地址'));
+  assert.doesNotThrow(() => validateProviderUrl('https://release-assets.githubusercontent.com/release.zip', githubTrust, '更新包重定向地址'));
+  assert.throws(() => validateProviderUrl('https://evil.example/release.zip', githubTrust, '更新包地址'), /GitHub/);
+  const githubCalls = [];
+  assert.equal(await fetchDigestSidecar('https://github.com/acme/release.zip.sha256', async (url, options) => {
+    githubCalls.push({ url, redirect: options.redirect });
+    if (url.includes('github.com/acme')) return {
+      status: 302,
+      headers: { get: name => name === 'location' ? 'https://release-assets.githubusercontent.com/release.zip.sha256' : null }
+    };
+    return { ok: true, status: 200, headers: { get: () => null }, text: async () => `${digest} *release.zip` };
+  }, githubTrust), digest);
+  assert.equal(githubCalls.length, 2);
+  assert.equal(githubCalls.every(call => call.redirect === 'manual'), true);
+
+  const cnbConfig = {
+    configured: true,
+    latestApiUrl: 'https://api.cnb.test/acme/app/-/releases/latest',
+    releasesApiUrl: 'https://api.cnb.test/acme/app/-/releases',
+    releasesUrl: 'https://cnb.test/acme/app/-/releases',
+    configSchemaVersion: 1,
+    downloadHosts: ['downloads.cnb.test', 'cdn.cnb.test']
+  };
+  const release = { provider: 'cnb', source: { provider: 'cnb', ...cnbConfig } };
+  const cnbTrust = resolveDownloadTrust(release, cnbConfig);
+  const target = path.join(root, 'release.zip');
+  await downloadFile('https://downloads.cnb.test/release.zip', target, async (url, options) => {
+    assert.equal(options.redirect, 'manual');
+    if (url.includes('downloads.cnb.test')) return {
+      status: 307,
+      headers: { get: name => name === 'location' ? 'https://cdn.cnb.test/release.zip' : null }
+    };
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: name => name === 'content-length' ? '3' : null },
+      body: new ReadableStream({ start(controller) { controller.enqueue(Buffer.from('cnb')); controller.close(); } })
+    };
+  }, () => {}, cnbTrust);
+  assert.equal(await fs.readFile(target, 'utf8'), 'cnb');
+  let cnbCalls = 0;
+  await assert.rejects(() => fetchDigestSidecar('https://downloads.cnb.test/release.zip.sha256', async () => {
+    cnbCalls += 1;
+    return { status: 302, headers: { get: () => 'https://evil.example/release.zip.sha256' } };
+  }, cnbTrust), /CNB/);
+  assert.equal(cnbCalls, 1);
+});
+
+test('CNB download metadata must match the locally configured source exactly', () => {
+  const config = {
+    configured: true,
+    latestApiUrl: 'https://api.cnb.test/a/latest',
+    releasesApiUrl: 'https://api.cnb.test/a/releases',
+    releasesUrl: 'https://cnb.test/a/releases',
+    configSchemaVersion: 1,
+    downloadHosts: ['cnb.test']
+  };
+  assert.throws(() => resolveDownloadTrust({
+    provider: 'cnb',
+    source: { provider: 'cnb', ...config, releasesUrl: 'https://cnb.test/other/releases' }
+  }, config), /不一致/);
+  assert.throws(() => resolveDownloadTrust({ provider: 'unknown' }), /不支持的更新来源/);
 });
 
 test('installed update accepts only a strictly named newer Setup package', () => {

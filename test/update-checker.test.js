@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { checkForUpdates, compareVersions } = require('../src/core/update-checker');
+const { checkForUpdates, compareVersions, resolveCnbConfig, UPDATE_PROVIDER_CONFIG } = require('../src/core/update-checker');
 
 test('history paginates, sorts numerically, filters releases and selects the requested language', async () => {
   const release = { tag_name: 'v4.5.18', body: '## 中文\n- 修复归档。\n## English\n- Fix archives.' };
@@ -196,4 +196,135 @@ test('update metadata ignores legacy or unrelated ZIP assets', async () => {
   });
   assert.equal(result.installable, false);
   assert.equal(result.asset, null);
+});
+
+const cnbConfig = {
+  latestApiUrl: 'https://api.cnb.test/acme/hamster/-/releases/latest',
+  releasesApiUrl: 'https://api.cnb.test/acme/hamster/-/releases',
+  releasesUrl: 'https://cnb.test/acme/hamster/-/releases',
+  downloadHosts: ['downloads.cnb.test']
+};
+
+test('bundled CNB endpoint configuration is versioned, read-only and empty until a real target is supplied', () => {
+  assert.equal(UPDATE_PROVIDER_CONFIG.schemaVersion, 1);
+  assert.deepEqual(UPDATE_PROVIDER_CONFIG.cnb, {
+    latestApiUrl: '',
+    releasesApiUrl: '',
+    releasesUrl: '',
+    downloadHosts: []
+  });
+  assert.equal(resolveCnbConfig(undefined, {}).configured, false);
+  const overridden = resolveCnbConfig({ latestApiUrl: 'https://stale.test/latest' }, {
+    HAMSTER_CNB_LATEST_RELEASE_API: cnbConfig.latestApiUrl,
+    HAMSTER_CNB_RELEASES_API: cnbConfig.releasesApiUrl,
+    HAMSTER_CNB_RELEASES_URL: cnbConfig.releasesUrl,
+    HAMSTER_CNB_DOWNLOAD_HOSTS: 'downloads.cnb.test'
+  });
+  assert.equal(overridden.configured, true);
+  assert.equal(overridden.latestApiUrl, cnbConfig.latestApiUrl);
+  assert.equal(overridden.configSchemaVersion, 1);
+});
+
+function cnbRelease(version = '4.6.1') {
+  const zip = `HamsterArchiver-v${version}-win-x64.zip`;
+  return {
+    tag_name: `v${version}`,
+    body: '## 中文\n- CNB 镜像。\n## English\n- CNB mirror.',
+    assets: [{
+      name: zip,
+      browser_download_url: `https://downloads.cnb.test/${zip}`,
+      size: 321,
+      hash_algo: 'sha256',
+      hash_value: 'd'.repeat(64)
+    }, {
+      name: `${zip}.sha256`,
+      browser_download_url: `https://downloads.cnb.test/${zip}.sha256`
+    }]
+  };
+}
+
+test('GitHub success, including already-current, never requests CNB', async () => {
+  const calls = [];
+  const result = await checkForUpdates({
+    currentVersion: '4.6.0',
+    cnb: cnbConfig,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => ({ tag_name: 'v4.6.0', body: 'current' }) };
+    }
+  });
+  assert.equal(result.provider, 'github');
+  assert.equal(result.updateAvailable, false);
+  assert.deepEqual(calls, ['https://api.github.com/repos/CarlosZ16420/hamster-archiver/releases/latest']);
+});
+
+test('GitHub timeout, 404, HTTP error and parse failure each fall back to CNB', async (t) => {
+  const failures = {
+    timeout: () => { const error = new Error('timed out'); error.name = 'TimeoutError'; throw error; },
+    notFound: () => ({ ok: false, status: 404 }),
+    http: () => ({ ok: false, status: 503 }),
+    parse: () => ({ ok: true, status: 200, json: async () => { throw new Error('bad json'); } })
+  };
+  for (const [name, githubResponse] of Object.entries(failures)) {
+    await t.test(name, async () => {
+      const calls = [];
+      const result = await checkForUpdates({
+        currentVersion: '4.6.0',
+        cnb: cnbConfig,
+        fetchImpl: async (url) => {
+          calls.push(url);
+          if (url.includes('api.github.com')) return githubResponse();
+          return { ok: true, status: 200, json: async () => cnbRelease() };
+        }
+      });
+      assert.equal(result.provider, 'cnb');
+      assert.equal(result.source.provider, 'cnb');
+      assert.equal(result.latestVersion, '4.6.1');
+      assert.equal(calls.length, 2);
+    });
+  }
+});
+
+test('CNB adapter normalizes version, notes, asset and digest metadata', async () => {
+  const result = await checkForUpdates({
+    currentVersion: '4.6.0',
+    cnb: cnbConfig,
+    fetchImpl: async (url) => url.includes('api.github.com')
+      ? { ok: false, status: 503 }
+      : { ok: true, status: 200, json: async () => cnbRelease() }
+  });
+  assert.equal(result.releaseUrl, 'https://cnb.test/acme/hamster/-/releases/tag/v4.6.1');
+  assert.match(result.releaseNotes, /CNB 镜像/);
+  assert.equal(result.asset.provider, 'cnb');
+  assert.equal(result.asset.digest, `sha256:${'d'.repeat(64)}`);
+  assert.match(result.asset.digestDownloadUrl, /\.sha256$/);
+});
+
+test('CNB history failures retain the latest mirrored release', async () => {
+  const result = await checkForUpdates({
+    currentVersion: '4.6.0',
+    includeHistory: true,
+    cnb: cnbConfig,
+    fetchImpl: async (url) => {
+      if (url.includes('api.github.com')) return { ok: false, status: 500 };
+      if (url.includes('/latest')) return { ok: true, status: 200, json: async () => cnbRelease() };
+      throw new Error('history unavailable');
+    }
+  });
+  assert.equal(result.historyIncomplete, true);
+  assert.deepEqual(result.releases.map((item) => item.version), ['4.6.1']);
+  assert.equal(result.releases[0].provider, 'cnb');
+});
+
+test('double-source failure reports both providers and missing CNB configuration safely', async () => {
+  await assert.rejects(() => checkForUpdates({
+    currentVersion: '4.6.0',
+    environment: {},
+    fetchImpl: async () => ({ ok: false, status: 503 })
+  }), /GitHub.*503.*未配置 CNB/s);
+  await assert.rejects(() => checkForUpdates({
+    currentVersion: '4.6.0',
+    cnb: cnbConfig,
+    fetchImpl: async (url) => ({ ok: false, status: url.includes('github') ? 500 : 502 })
+  }), /GitHub.*500.*CNB.*502/s);
 });

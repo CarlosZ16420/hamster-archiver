@@ -11,7 +11,7 @@ Main process
        ├─ queue + archive engine ── 7-Zip / FFmpeg
        ├─ SQLite repository ─────── warehouse + thumbnails
        ├─ storage migration ─────── userdata layout
-       └─ updater ───────────────── GitHub / local ZIP + notes + manifest + rollback
+       └─ updater ───────────────── GitHub → CNB fallback / local package + digest + rollback
 ```
 
 ## 源码目录
@@ -25,7 +25,7 @@ Main process
 
 ## 数据边界
 
-更新检查由主进程获取最新正式版本，手动检查额外分页获取发行历史（100 条/页，最多 10 页，共用历史请求超时）；只保留高于本地且不高于目标的正式 SemVer 版本并按版本倒序排列。渲染层 `update-dialog.js` 负责安全呈现双语 Markdown 子集，主进程保留本次检查的受信任下载元数据；安装 IPC 仅接收目标版本并校验它与缓存一致，不接受渲染层提供的下载地址。静默检查不弹窗、不加载历史，也不覆盖用户已查看的安装目标。
+更新检查通过来源适配器统一生成版本、说明、历史、附件、摘要、`provider` 与发布页。版本化只读配置位于 `src/config/update-providers.json` 并随包进入完整性清单；当前真实 CNB 目标未提供，因此内置字段为空，环境变量可显式覆盖。主进程先查权威 GitHub，只有网络、超时、HTTP 或解析失败才查已配置 CNB；GitHub 成功（含已最新）即短路。手动检查从同一成功来源分页获取历史（100 条/页，最多 10 页，共用超时）；历史失败保留 latest。渲染层 `update-dialog.js` 负责安全呈现双语 Markdown 子集，主进程缓存包含来源标记的下载元数据；安装 IPC 仅接收目标版本并校验缓存，不接受渲染层提供地址。下载管理器按 `provider` 使用相互独立的主机白名单，所有重定向均使用 manual 模式并在请求下一跳前校验 `Location` 主机，仍执行版本、manifest、SHA-256 和回滚约束。静默检查不弹窗、不加载历史，也不覆盖用户已查看的安装目标。
 
 打包应用通过同目录 `user-data-location.json` 解析用户数据；没有指针时保持普通便携版的同目录 `userdata/` 行为。本项目维护机上的 `builds/current` 使用相对指针连接仓库外 `data/production`。开发模式固定使用仓库外 `data/development`，不会再读写源码根目录。
 
@@ -35,11 +35,11 @@ Main process
 
 仓库详情的精确文件查询在排序限额之前排除项目自身，只传递文件级字段，每个匹配项目的 JSON 元数据每次查询只解析一次；不修改 SQLite 结构。渲染层用 IntersectionObserver 按可见区域调度缩略图，同时最多读取 4 张，复用现有缓存；目录继续使用虚拟树。
 
-可选 MCP 入口由 `src/core/mcp-server.js` 在显式 `--enable-mcp` 启动后监听本机随机端口；`mcp-tools.js` 验证参数并调用同一个 QueueManager，`mcp-client.js` 提供 stdio 适配。随机连接凭证只保存在用户数据区 `mcp/connection.json`。AI 任务增加可选的请求标识和保留源文件字段，沿用旧 JSON 存储，无数据库迁移。接口通过字段白名单、分页、并发写入限制和状态确认令牌控制返回与决策范围。详见 [MCP](MCP.md)。
+可选 MCP 入口由 `src/core/mcp-server.js` 在显式启用后监听本机随机端口；发行包根目录的薄 `.cmd` 使用 Electron 内置 Node 运行 `mcp-client.js`，自动启动后台主进程或通过 Electron 单实例事件复用已运行的普通实例，不建立第二个仓库写入者。stdio 客户端用租约心跳管理后台实例生命周期，旧连接文件不会阻止新会话恢复；`--show-ui` 才主动显示窗口。`mcp-tools.js` 只公开发现、描述和调用三个紧凑工具，`mcp-capabilities.js` 验证参数并复用同一个 QueueManager，主进程把界面、更新、受控路径和用户数据迁移的真实应用服务接入能力层。随机连接凭证只保存在用户数据区 `mcp/connection.json`。AI 任务增加可选请求标识和源文件处理快照，沿用旧 JSON 存储，无数据库迁移。接口通过字段白名单、分页、并发写入限制和一次性状态确认令牌控制返回与决策范围。详见 [MCP](MCP.md)。
 
 `scripts/build-release.js` 只写入仓库外 staging。`scripts/release-local.js` 从干净提交构建、检查、打包、烟雾启动，再原子提升为 current；旧 current 进入 history。源码根目录不保存 Electron 运行时副本。
 
-每个发行包从 `docs/releases/release-summary-vX.Y.Z.json` 把中英文更新内容写入 `release-manifest.json`。在线检查读取 GitHub Release 正文，手动 ZIP 读取包内清单；安装版在线升级选择同版本 Setup EXE 并校验 GitHub SHA-256，手动升级只接受严格命名且高于当前版本的 Setup EXE。两种发行形态都会在启动更新助手或安装程序前，把受限长度的说明写入本次用户数据区 `updates/` 运行目录。新版本只接受该受信任目录且目标版本与自身一致的提示文件，在首次启动时显示后移除本次临时目录，不新增长期用户状态。
+每个发行包从 `docs/releases/release-summary-vX.Y.Z.json` 把中英文更新内容写入 `release-manifest.json`。在线检查读取成功来源的 Release 正文，手动 ZIP 读取包内清单；安装版在线升级选择同版本 Setup EXE 并校验同来源 SHA-256，手动升级只接受严格命名且高于当前版本的 Setup EXE。CNB 同步是 GitHub 正式发布后的独立两阶段流程，并采用默认拒绝写入边界：目标、当前官方 API 契约、上传主机和 Token 实际权限未独立验证前，`CNB_SYNC_ENABLED` 保持关闭，脚本不把权限声明字符串视为授权证明。启用后只能创建/接续草稿，复制权威正文和四个已校验附件，完整回读后再发布；创建草稿永不提升 latest，历史补同步默认也不提升，只有调用方确认目标为当前最新正式版本时才显式选择。workflow 固定运行 `github.sha` 中的同步代码，标签仅用于 API 选择；同步不参与构建，也不推送源码。上传或发布响应不明时先按名称、大小和 SHA-256 回读，确认缺失后才重试。两种发行形态都会在启动更新助手或安装程序前，把受限长度的说明写入本次用户数据区 `updates/` 运行目录。新版本只接受该受信任目录且目标版本与自身一致的提示文件，在首次启动时显示后移除本次临时目录，不新增长期用户状态。
 
 队列相似报告通过只读 IPC 按任务标识读取待确认清单；尚未生成本次任务的 MD5 时只枚举当前目录，不因打开弹窗而读取大文件内容，也不凭普通历史路径、大小或修改时间复用 MD5 来报告内容完全一致。拖入或扫描时的名称、标题和视频大小候选只显示非阻塞提示，不产生“已确认”状态；用户选择入库方式并启动队列后，应用先生成完整结构快照，再进行相似与重复核验。同一规范化原始位置的仓库记录若具有完整可信的旧快照，且当前与旧快照的全部文件相对路径、大小、数量、总大小以及目录清单（含空目录）一致，可在读取文件内容前判为项目完全重复；任一侧有跳过项、计数或大小不一致、缺少目录清单时不得走该快捷路径。项目完全重复且开启自动跳过时直接跳过；不完全重复但仍有相似证据时只进行一次清单后确认，确认结果以路径、大小、MD5 和修改时间组成的清单指纹绑定，并复用已保存清单继续处理。旧版本任务仍兼容原预检确认字段。
 

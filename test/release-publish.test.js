@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { findReleaseByTag, getRelease, planUploads, parseArgs, preflight } = require('../scripts/release-publish');
+const { expectedReleaseAssetNames, findReleaseByTag, getRelease, planUploads, parseArgs, preflight } = require('../scripts/release-publish');
 const { optionsFrom, findRequest } = require('../scripts/release');
 const { readReleaseNotes, assertDraftNotes } = require('../scripts/release-publish');
 const fs = require('node:fs/promises');
@@ -82,6 +82,15 @@ test('draft resume skips identical assets and uploads only missing files', () =>
   const zip = { name: 'app.zip', size: 42, digest: 'sha256:abc' };
   const exe = { name: 'app.exe', size: 50, digest: 'sha256:def' };
   assert.deepEqual(planUploads([zip, exe], [zip]), [exe]);
+});
+
+test('release publication and CNB mirroring share the exact four expected attachment names', () => {
+  assert.deepEqual(expectedReleaseAssetNames('v4.6.1'), [
+    'HamsterArchiver-v4.6.1-win-x64.zip',
+    'HamsterArchiver-v4.6.1-win-x64.zip.sha256',
+    'HamsterArchiver-Setup-v4.6.1-win-x64.exe',
+    'HamsterArchiver-Setup-v4.6.1-win-x64.exe.sha256'
+  ]);
 });
 
 test('draft resume refuses conflicting or unverifiable files without overwriting', () => {

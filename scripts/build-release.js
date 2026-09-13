@@ -81,7 +81,7 @@ async function main() {
     throw new Error('无法记录实际 npm 版本；请通过 npm run build:release 或 npm run release:local 构建。');
   }
   if (!(await exists(path.join(electronDist, 'electron.exe')))) {
-    throw new Error('缺少 Electron 运行时，请先执行 npm ci。');
+    throw new Error('缺少 Electron 运行时；请执行 npm run electron:prepare。该命令默认只使用本机缓存，不会下载。');
   }
   for (const requiredTool of [
     path.join(projectRoot, 'assets', 'app-icon.png'),
@@ -116,8 +116,10 @@ async function main() {
     await fs.cp(readmeAssets, path.join(outputRoot, 'README.assets'), { recursive: true });
   }
   await fs.copyFile(path.join(projectRoot, 'LICENSE'), path.join(outputRoot, 'LICENSE'));
+  await fs.copyFile(path.join(projectRoot, 'scripts', 'HamsterArchiver-MCP.cmd'), path.join(outputRoot, 'HamsterArchiver-MCP.cmd'));
   await fs.mkdir(path.join(outputRoot, 'docs'), { recursive: true });
   await fs.copyFile(path.join(projectRoot, 'docs', 'MCP.md'), path.join(outputRoot, 'docs', 'MCP.md'));
+  await fs.copyFile(path.join(projectRoot, 'docs', 'AI-QUICKSTART.md'), path.join(outputRoot, 'docs', 'AI-QUICKSTART.md'));
   await fs.copyFile(path.join(projectRoot, 'llms.txt'), path.join(outputRoot, 'llms.txt'));
   await fs.writeFile(path.join(appDirectory, 'package.json'), `${JSON.stringify({
     name: packageJson.name,
@@ -169,6 +171,10 @@ async function main() {
     'resources/app/src/core/mcp-server.js',
     'resources/app/src/core/mcp-tools.js',
     'resources/app/src/core/mcp-client.js',
+    'resources/app/src/core/mcp-capabilities.js',
+    'resources/app/src/core/mcp-application-services.js',
+    'resources/app/src/core/mcp-user-data-migration-worker.js',
+    'HamsterArchiver-MCP.cmd',
     'resources/app/src/core/archive-engine.js',
     'resources/app/src/core/media-service.js',
     'resources/app/src/core/paths.js',
@@ -176,6 +182,7 @@ async function main() {
     'resources/app/src/core/tool-integrity.js',
     'resources/app/src/core/update-checker.js',
     'resources/app/src/core/update-manager.js',
+    'resources/app/src/config/update-providers.json',
     ...Object.values(dependencyLock.bundledTools).flatMap((tool) => tool.files)
   ];
   const integrityFiles = await createFileIntegrityEntries(outputRoot, integrityPaths);

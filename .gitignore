@@ -3,6 +3,8 @@ dist/
 out/
 Developer/
 config/
+!src/config/
+!src/config/update-providers.json
 userdata/
 userData/
 user-data/

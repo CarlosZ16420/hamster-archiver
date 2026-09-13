@@ -21,6 +21,7 @@
     "check": "node scripts/check-syntax.js",
     "verify:dependencies": "node scripts/verify-toolchain.js --dependencies-only",
     "verify:tools": "node scripts/verify-toolchain.js --installed",
+    "electron:prepare": "node scripts/prepare-electron-runtime.js",
     "tools:prepare": "node scripts/prepare-tools.js",
     "publish:check": "npm run verify:dependencies && npm run check:layout && npm run verify:version && node scripts/check-publish-safety.js",
     "migrate:portable": "node scripts/migrate-to-portable-userdata.js",
@@ -31,6 +32,7 @@
     "verify:version": "node scripts/verify-version.js",
     "release:local": "node scripts/release-local.js",
     "release": "node scripts/release.js",
+    "release:sync:cnb": "node scripts/release-sync-cnb.js",
     "preview:current": "node scripts/launch-current.js"
   },
   "engines": {

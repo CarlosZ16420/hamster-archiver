@@ -18,3 +18,12 @@ test('local release retries only transient Windows rename failures and keeps rol
   assert.match(source, /renameWithRetry\(priorZip, finalZip\)/);
   assert.match(source, /renameWithRetry\(priorSha, finalSha\)/);
 });
+
+test('local release prepares Electron without implicitly allowing a download', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'release-local.js'), 'utf8');
+  const packageJson = require('../package.json');
+
+  assert.equal(packageJson.scripts['electron:prepare'], 'node scripts/prepare-electron-runtime.js');
+  assert.match(source, /prepare-electron-runtime\.js/);
+  assert.doesNotMatch(source, /--allow-download/);
+});

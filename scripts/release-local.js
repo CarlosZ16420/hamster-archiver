@@ -166,6 +166,8 @@ async function main() {
     throw new Error('发行前工作树必须干净；请先提交本轮修改。');
   }
 
+  run(process.execPath, [path.join('scripts', 'prepare-electron-runtime.js')]);
+
   console.log(fullChecks
     ? '本地发行模式：完整验证'
     : '本地发行模式：日常快速提升（跳过完整源码测试矩阵）');

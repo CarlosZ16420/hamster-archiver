@@ -1,47 +1,12 @@
 'use strict';
 
 const { compactReleaseNotesPayload, selectLocalizedMarkdownSection } = require('./release-notes');
+const UPDATE_PROVIDER_CONFIG = require('../config/update-providers.json');
 
 const RELEASES_URL = 'https://github.com/CarlosZ16420/hamster-archiver/releases';
 const LATEST_RELEASE_API = 'https://api.github.com/repos/CarlosZ16420/hamster-archiver/releases/latest';
 const RELEASES_API = LATEST_RELEASE_API.replace(/\/latest$/, '');
-
-function displayRelease(release) {
-  const body = String(release.body || '').slice(0, 128_000);
-  const localized = {};
-  for (const locale of ['zh-CN', 'en-US']) {
-    const text = selectLocalizedMarkdownSection(body, locale).trim();
-    const heading = locale === 'zh-CN' ? '(?:中文|简体中文|zh(?:-CN)?|Chinese)' : '(?:English|en(?:-US)?)';
-    localized[locale] = { text, untranslated: Boolean(text) && !new RegExp(`^#{1,6}\\s+${heading}\\s*#*\\s*$`, 'im').test(body) };
-  }
-  return { version: String(release.tag_name || '').replace(/^v/i, ''), publishedAt: release.published_at || '', notes: localized, truncated: String(release.body || '').length > body.length };
-}
-
-async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs }) {
-  const versions = new Map([[displayRelease(release).version, displayRelease(release)]]);
-  const signal = AbortSignal.timeout(timeoutMs);
-  let complete = false;
-  try {
-    for (let page = 1; page <= 10; page += 1) {
-      const response = await fetchImpl(`${RELEASES_API}?per_page=100&page=${page}`, {
-        headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'hamster-archiver-update-checker' }, signal
-      });
-      if (!response.ok) break;
-      const releases = await response.json();
-      if (!Array.isArray(releases)) break;
-      for (const item of releases) {
-        if (item.draft || item.prerelease || !/^v?\d+\.\d+\.\d+$/i.test(item.tag_name || '')) continue;
-        if (compareVersions(item.tag_name, currentVersion) > 0 && compareVersions(item.tag_name, release.tag_name) <= 0) {
-          const entry = displayRelease(item);
-          versions.set(entry.version, entry);
-        }
-      }
-      // Do not stop at an older version: GitHub publication order need not be version order.
-      if (releases.length < 100) { complete = true; break; }
-    }
-  } catch { /* Latest release remains usable when history is unavailable. */ }
-  return { releases: [...versions.values()].sort((a, b) => compareVersions(b.version, a.version)), historyIncomplete: !complete };
-}
+const USER_AGENT = 'hamster-archiver-update-checker';
 
 function versionParts(value) {
   const match = String(value || '').trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
@@ -51,42 +16,169 @@ function versionParts(value) {
 function compareVersions(left, right) {
   const a = versionParts(left);
   const b = versionParts(right);
-  if (!a || !b) throw new Error('GitHub 返回了无法识别的版本号。');
+  if (!a || !b) throw new Error('发行源返回了无法识别的版本号。');
   for (let index = 0; index < 3; index += 1) {
     if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
   }
   return 0;
 }
 
-async function checkForUpdates({
-  currentVersion,
-  distributionMode = 'portable',
-  includeHistory = false,
-  fetchImpl = globalThis.fetch,
-  timeoutMs = 8_000
-} = {}) {
-  if (typeof fetchImpl !== 'function') throw new Error('当前运行环境不支持联网检查更新。');
+function appendQuery(url, values) {
+  const parsed = new URL(url);
+  for (const [key, value] of Object.entries(values)) parsed.searchParams.set(key, String(value));
+  return parsed.href;
+}
+
+function requireHttpsUrl(value, label) {
+  let parsed;
+  try { parsed = new URL(String(value || '')); } catch { throw new Error(`${label}不是有效 URL。`); }
+  if (parsed.protocol !== 'https:' || parsed.username || parsed.password) throw new Error(`${label}必须是不含凭证的 HTTPS URL。`);
+  return parsed.href;
+}
+
+function parseHostList(value) {
+  const values = Array.isArray(value) ? value : String(value || '').split(',');
+  return [...new Set(values.map((item) => String(item).trim().toLowerCase()).filter(Boolean))];
+}
+
+function resolveCnbConfig(cnb = UPDATE_PROVIDER_CONFIG.cnb, environment = process.env) {
+  if (UPDATE_PROVIDER_CONFIG.schemaVersion !== 1) {
+    return { configured: false, reason: '内置更新来源配置版本不受支持，已安全跳过 CNB 回退。' };
+  }
+  const latestApiUrl = environment.HAMSTER_CNB_LATEST_RELEASE_API || cnb?.latestApiUrl || '';
+  const releasesApiUrl = environment.HAMSTER_CNB_RELEASES_API || cnb?.releasesApiUrl || '';
+  const releasesUrl = environment.HAMSTER_CNB_RELEASES_URL || cnb?.releasesUrl || '';
+  if (!latestApiUrl && !releasesApiUrl && !releasesUrl) {
+    return { configured: false, reason: '未配置 CNB Release API、历史 API 和发布页，已安全跳过 CNB 回退。' };
+  }
+  if (!latestApiUrl || !releasesApiUrl || !releasesUrl) {
+    return { configured: false, reason: 'CNB 回退配置不完整；必须同时配置最新 Release API、历史 API 和发布页。' };
+  }
+  try {
+    const normalized = {
+      configured: true,
+      latestApiUrl: requireHttpsUrl(latestApiUrl, 'CNB 最新 Release API'),
+      releasesApiUrl: requireHttpsUrl(releasesApiUrl, 'CNB Release 历史 API'),
+      releasesUrl: requireHttpsUrl(releasesUrl, 'CNB 发布页')
+    };
+    normalized.configSchemaVersion = UPDATE_PROVIDER_CONFIG.schemaVersion;
+    normalized.downloadHosts = parseHostList(environment.HAMSTER_CNB_DOWNLOAD_HOSTS || cnb?.downloadHosts);
+    for (const url of [normalized.latestApiUrl, normalized.releasesApiUrl, normalized.releasesUrl]) {
+      normalized.downloadHosts.push(new URL(url).hostname.toLowerCase());
+    }
+    normalized.downloadHosts = [...new Set(normalized.downloadHosts)];
+    return normalized;
+  } catch (error) {
+    return { configured: false, reason: `CNB 回退配置无效：${error.message}` };
+  }
+}
+
+function releasePage(adapter, release) {
+  if (release?.html_url) return String(release.html_url);
+  if (adapter.provider === 'cnb' && release?.tag_name) {
+    return `${adapter.releasesUrl.replace(/\/$/, '')}/tag/${encodeURIComponent(release.tag_name)}`;
+  }
+  return adapter.releasesUrl;
+}
+
+function displayRelease(release, adapter = { provider: 'github', releasesUrl: RELEASES_URL }) {
+  const body = String(release.body || '').slice(0, 128_000);
+  const localized = {};
+  for (const locale of ['zh-CN', 'en-US']) {
+    const text = selectLocalizedMarkdownSection(body, locale).trim();
+    const heading = locale === 'zh-CN' ? '(?:中文|简体中文|zh(?:-CN)?|Chinese)' : '(?:English|en(?:-US)?)';
+    localized[locale] = { text, untranslated: Boolean(text) && !new RegExp(`^#{1,6}\\s+${heading}\\s*#*\\s*$`, 'im').test(body) };
+  }
+  return {
+    version: String(release.tag_name || '').replace(/^v/i, ''),
+    publishedAt: release.published_at || '',
+    notes: localized,
+    truncated: String(release.body || '').length > body.length,
+    provider: adapter.provider,
+    releaseUrl: releasePage(adapter, release)
+  };
+}
+
+function normalizeAssetDigest(asset, provider) {
+  if (provider === 'cnb' && String(asset?.hash_algo || '').toLowerCase() === 'sha256') {
+    return `sha256:${String(asset.hash_value || '')}`;
+  }
+  return String(asset?.digest || '');
+}
+
+function createGithubAdapter() {
+  return {
+    provider: 'github',
+    label: 'GitHub',
+    latestApiUrl: LATEST_RELEASE_API,
+    releasesApiUrl: RELEASES_API,
+    releasesUrl: RELEASES_URL,
+    downloadHosts: ['github.com', 'objects.githubusercontent.com', 'github-releases.githubusercontent.com', 'release-assets.githubusercontent.com'],
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': USER_AGENT },
+    historyUrl: (page) => appendQuery(RELEASES_API, { per_page: 100, page })
+  };
+}
+
+function createCnbAdapter(config) {
+  return {
+    provider: 'cnb',
+    label: 'CNB',
+    ...config,
+    headers: { Accept: 'application/vnd.cnb.api+json', 'User-Agent': USER_AGENT },
+    historyUrl: (page) => appendQuery(config.releasesApiUrl, { page, page_size: 100 })
+  };
+}
+
+async function fetchLatestRelease(adapter, fetchImpl, timeoutMs) {
   let response;
   try {
-    response = await fetchImpl(LATEST_RELEASE_API, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'hamster-archiver-update-checker' },
+    response = await fetchImpl(adapter.latestApiUrl, {
+      headers: adapter.headers,
       signal: AbortSignal.timeout(timeoutMs)
     });
   } catch (error) {
-    if (error.name === 'TimeoutError' || error.name === 'AbortError') {
-      throw new Error(`检查更新超时（${Math.round(timeoutMs / 1000)} 秒），请检查网络或代理设置。`);
+    const kind = error.name === 'TimeoutError' || error.name === 'AbortError' ? '请求超时' : `连接失败：${error.message}`;
+    throw new Error(`${adapter.label} ${kind}`);
+  }
+  if (!response.ok) throw new Error(`${adapter.label} 更新检查失败（HTTP ${response.status}）`);
+  let release;
+  try { release = await response.json(); } catch (error) {
+    throw new Error(`${adapter.label} Release 响应解析失败：${error.message}`);
+  }
+  if (!release || typeof release !== 'object' || release.draft || release.prerelease || !versionParts(release.tag_name)) {
+    throw new Error(`${adapter.label} Release 响应缺少有效的正式版本`);
+  }
+  return release;
+}
+
+async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter }) {
+  const latest = displayRelease(release, adapter);
+  const versions = new Map([[latest.version, latest]]);
+  const signal = AbortSignal.timeout(timeoutMs);
+  let complete = false;
+  try {
+    for (let page = 1; page <= 10; page += 1) {
+      const response = await fetchImpl(adapter.historyUrl(page), { headers: adapter.headers, signal });
+      if (!response.ok) break;
+      const releases = await response.json();
+      if (!Array.isArray(releases)) break;
+      for (const item of releases) {
+        if (item.draft || item.prerelease || !/^v?\d+\.\d+\.\d+$/i.test(item.tag_name || '')) continue;
+        if (compareVersions(item.tag_name, currentVersion) > 0 && compareVersions(item.tag_name, release.tag_name) <= 0) {
+          const entry = displayRelease(item, adapter);
+          versions.set(entry.version, entry);
+        }
+      }
+      if (releases.length < 100) { complete = true; break; }
     }
-    throw new Error(`无法连接 GitHub：${error.message}`);
-  }
-  if (response.status === 404) {
-    return { currentVersion, latestVersion: null, updateAvailable: false, releaseUrl: RELEASES_URL };
-  }
-  if (!response.ok) throw new Error(`GitHub 更新检查失败（HTTP ${response.status}）。`);
-  const release = await response.json();
+  } catch { /* Latest release remains usable when history is unavailable. */ }
+  return { releases: [...versions.values()].sort((a, b) => compareVersions(b.version, a.version)), historyIncomplete: !complete };
+}
+
+function selectReleaseAsset(release, distributionMode, adapter) {
   const latestVersion = String(release.tag_name || '').replace(/^v/i, '');
   const assets = Array.isArray(release.assets) ? release.assets : [];
-  const normalizedDistributionMode = distributionMode === 'installed' ? 'installed' : 'portable';
-  const expectedAssetName = (normalizedDistributionMode === 'installed'
+  const expectedAssetName = (distributionMode === 'installed'
     ? `HamsterArchiver-Setup-v${latestVersion}-win-x64.exe`
     : `HamsterArchiver-v${latestVersion}-win-x64.zip`).toLowerCase();
   const archiveAsset = assets.find((asset) => String(asset.name || '').toLowerCase() === expectedAssetName);
@@ -95,26 +187,92 @@ async function checkForUpdates({
     const name = String(asset.name || '').toLowerCase();
     return name === `${archiveName}.sha256` || name === `${archiveName}.sha256.txt`;
   });
-  const history = includeHistory && compareVersions(latestVersion, currentVersion) > 0
-    ? await collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs })
-    : { releases: [], historyIncomplete: false };
+  const downloadUrl = archiveAsset?.browser_download_url || archiveAsset?.brower_download_url || '';
+  const digestDownloadUrl = digestAsset?.browser_download_url || digestAsset?.brower_download_url || '';
+  return archiveAsset ? {
+    name: String(archiveAsset.name || ''),
+    downloadUrl: String(downloadUrl),
+    size: Number(archiveAsset.size) || 0,
+    digest: normalizeAssetDigest(archiveAsset, adapter.provider),
+    digestDownloadUrl: String(digestDownloadUrl),
+    provider: adapter.provider
+  } : null;
+}
+
+function normalizeRelease({ release, adapter, currentVersion, distributionMode, history }) {
+  const latestVersion = String(release.tag_name || '').replace(/^v/i, '');
+  const asset = selectReleaseAsset(release, distributionMode, adapter);
   return {
     ...history,
     currentVersion,
     latestVersion,
     updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
-    releaseUrl: release.html_url || RELEASES_URL,
+    releaseUrl: releasePage(adapter, release),
     releaseNotes: compactReleaseNotesPayload(release.body),
-    distributionMode: normalizedDistributionMode,
-    installable: Boolean(archiveAsset?.browser_download_url),
-    asset: archiveAsset ? {
-      name: String(archiveAsset.name || ''),
-      downloadUrl: String(archiveAsset.browser_download_url || ''),
-      size: Number(archiveAsset.size) || 0,
-      digest: String(archiveAsset.digest || ''),
-      digestDownloadUrl: String(digestAsset?.browser_download_url || '')
-    } : null
+    distributionMode,
+    installable: Boolean(asset?.downloadUrl),
+    asset,
+    provider: adapter.provider,
+    source: {
+      provider: adapter.provider,
+      latestApiUrl: adapter.latestApiUrl,
+      releasesApiUrl: adapter.releasesApiUrl,
+      releasesUrl: adapter.releasesUrl,
+      configSchemaVersion: adapter.configSchemaVersion || 1,
+      downloadHosts: [...adapter.downloadHosts]
+    }
   };
 }
 
-module.exports = { LATEST_RELEASE_API, RELEASES_URL, checkForUpdates, compareVersions, displayRelease };
+async function checkForUpdates({
+  currentVersion,
+  distributionMode = 'portable',
+  includeHistory = false,
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 8_000,
+  cnb = UPDATE_PROVIDER_CONFIG.cnb,
+  environment = process.env
+} = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('当前运行环境不支持联网检查更新。');
+  const normalizedDistributionMode = distributionMode === 'installed' ? 'installed' : 'portable';
+  const github = createGithubAdapter();
+  let adapter = github;
+  let release;
+  let githubFailure;
+  try {
+    release = await fetchLatestRelease(github, fetchImpl, timeoutMs);
+  } catch (error) {
+    githubFailure = error;
+    const cnbConfig = resolveCnbConfig(cnb, environment);
+    if (!cnbConfig.configured) {
+      throw new Error(`检查更新失败：${githubFailure.message}；${cnbConfig.reason}`);
+    }
+    adapter = createCnbAdapter(cnbConfig);
+    try {
+      release = await fetchLatestRelease(adapter, fetchImpl, timeoutMs);
+    } catch (cnbFailure) {
+      throw new Error(`检查更新失败：${githubFailure.message}；${cnbFailure.message}`);
+    }
+  }
+  const updateAvailable = compareVersions(release.tag_name, currentVersion) > 0;
+  const history = includeHistory && updateAvailable
+    ? await collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter })
+    : { releases: [], historyIncomplete: false };
+  return normalizeRelease({ release, adapter, currentVersion, distributionMode: normalizedDistributionMode, history });
+}
+
+module.exports = {
+  LATEST_RELEASE_API,
+  RELEASES_API,
+  RELEASES_URL,
+  UPDATE_PROVIDER_CONFIG,
+  checkForUpdates,
+  collectReleaseHistory,
+  compareVersions,
+  createCnbAdapter,
+  createGithubAdapter,
+  displayRelease,
+  normalizeRelease,
+  resolveCnbConfig,
+  selectReleaseAsset
+};

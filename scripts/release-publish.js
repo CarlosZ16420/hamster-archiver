@@ -101,10 +101,14 @@ function planUploads(local, remote) {
   });
 }
 
-function completeDraft(release, tag) {
+function expectedReleaseAssetNames(tag) {
   const names = [`HamsterArchiver-${tag}-win-x64.zip`, `HamsterArchiver-Setup-${tag}-win-x64.exe`];
-  return Boolean(release?.draft && names.every(name => [name, `${name}.sha256`].every(n =>
-    release.assets?.some(asset => asset.name === n && asset.size > 0 && /^sha256:[a-f0-9]{64}$/.test(asset.digest || '')))));
+  return names.flatMap(name => [name, `${name}.sha256`]);
+}
+
+function completeDraft(release, tag) {
+  return Boolean(release?.draft && expectedReleaseAssetNames(tag).every(name =>
+    release.assets?.some(asset => asset.name === name && asset.size > 0 && /^sha256:[a-f0-9]{64}$/.test(asset.digest || ''))));
 }
 
 async function readReleaseNotes(repo, tag, sourceRoot = root) {
@@ -161,4 +165,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, findReleaseByTag, getRelease, parseArgs, planUploads, preflight, run, upload, validateTarget, verifyFiles };
+module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, expectedReleaseAssetNames, findReleaseByTag, getRelease, parseArgs, planUploads, preflight, run, upload, validateTarget, verifyFiles };

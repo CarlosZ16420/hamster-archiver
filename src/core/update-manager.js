@@ -7,11 +7,17 @@ const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const { verifyFileIntegrityEntries } = require('./tool-integrity');
-const { compareVersions } = require('./update-checker');
+const { compareVersions, resolveCnbConfig } = require('./update-checker');
 const { compactReleaseNotesPayload } = require('./release-notes');
 
 const execFileAsync = promisify(execFile);
 const UPDATE_LAUNCH_TIMEOUT_MS = 8_000;
+const GITHUB_DOWNLOAD_HOSTS = new Set([
+  'github.com',
+  'objects.githubusercontent.com',
+  'github-releases.githubusercontent.com',
+  'release-assets.githubusercontent.com'
+]);
 
 const UPDATE_LAUNCHER_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -133,14 +139,14 @@ function manualUpdateInstructions(language = 'zh-CN', distributionMode = 'portab
     if (language === 'en-US') {
       return [
         '1. Exit Hamster Archiver completely.',
-        '2. Download the newer HamsterArchiver-Setup-vX.Y.Z-win-x64.exe from GitHub Releases.',
+        '2. Download the newer HamsterArchiver-Setup-vX.Y.Z-win-x64.exe from the authoritative GitHub Releases page or the configured CNB mirror.',
         '3. Run the installer. Its stable app identity upgrades the existing per-user installation and keeps user data.',
         '4. On first launch, verify the displayed version and update notes.'
       ].join('\n');
     }
     return [
       '1. 完全退出 Hamster Archiver。',
-      '2. 从 GitHub Releases 下载更高版本的 HamsterArchiver-Setup-vX.Y.Z-win-x64.exe。',
+      '2. 从权威 GitHub Releases 页面或已配置的 CNB 镜像下载更高版本的 HamsterArchiver-Setup-vX.Y.Z-win-x64.exe。',
       '3. 运行安装程序；稳定的应用标识会升级当前用户下的已有安装，并保留用户数据。',
       '4. 首次启动后核对显示的版本号和更新内容。'
     ].join('\n');
@@ -148,14 +154,14 @@ function manualUpdateInstructions(language = 'zh-CN', distributionMode = 'portab
   if (language === 'en-US') {
     return [
       '1. In the old version, use Export warehouse to create a warehouse ZIP, then exit Hamster Archiver completely.',
-      '2. Download the latest Windows x64 ZIP from GitHub Releases and extract it into a new directory. Do not replace only the EXE or overwrite a running directory.',
+      '2. Download the latest Windows x64 ZIP from the authoritative GitHub Releases page or the configured CNB mirror and extract it into a new directory. Do not replace only the EXE or overwrite a running directory.',
       '3. Run HamsterArchiver.exe from the new directory, open Warehouse, choose Import external warehouse, and select the ZIP exported in step 1.',
       '4. Verify the version, warehouse records and thumbnails. Keep the old program directory until the imported warehouse has been checked.'
     ].join('\n');
   }
   return [
     '1. 在旧版本的“仓库”中使用“导出仓库”生成仓库压缩包，然后完全退出 Hamster Archiver。',
-    '2. 从 GitHub Releases 下载最新的 Windows x64 压缩包，完整解压到一个新文件夹；不要只替换 EXE，也不要覆盖正在运行的旧目录。',
+    '2. 从权威 GitHub Releases 页面或已配置的 CNB 镜像下载最新的 Windows x64 压缩包，完整解压到一个新文件夹；不要只替换 EXE，也不要覆盖正在运行的旧目录。',
     '3. 运行新目录中的 HamsterArchiver.exe，在“仓库”中选择“并入外部仓库”，导入第 1 步生成的仓库压缩包。',
     '4. 确认版本号、仓库记录和缩略图正常；完成核对前请保留旧程序目录。'
   ].join('\n');
@@ -186,6 +192,7 @@ async function writeUpdateSuccessNotice(prepared) {
     fromVersion: normalizeVersion(prepared.currentVersion),
     toVersion: normalizeVersion(prepared.version),
     source: prepared.source === 'package' ? 'package' : 'automatic',
+    provider: ['github', 'cnb'].includes(prepared.provider) ? prepared.provider : '',
     releaseUrl: String(prepared.releaseUrl || '').slice(0, 2_000),
     releaseNotes: compactReleaseNotesPayload(prepared.releaseNotes),
     preparedAt: new Date().toISOString()
@@ -246,6 +253,7 @@ async function readUpdateSuccessNotice({ userDataDirectory, noticeFile, currentV
     fromVersion: normalizeVersion(notice.fromVersion),
     toVersion,
     source: notice.source === 'package' ? 'package' : 'automatic',
+    provider: ['github', 'cnb'].includes(notice.provider) ? notice.provider : '',
     releaseUrl: String(notice.releaseUrl || '').slice(0, 2_000),
     releaseNotes: compactReleaseNotesPayload(notice.releaseNotes),
     noticeFile: resolvedNoticeFile,
@@ -253,15 +261,49 @@ async function readUpdateSuccessNotice({ userDataDirectory, noticeFile, currentV
   };
 }
 
-async function fetchDigestSidecar(url, fetchImpl) {
-  if (!url) return '';
-  const parsed = new URL(String(url));
-  if (parsed.protocol !== 'https:' || parsed.hostname !== 'github.com') {
-    throw new Error('SHA256 摘要地址不是受信任的 GitHub HTTPS 地址。');
+function resolveDownloadTrust(release, providerConfig, environment = process.env) {
+  const provider = String(release?.provider || release?.asset?.provider || 'github').toLowerCase();
+  if (provider === 'github') return { provider, hosts: GITHUB_DOWNLOAD_HOSTS };
+  if (provider !== 'cnb') throw new Error(`不支持的更新来源：${provider || 'unknown'}。`);
+  const config = providerConfig || resolveCnbConfig(undefined, environment);
+  if (!config?.configured) throw new Error(config?.reason || 'CNB 下载信任配置不可用。');
+  if (release?.source?.provider !== 'cnb') throw new Error('CNB 更新元数据缺少受信任的来源标记。');
+  for (const key of ['latestApiUrl', 'releasesApiUrl', 'releasesUrl', 'configSchemaVersion']) {
+    if (release.source[key] !== config[key]) throw new Error('CNB 更新元数据与本机信任配置不一致。');
   }
-  const response = await fetchImpl(parsed.href, {
+  return { provider, hosts: new Set(config.downloadHosts) };
+}
+
+function validateProviderUrl(url, trust, label) {
+  let parsed;
+  try { parsed = new URL(String(url || '')); } catch { throw new Error(`${label}不是有效 URL。`); }
+  const trusted = parsed.protocol === 'https:' && !parsed.username && !parsed.password &&
+    trust.hosts.has(parsed.hostname.toLowerCase());
+  if (!trusted) {
+    throw new Error(`${label}不是受信任的 ${trust.provider === 'github' ? 'GitHub' : 'CNB'} HTTPS 地址。`);
+  }
+  return parsed.href;
+}
+
+async function fetchWithTrustedRedirects(url, options, fetchImpl, trust, label, maxRedirects = 5) {
+  let currentUrl = validateProviderUrl(url, trust, label);
+  for (let redirects = 0; redirects <= maxRedirects; redirects += 1) {
+    const response = await fetchImpl(currentUrl, { ...options, redirect: 'manual' });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    if (redirects === maxRedirects) throw new Error(`${label}重定向次数过多。`);
+    const location = response.headers?.get?.('location');
+    if (!location) throw new Error(`${label}重定向缺少 Location。`);
+    const nextUrl = new URL(location, currentUrl).href;
+    currentUrl = validateProviderUrl(nextUrl, trust, `${label}重定向地址`);
+  }
+  throw new Error(`${label}重定向失败。`);
+}
+
+async function fetchDigestSidecar(url, fetchImpl, trust = { provider: 'github', hosts: GITHUB_DOWNLOAD_HOSTS }) {
+  if (!url) return '';
+  const response = await fetchWithTrustedRedirects(url, {
     headers: { Accept: 'text/plain', 'User-Agent': 'hamster-archiver-update-manager' }
-  });
+  }, fetchImpl, trust, 'SHA256 摘要地址');
   if (!response.ok) throw new Error(`SHA256 摘要下载失败（HTTP ${response.status}）。`);
   return normalizeDigest(await response.text());
 }
@@ -272,14 +314,10 @@ async function hashFile(filePath) {
   return hash.digest('hex');
 }
 
-async function downloadFile(url, targetPath, fetchImpl, onProgress = () => {}) {
-  const parsed = new URL(String(url || ''));
-  if (parsed.protocol !== 'https:' || parsed.hostname !== 'github.com') {
-    throw new Error('更新包地址不是受信任的 GitHub HTTPS 地址。');
-  }
-  const response = await fetchImpl(parsed.href, {
+async function downloadFile(url, targetPath, fetchImpl, onProgress = () => {}, trust = { provider: 'github', hosts: GITHUB_DOWNLOAD_HOSTS }) {
+  const response = await fetchWithTrustedRedirects(url, {
     headers: { Accept: 'application/octet-stream', 'User-Agent': 'hamster-archiver-update-manager' }
-  });
+  }, fetchImpl, trust, '更新包地址');
   if (!response.ok) throw new Error(`更新包下载失败（HTTP ${response.status}）。`);
   const totalBytes = Number(response.headers.get('content-length')) || 0;
   if (!response.body?.getReader) throw new Error('当前运行环境不支持流式下载更新包。');
@@ -352,11 +390,12 @@ async function validateUpdatePackage(packageRoot, currentVersion, expectedVersio
   return { manifest, version, releaseNotes: compactReleaseNotesPayload(manifest.releaseNotes) };
 }
 
-async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath, currentVersion, release, fetchImpl, onProgress = () => {} }) {
+async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath, currentVersion, release, fetchImpl, onProgress = () => {}, providerConfig, environment = process.env }) {
   if (process.platform !== 'win32') throw new Error('自动更新目前仅支持 Windows 便携版。');
   if (!release?.asset?.downloadUrl) throw new Error('这个 Release 没有可用的 Windows 更新包。');
+  const trust = resolveDownloadTrust(release, providerConfig, environment);
   const expectedDigest = normalizeDigest(release.asset.digest) ||
-    await fetchDigestSidecar(release.asset.digestDownloadUrl, fetchImpl);
+    await fetchDigestSidecar(release.asset.digestDownloadUrl, fetchImpl, trust);
   if (!expectedDigest) throw new Error('Release 缺少 SHA256 摘要，已停止更新。');
   const version = String(release.latestVersion || '').replace(/[^0-9A-Za-z.-]/g, '_');
   const runRoot = path.join(path.resolve(userDataDirectory), 'updates', `${version}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`);
@@ -364,7 +403,7 @@ async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath,
   const extractRoot = path.join(runRoot, 'extracted');
   try {
     await fsp.mkdir(runRoot, { recursive: true });
-    await downloadFile(release.asset.downloadUrl, archivePath, fetchImpl, onProgress);
+    await downloadFile(release.asset.downloadUrl, archivePath, fetchImpl, onProgress, trust);
     onProgress({ stage: 'verifying', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
     const actualDigest = await hashFile(archivePath);
     if (actualDigest !== expectedDigest) throw new Error('更新包 SHA256 校验失败，文件可能已损坏。');
@@ -380,6 +419,7 @@ async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath,
       currentVersion,
       applicationRoot: path.resolve(applicationRoot),
       source: 'automatic',
+      provider: trust.provider,
       releaseUrl: release.releaseUrl,
       releaseNotes: compactReleaseNotesPayload(release.releaseNotes) || validated.releaseNotes
     };
@@ -406,12 +446,13 @@ function validateInstalledPackageVersion(packagePath, currentVersion, expectedVe
   return version;
 }
 
-async function prepareInstalledUpdate({ userDataDirectory, currentVersion, release, fetchImpl, onProgress = () => {} }) {
+async function prepareInstalledUpdate({ userDataDirectory, currentVersion, release, fetchImpl, onProgress = () => {}, providerConfig, environment = process.env }) {
   if (process.platform !== 'win32') throw new Error('安装版自动更新目前仅支持 Windows。');
   if (!release?.asset?.downloadUrl) throw new Error('这个 Release 没有可用的 Windows 安装程序。');
   const version = validateInstalledPackageVersion(release.asset.name, currentVersion, release.latestVersion);
+  const trust = resolveDownloadTrust(release, providerConfig, environment);
   const expectedDigest = normalizeDigest(release.asset.digest) ||
-    await fetchDigestSidecar(release.asset.digestDownloadUrl, fetchImpl);
+    await fetchDigestSidecar(release.asset.digestDownloadUrl, fetchImpl, trust);
   if (!expectedDigest) throw new Error('Release 缺少安装程序 SHA256 摘要，已停止更新。');
   const runRoot = path.join(
     path.resolve(userDataDirectory),
@@ -421,7 +462,7 @@ async function prepareInstalledUpdate({ userDataDirectory, currentVersion, relea
   const installerPath = path.join(runRoot, path.basename(release.asset.name));
   try {
     await fsp.mkdir(runRoot, { recursive: true });
-    await downloadFile(release.asset.downloadUrl, installerPath, fetchImpl, onProgress);
+    await downloadFile(release.asset.downloadUrl, installerPath, fetchImpl, onProgress, trust);
     onProgress({ stage: 'verifying', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
     const actualDigest = await hashFile(installerPath);
     if (actualDigest !== expectedDigest) throw new Error('安装程序 SHA256 校验失败，文件可能已损坏。');
@@ -432,6 +473,7 @@ async function prepareInstalledUpdate({ userDataDirectory, currentVersion, relea
       version,
       currentVersion,
       source: 'automatic',
+      provider: trust.provider,
       releaseUrl: release.releaseUrl,
       releaseNotes: compactReleaseNotesPayload(release.releaseNotes)
     };
@@ -728,9 +770,15 @@ async function cleanupSuccessfulUpdateRuns(userDataDirectory) {
 }
 
 module.exports = {
+  GITHUB_DOWNLOAD_HOSTS,
   normalizeDigest,
   normalizeVersion,
   hashFile,
+  downloadFile,
+  fetchDigestSidecar,
+  fetchWithTrustedRedirects,
+  resolveDownloadTrust,
+  validateProviderUrl,
   prepareUpdate,
   prepareLocalUpdate,
   prepareInstalledUpdate,

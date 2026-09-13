@@ -10,6 +10,22 @@ const candidates = execFileSync(
   ['-c', `safe.directory=${projectRoot.replace(/\\/g, '/')}`, 'ls-files', '--cached', '--others', '--exclude-standard', '-z'],
   { cwd: projectRoot, encoding: 'utf8' }
 ).split('\0').filter(Boolean);
+const exportIgnoreOutput = execFileSync(
+  'git',
+  ['-c', `safe.directory=${projectRoot.replace(/\\/g, '/')}`, 'check-attr', '-z', '--stdin', 'export-ignore'],
+  {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    input: `${candidates.join('\0')}\0`
+  }
+).split('\0');
+const exportIgnoredPaths = new Set();
+for (let index = 0; index + 2 < exportIgnoreOutput.length; index += 3) {
+  const [candidate, attribute, value] = exportIgnoreOutput.slice(index, index + 3);
+  if (attribute === 'export-ignore' && value === 'set') {
+    exportIgnoredPaths.add(candidate.replace(/\\/g, '/'));
+  }
+}
 
 const forbiddenPaths = [
   /(^|\/)(saves|nuts|processed|archive-staging|userdata|user-data|userData|待处理文件|零碎文件|压缩暂存目录)(\/|$)/i,
@@ -20,7 +36,11 @@ const forbiddenPaths = [
 const forbiddenExactNames = new Set(['readmeglmversion.md']);
 const secretPatterns = [
   { label: 'Windows 用户目录', pattern: /[A-Za-z]:\\Users\\[^\\\s"']+/i },
-  { label: '本机 Codex 工作区绝对路径', pattern: /[A-Za-z]:\\CodexWorkspace\\/i },
+  {
+    label: '本机 Codex 工作区绝对路径',
+    pattern: /[A-Za-z]:\\CodexWorkspace\\/i,
+    allowWhenExportIgnored: true
+  },
   { label: 'GitHub token', pattern: /(?:github_pat_|gh[opusr]_)[A-Za-z0-9_]{20,}/ },
   { label: '私钥', pattern: /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/ }
 ];
@@ -43,7 +63,8 @@ for (const relativePath of candidates) {
   }
   if (!textExtensions.has(path.extname(relativePath).toLowerCase()) || stats.size > 5 * 1024 * 1024) continue;
   const content = fs.readFileSync(absolutePath, 'utf8');
-  for (const { label, pattern } of secretPatterns) {
+  for (const { label, pattern, allowWhenExportIgnored = false } of secretPatterns) {
+    if (allowWhenExportIgnored && exportIgnoredPaths.has(normalized)) continue;
     if (pattern.test(content)) errors.push(`${relativePath}：检测到${label}`);
   }
 }

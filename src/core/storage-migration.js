@@ -64,7 +64,9 @@ async function prepareUserDataTarget(currentRoot, targetRoot) {
     return { mode: 'existing', target };
   }
 
-  const skipped = new Set(['electron', 'updates']);
+  // Runtime caches, staged updates and the short-lived MCP connection credential
+  // are recreated by the next process and must not be copied into a new data root.
+  const skipped = new Set(['electron', 'updates', 'mcp']);
   const copyMarker = path.join(target, USER_DATA_COPY_MARKER);
   await fs.writeFile(copyMarker, `${new Date().toISOString()}\n`, 'utf8');
   let copyCompleted = false;

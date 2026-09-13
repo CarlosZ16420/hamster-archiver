@@ -1,220 +1,191 @@
 <div align="center">
 
-<img src="README.assets/iconC_cropped_1022x1022.png" alt="Hamster Archiver pixel hamster icon" width="112">
+<img src="README.assets/iconC_cropped_1022x1022.png" alt="Hamster Archiver icon" width="96">
 
 # Hamster Archiver 仓鼠症大结局
 
-### Turn scattered large files into verified archives and a searchable, previewable local warehouse
+### Enjoy collecting. Enjoy organizing, too.
 
-Local-first batch archiver and searchable media vault for Windows.
-
-Local-first · Batch archiving · Media previews · Portable data
+Turn scattered local files into your own visual resource library.
 
 ![Version](https://img.shields.io/badge/version-4.6.0-d45f3c?style=flat-square)
-![Platform](https://img.shields.io/badge/platform-Windows%20x64-23211d?style=flat-square)
-![License](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
-![Electron](https://img.shields.io/badge/Electron-43-456f83?style=flat-square)
-![SQLite](https://img.shields.io/badge/SQLite-WAL-b17422?style=flat-square)
-[![CI](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml/badge.svg)](https://github.com/CarlosZ16420/hamster-archiver/actions/workflows/ci.yml)
+![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
+![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
-[Download a release](../../releases) · [简体中文](README.md) · [English](README.en.md) · [Report an issue](../../issues) · [Contribute](CONTRIBUTING.md)
+**[Download for Windows](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[Use with AI](#let-your-ai-client-use-the-library)** · [简体中文](README.md) · [Report an issue](https://github.com/CarlosZ16420/hamster-archiver/issues)
 
 </div>
 
----
+Downloads keep piling up, your drive is almost full, and organizing everything never gets done?
 
-## AI / MCP integration
+- Folders are scattered everywhere. You do not know how to categorize them or what you can afford to delete.
+- You want a cloud backup but would rather not upload original pictures and videos for online viewing and processing.
+- You plan to package files before uploading, but worry about ending up with archives whose contents you cannot recognize.
 
-Optional local MCP tools let AI import batches, query projects and manifests, poll progress, and continue, skip or retry after reviewing similarity evidence. Enable with `--enable-mcp`; disabled by default. AI intake keeps original files and existing warehouses require no migration. See [setup and tools](docs/MCP.md) · [AI documentation entry point](llms.txt).
+**Start by adding one folder.** Hamster Archiver builds a local library of folders and videos with covers, previews and directory manifests. Organize your collection with tags, ratings and notes. When you need a backup, create archives in batches, with optional passwords and split volumes, ready for you to upload or store on another drive.
 
-Large-project details avoid repeatedly reading whole project records. Media previews load near the visible area with bounded concurrent image reads.
+**Your files can live elsewhere while a clear record of their contents and backup locations stays on your computer.**
 
-## What kind of tool is this?
+![Archive workbench and thumbnail library](assets/readme/product-overview.en-US.png)
 
-Hamster Archiver is made for you if any of these sound familiar:
+<sub>Actual application views; some labels in these screenshots may differ from the current version.</sub>
 
-- 📁 Your Downloads folder contains several terabytes of videos and images, and **finding anything feels like archaeology**.
-- 🔁 You download the same resource three times before remembering that **you may already have saved it**.
-- 🗂 You want to organize everything, but **give up as soon as you open the folder**.
-- 😰 You back files up to cloud storage, but the uploads are so disorganized that **you cannot find them again**.
-- 🔒 You do not want to hand private media to **a cloud photo service's AI scanner**.
+## One library, two ways to organize
 
-## What it does
+| Your goal | What you get |
+| --- | --- |
+| **Prepare backups for cloud storage or another drive** | Batch compression, integrity verification and catalog registration. After uploading, record the backup location; local covers, video frames and directory trees show what each archive contains. |
+| **Organize the files already on your computer** | Originals stay in place while the app creates previews and manifests. Categorize with tags and notes in the library, and queue those records for compression later if needed. |
 
-Hamster Archiver first scans folders and videos into a queue, then lets you choose compressed or uncompressed intake before verification and registration in a searchable local warehouse. A normal compression tool only creates archives; Hamster Archiver also tells you **what is inside, where it is stored and whether you have already archived something similar**.
+The app packages files and records them; you or your sync tool handles cloud uploads. Local organization uses catalog metadata such as tags and does not automatically rearrange folders on disk.
 
-- Quickly turn selected folders into a visual warehouse.
+## Store the backup elsewhere. Keep its contents in view.
 
-  <p align="center">
-    <img src="assets/readme/product-overview.en-US.png" width="100%" alt="Hamster Archiver English archive workbench and large-thumbnail warehouse interface">
-  </p>
+Each project retains image thumbnails, sampled video frames and a complete directory tree. Choose a cover, record the extraction password and backup location, and browse what you archived without opening the archive itself.
 
-- Preserve an honest overview of your collection.
+![Project organization, media previews and directory tree](assets/readme/project-detail.en-US.png)
 
-  <p align="center">
-    <img src="assets/readme/warehouse-overview.en-US.png" width="100%" alt="Hamster Archiver English warehouse overview and random-walk interface">
-  </p>
+## Everyday ease, supported by careful details
 
-  The warehouse is more than a list of archive files. It provides cover browsing, activity statistics and random discovery. Search covers titles, tags, notes, paths and filenames.
+### File safety: verify before handling originals
 
-- Record project details accurately.
+Archive intake follows **manifest → compression → integrity verification → catalog registration → configured source handling**. Low disk space and abnormal output sizes stop processing or require review. Source post-processing runs only after verification and registration succeed.
 
-  <p align="center">
-    <img src="assets/readme/project-detail.en-US.png" width="100%" alt="Hamster Archiver English project organization, media preview and complete directory tree">
-  </p>
+<details>
+<summary>Details: file preservation and recovery</summary>
 
-  Each project contains thumbnails from images and videos as well as the complete directory structure. Every preview is stored as a thumbnail so the warehouse preserves useful context without growing unnecessarily large.
+- Generate a manifest and recheck sources before compression. Cross-drive moves copy and verify before handling the source location.
+- Verify archive identity before moving or cleaning up, protecting against replacement files with the same name; handle split archives as a complete set.
+- Preserve generated archives for recovery if catalog registration fails. Cancellation during thumbnail generation keeps originals and cleans uncommitted outputs.
+- Distinguish a failed source operation from a completed operation whose status could not be saved, retaining diagnostic recovery information.
+- Track original-file location and disposition, with restoration of moved or recycled sources when conditions permit.
+- Report invalid data locations explicitly; safe data-location switching retains the previous directory instead of silently presenting an empty library.
 
-- Customize compression parameters, sampled video frames, per-project thumbnail limits and other settings.
-- Name similarity is a non-blocking candidate hint. Once the queue starts, complete content fingerprints can auto-skip complete project duplicates according to your setting, while genuine similarity needs only one review.
-- Pause for human confirmation when an unusually large task or abnormal compression ratio is detected.
-- Keep, move or recycle original files only after compression, integrity verification and warehouse registration all succeed.
+</details>
 
-## Core capabilities
+### Organization: preview, categorize and keep useful notes
 
-### Safe archiving
+Browse covers and build your own organization habits with tags, ratings and notes. Search titles, tags, notes, paths and filenames, and record backup locations in bulk.
 
-- Bundled portable 7-Zip supports 7z/ZIP, compression levels 0–9 and full `7z t` integrity tests.
-- A pre-compression manifest and source recheck protect the input; unreadable files are skipped and recorded in the log.
-- Abnormal compression results do not enter the warehouse automatically. You can keep the result or delete only the abnormal output.
-- Multi-volume outputs use an isolated staging and atomic deletion flow, avoiding partial handling of a volume set.
-- Free space is checked before compression. Cross-drive moves copy, verify and only then delete the source.
-- The queue supports pause, finish-current-then-pause, scheduled runs and remaining-time estimates based on real history.
+<details>
+<summary>Details: organization tools and responsive browsing</summary>
 
-### Media and thumbnails
+- Large thumbnails and a text list serve different browsing needs, with keyboard pagination, bulk tags and backup-location edits, and undo for supported operations.
+- Tag completion reuses existing categories; accept suggestions with Tab. Selection updates in place to reduce flicker and layout jumps.
+- Frames from the same video stay grouped, and portrait media remains fully visible. Change covers or add supplementary images from files or the clipboard.
+- Read large-project details on demand. Load nearby visible media with bounded concurrent reads, and render directory trees virtually to reduce unnecessary work.
+- Store thumbnails instead of another complete copy of original media; preview counts are configurable.
+- Choose from five themes and Chinese or English, with continuing refinements to dark menus, text contrast and dynamic messages.
 
-- A portable FFmpeg binary handles video inspection and evenly sampled frames without FFprobe.
-- Video frame count and per-project thumbnail limits are configurable; portrait media remains fully visible.
-- Multiple frames from the same video stay grouped together.
-- Images can be enlarged, selected as the cover or removed, and extra images can be selected or pasted manually.
+</details>
 
-### Search, duplicates and similarity
+### Similar resources: see the evidence and decide
 
-- SQLite + FTS5 provides persistent indexes. Chinese search uses character and bigram candidates; Latin text is indexed by word.
-- A project fingerprint index narrows candidates before complete relative paths, sizes and MD5 values strictly confirm a complete project duplicate. Similarity analysis stays entirely local.
-- File-level duplicate evidence uses batched SQLite lookups, and older warehouses backfill project fingerprints automatically instead of repeatedly scanning the whole catalog.
-- Similarity can be recalculated for one project, and a relationship can be dismissed manually; dismissals are saved symmetrically.
-- The similarity whitelist is editable, and highlighted repeated terms in project details can be added to it with one click.
+**Similar names, identical file contents and complete duplicate projects are shown separately.** Optionally skip projects that meet complete-duplicate rules; review merely similar resources instead of letting a shared word decide for you.
 
-### Original-file location tracking
+<details>
+<summary>Details: fewer false matches and bounded processing</summary>
 
-- Each project keeps a private original-path field. Older records that do not contain it are safely initialized with an empty value.
-- Projects that were not moved show their original location; moved or recycled projects show their current state.
-- Project details can open the current source location. Recycled items can be restored to their original location and opened after a successful restore.
-- Source handling is checked immediately after the current task. A safety halt occurs only when that task's Recycle Bin result cannot be verified. Historical projects are not sampled in the background, so intentional user cleanup is not misreported as a task failure.
-- When deleting a warehouse record, the app can first try to restore a moved or recycled source. If restoration fails, the record and archives are preserved.
+- Highlight only the matching name fragment. Click a red term and confirm adding it to the ignore list to reduce that source of noise; gold distinguishes identical-content evidence.
+- Reduce interference from short titles, numeric identifiers and common words. Adjust similarity strength, and retain manually dismissed relationships across recalculation.
+- Narrow candidates with indexes, verify content as needed and stop unnecessary reads once candidates are excluded. Reuse evidence instead of scanning the whole catalog for every file.
+- Use a shortcut only when the same original location and complete directory/file metadata snapshots match. Otherwise verify content; matching names or sizes alone cannot justify automatic skipping.
+- Large-folder safeguards bound representative files for ordinary similarity analysis and can omit tiny-file MD5 records from that analysis. Complete manifests and archives still cover all files.
+- Changing similarity strength does not start a full-library rebuild automatically. Choose single-project or full recalculation yourself.
 
-### Warehouse organization
+</details>
 
-- Titles, tags, ratings, notes, backup locations and project-specific extraction passwords.
-- Passwords stay masked until explicitly revealed.
-- Append tags in bulk, change backup locations in bulk, delete selected records and undo up to ten operations.
-- Add inventory records without an archive, export a warehouse or merge an external warehouse.
+### Packaging: fit your backup habits
 
-## Quick start
+Choose 7z/ZIP, passwords and custom split volumes. Queue batches, pause or schedule work, and adjust compression, sampled video frames and thumbnail counts.
 
-### Use a release directly
+<details>
+<summary>Details: compression, password records and batch tasks</summary>
 
-1. Download either the Windows x64 ZIP (portable) or Setup EXE (installed) from [Releases](../../releases).
-2. Extract the complete portable package and run `HamsterArchiver.exe`, or run Setup and choose the installation directory and desktop-shortcut option.
-3. Optionally set Directory to back up, or click Scan directory and choose it then. Scanning only fills the queue; review any warnings and choose compressed or uncompressed intake explicitly.
+- Compression levels 0–9 and configurable 64 MiB–10 GiB split volumes, with tools included in release packages.
+- Set an archive password and record extraction passwords per project. Records remain masked until revealed for viewing or copying; protect the local user data that holds them.
+- Pause, finish the current item before pausing, schedule runs and view remaining-time estimates. Add next-run resources from the desktop while processing continues.
+- Configure video frame counts and per-project thumbnail limits; task settings are saved with each job.
+- Password protection does not guarantee that a third-party storage provider will never review or remove files.
 
-Keep the complete release directory. Do not copy only the EXE: Electron, 7-Zip and FFmpeg depend on the complete package. The user data area defaults to the adjacent `userdata` directory and can be safely copied or switched under More settings.
+</details>
 
-### Manual update when automatic update is unavailable
+## Let your AI client use the library
 
-Update details are shown before replacement and once more when the new version first starts. Choose a newer ZIP for the portable edition or a newer Setup EXE for the installed edition. Background checks remain silent and never force an update.
+**Give your AI assistant the project URL, let it help with setup, then organize your collection in plain language.** Current source includes a local MCP launcher that starts or connects to the app using the bundled runtime, without a separate Node.js installation. AI can discover tools, search, submit batches, edit tags and notes, and follow tasks to completion. The running application determines the available capabilities.
 
-1. Download the matching Windows x64 ZIP or Setup EXE from [Releases](../../releases); do not extract the ZIP.
-2. In the old app, select Check for updates, choose Manual update and select the downloaded release file.
-3. After updating, confirm that the version, warehouse records and thumbnails are correct.
+### Send this to your AI assistant
 
-### Move a warehouse
+> Help me install and connect Hamster Archiver: https://github.com/CarlosZ16420/hamster-archiver . Read README, llms.txt and docs/AI-QUICKSTART.md first. Check the downloadable version and actual tools, reuse any existing installation and settings, configure MCP for this client, and verify the connection with read-only queries. Do not start intake yet. If you need my help, tell me only the next missing step.
 
-1. Use Export warehouse to create a warehouse ZIP.
-2. Run `HamsterArchiver.exe` in the new directory, open Warehouse, choose Import external warehouse and select the exported ZIP.
+This needs an assistant with local-computer access and MCP support. A chat-only client needs a tool connection first. If the app is not installed, the assistant should check the release and checksum before setup, and follow the current client's own configuration instructions.
 
-### Run from source
+Once connected, ask: “Check whether I have saved these titles” or “Catalog these folders without compression, keep the originals, and summarize the results.” When the newer editing capabilities are available, try: “Add a ‘To organize’ tag to my selected projects.”
 
-Requirements: Windows; Node.js 22.12+ on the 22.x line or Node.js 24.x; and npm 10.x/11.x. `.nvmrc` and CI follow Node.js 24.x as a development recommendation, not a Git or build gate. Direct npm dependencies use exact versions; run `npm ci` for the first installation.
+**Version note:** Public 4.6.0 supports AI search, batch intake, progress and similarity decisions. The bundled-runtime launcher and expanded editing capabilities landed in source afterward. Use the [4.6.0 connection instructions](https://github.com/CarlosZ16420/hamster-archiver/blob/v4.6.0/docs/MCP.md) for that package; a matching version number alone does not prove that the new launcher is included.
 
-`npm run release:local` uses the currently supported local Node.js installation. It does not download another Node runtime or reject a supported patch version; the release manifest records the actual Node.js and npm versions used.
+<details>
+<summary>For AI assistants: invocation order and documentation</summary>
 
-```powershell
-git clone https://github.com/CarlosZ16420/hamster-archiver.git
-cd hamster-archiver
-npm ci
-npm run verify:dependencies
-npm run check
-npm test
-npm start
-```
+Read the **[AI quick start](docs/AI-QUICKSTART.md)**, then follow the **[full MCP guide](docs/MCP.md)**. [llms.txt](llms.txt) is the machine-readable documentation index. For the current interface:
 
-Maintainer builds, user data and the public snapshot live in the repository-external `HamsterArchiver-Local/` directory. Development uses isolated `data/development`; launch the current maintained build with `npm run preview:current`. See the [development guide](docs/DEVELOPMENT.md) and [release process](docs/RELEASE.md).
+1. `hamster_discover`: find relevant capabilities and check `available`.
+2. `hamster_describe`: read the exact input schema and confirmation requirements.
+3. `hamster_call`: invoke the capability; start with read-only `settings.get` and `catalog.insights` checks.
 
-The source repository does not commit the large `ffmpeg.exe`. `dependency-lock.json` pins Electron, 7-Zip 26.02 and FFmpeg versions, sources, source packages and critical binary SHA-256 values. Licenses and source notices must exist and are included in the release integrity manifest with critical programs. Run `npm run tools:prepare` to restore bundled tools from the locked URLs and hashes, and run `npm run verify:tools` before a release build. Release packaging checks the versions and copied files again and records critical SHA-256 values in `release-manifest.json` for startup and update verification.
+Reuse saved backup preferences; ask only for missing destinations, source-handling choices or other necessary information. Poll intake through its final state and report actual outputs, catalog records, verification and failures. Explain the impact and obtain confirmation before deletion, migration, upgrades or source moves. Submission is not completion.
 
-## Portable data layout
+</details>
 
-```text
-HamsterArchiver-v4.6.0-win-x64/
-├─ HamsterArchiver.exe
-├─ tools/
-│  ├─ 7zip/
-│  └─ ffmpeg/
-├─ resources/
-└─ userdata/
-   ├─ config/       # settings and similarity whitelist
-   ├─ warehouse/    # SQLite warehouse and thumbnails
-   ├─ logs/         # current-user runtime log
-   ├─ processed/    # default destination for processed sources
-   └─ electron/     # local interface cache
-```
+The application itself does not upload media. Metadata returned through MCP, such as titles and paths, enters your chosen AI client's context. AI integration is optional.
 
-Compression staging is created beside the archive-output directory by default, for example `D:\packed-staging`, to reduce cross-drive moves. The source and archive-output locations are selected by the user and are not part of the source repository or user database.
+## Start with your first batch
 
-The user data area can contain passwords, paths, thumbnails and warehouse indexes. Git ignores it and it never enters the public snapshot. When More settings switches the location, an empty target is populated by copying the data while the old directory is retained; a target that already contains data is never merged silently with the current warehouse.
+1. Get the **Setup EXE installer** or **portable ZIP** from [Releases](https://github.com/CarlosZ16420/hamster-archiver/releases/latest). Extract the entire portable package and run `HamsterArchiver.exe`.
+2. In the archive workbench, scan a directory or drop folders and videos, then review the pending resources.
+3. For **local organization**, choose uncompressed intake. To **prepare backups**, set the archive output directory and start compressed intake. Open the library afterward to browse and organize the results.
 
-## Technology and boundaries
+Keep the full portable directory, such as `HamsterArchiver-v4.6.0-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included.
 
-| Area | Implementation |
-|---|---|
-| Desktop | Electron 43, context isolation, sandbox, strict CSP |
-| Data | Node built-in SQLite, WAL, transactions, FTS5 |
-| Compression | Portable 7-Zip, 7z/ZIP, configurable 64 MiB–10 GiB volumes, optional passwords, integrity tests |
-| Media | One FFmpeg program for inspection and sampled frames |
-| Performance | Warehouse pagination, virtualized directory trees, persistent search and similarity candidate indexes |
-| Privacy | User data stays on the local machine; warehouse data, media and passwords are not uploaded |
+## Frequently asked questions
 
-The app does not upload files. It contacts GitHub only when you select Check for updates or open a GitHub link. Portable ZIPs and installed-edition Setup packages are downloaded to a temporary user-data area and verified before the independent updater or installer applies them. Uploading archives remains the responsibility of your cloud-storage client or manual workflow.
+<details>
+<summary>Will packaging immediately free up space on a nearly full drive?</summary>
 
-## Development and contribution
+Packaging organizes files for backup; it does not guarantee substantial size reductions for videos or images. Output files require available disk space, so you can select another drive with enough room.
 
-Before submitting changes, run:
+Confirm that the backup is safely stored at its destination before deciding what to do with local files. Local archives and Recycle Bin contents still consume space. Source post-processing happens after local verification and registration; **it does not wait for or verify cloud uploads**. If you intend to clean up after uploading, keep originals first and verify the backup yourself.
 
-```powershell
-npm run verify:dependencies
-npm run check
-npm test
-npm run publish:check
-```
+</details>
 
-Also run `npm run verify:tools` before a formal build. Dependency or bundled-tool upgrades must update `dependency-lock.json` separately, review the lock-file diff and complete real archive and media-frame acceptance checks.
+<details>
+<summary>Where do files and library data live?</summary>
 
-Never commit `userdata/`, databases, logs, archives, passwords, real media or personal absolute paths. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+Local organization leaves originals in place and stores an index and thumbnails. Backup archives go to your selected destination. Portable builds default to adjacent `userdata`; installed builds use Windows user data. More settings provides a safe location-switching workflow.
 
-This project is released under the [MIT License](LICENSE). Bundled 7-Zip and FFmpeg retain their accompanying licenses.
+The application does not upload resources; you or your sync tool handles uploads. It contacts GitHub for update checks and downloads. When using AI, returned metadata enters the chosen client's context.
 
----
+</details>
 
-<div align="center">
+<details>
+<summary>How do I update? Does a warehouse export include my originals?</summary>
 
-Try the app, open an Issue or submit a Pull Request. Your feedback helps make this small tool safer and easier to use.
+Open Check for updates to read release notes and update. If networking is unavailable, download a newer release and choose Manual update: select a ZIP for portable builds or a Setup EXE for installed builds.
 
-[GitHub repository](https://github.com/CarlosZ16420/hamster-archiver) · [Feedback welcome](https://github.com/CarlosZ16420/hamster-archiver/issues)
+If an older version has no working updater, export the warehouse and import it into a new copy of the app. Verify records and thumbnails before retiring the old directory. **Warehouse exports contain the index and thumbnails, not original files or archive outputs**; keep those separately.
 
-</div>
+</details>
 
-## Acknowledgements
+## Continued refinement since 4.5.0
 
-- LINUX DO
+Recent work reworked similarity and duplicate verification, improved large-folder processing and failure recovery, and added tag completion, theme and language refinements, installed-edition updates and AI access. Much of it shows up as fewer misleading matches, less flicker and clearer file states after a failure. See the [changelog](CHANGELOG.md) for details.
+
+## Open source and contributions
+
+[MIT License](LICENSE) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)
+
+Source development requires Windows, Node.js 22.12+ on 22.x or 24.x, and npm 10.x/11.x. Install dependencies with `npm ci`, prepare bundled tools with `npm run tools:prepare` as needed, then run `npm start`. See the contribution guide for verification requirements.
+
+Thanks to 7-Zip, FFmpeg, the open-source community and everyone who tests the app and reports the details that need attention.
+
+If Hamster Archiver makes your collection easier to organize, a Star or an Issue with your experience is always welcome.

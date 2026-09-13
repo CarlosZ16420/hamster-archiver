@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const test = require('node:test');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -14,6 +15,10 @@ const { createArchivePublicationReceipt } = require('../src/core/archive-engine'
 
 function fakeManager() {
   return {
+    config: {
+      archiveOutputDirectory: path.resolve('output'),
+      intakePreferences: { version: 1, archiveOutputDirectory: path.resolve('output'), sourceDisposition: 'keep', processedSourceDirectory: '', source: 'desktop' }
+    },
     jobs: [], catalog: [{ id: 'r1', title: 'sample', archivePassword: 'secret', manifest: [{ relativePath: 'image.jpg', size: 4, thumbnailPath: 'private' }] }],
     searchCatalog() { return this.catalog; },
     async addSingle(sourcePath, automation) { this.jobs.push({ id: String(this.jobs.length), sourcePath, mcpRequestId: automation.requestId, processingMode: automation.mode, status: 'queued', intakeModeSelected: true }); },
@@ -89,7 +94,7 @@ test('MCP protocol negotiates initialization and reports tool errors', async () 
   const dispatch = createRpcHandler(createMcpTools(fakeManager()), 'test');
   assert.equal((await dispatch({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } })).result.protocolVersion, '2025-06-18');
   assert.equal(await dispatch({ jsonrpc: '2.0', method: 'notifications/initialized' }), null);
-  assert.equal((await dispatch({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).result.tools.length, 5);
+  assert.equal((await dispatch({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).result.tools.length, 3);
   assert.equal((await dispatch({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'unknown' } })).result.isError, true);
   assert.equal((await dispatch({ jsonrpc: '2.0', id: 4, method: 'unknown' })).error.code, -32601);
   assert.equal((await dispatch([])).error.code, -32600);
@@ -97,7 +102,10 @@ test('MCP protocol negotiates initialization and reports tool errors', async () 
 
 test('local MCP rejects unauthorized/browser access and works through the actual stdio adapter', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-mcp-'));
-  const server = await startMcpServer(fakeManager(), root, 'test');
+  const sessionCounts = [];
+  const server = await startMcpServer(fakeManager(), root, 'test', {
+    onSessionCountChanged: (count) => sessionCounts.push(count)
+  });
   t.after(async () => { await server.close(); await fs.rm(root, { recursive: true, force: true }); });
   const connection = JSON.parse(await fs.readFile(server.connectionFile));
   assert.equal((await fetch(connection.url)).status, 403);
@@ -118,6 +126,8 @@ test('local MCP rejects unauthorized/browser access and works through the actual
   const messages = output.trim().split('\n').map(JSON.parse);
   assert.equal(messages.length, 3);
   assert.equal(messages[2].result.structuredContent.items[0].id, 'r1');
+  assert.equal(server.sessionCount, 0);
+  assert.deepEqual(sessionCounts, [1, 0]);
 });
 
 test('AI batch uses the real inventory queue, persists automation identity and keeps original files', async (t) => {
@@ -142,7 +152,7 @@ test('AI batch uses the real inventory queue, persists automation identity and k
   assert.equal((await store.loadJobs(manager.config.repositoryDirectory))[0].mcpRequestId, 'real-test');
 });
 
-test('AI compressed intake overrides desktop trash post-processing without changing settings', async (t) => {
+test('AI compressed intake snapshots the explicit trash post-processing preference', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-mcp-archive-'));
   const source = path.join(root, 'source');
   const output = path.join(root, 'output');
@@ -150,6 +160,7 @@ test('AI compressed intake overrides desktop trash post-processing without chang
   await fs.mkdir(source);
   await fs.mkdir(output);
   await fs.writeFile(path.join(source, 'sample.txt'), 'synthetic content');
+  const sourceStats = await fs.stat(path.join(source, 'sample.txt'));
   const store = new AppStore(path.join(root, 'userdata'));
   t.after(async () => { store.closeAll(); await fs.rm(root, { recursive: true, force: true }); });
   let trashed = false;
@@ -158,12 +169,13 @@ test('AI compressed intake overrides desktop trash post-processing without chang
     archiveStagingDirectory: staging, smallItemFilter: false, similarityEnabled: false,
     autoTrashCompleted: true, scheduleEnabled: false
   }, {
-    trashItem: async () => { trashed = true; },
+    trashItem: async (target) => { trashed = true; await fs.rm(target, { recursive: true, force: true }); },
+    isTrashItemPresent: async () => true,
     archiveRunner: async (job) => {
       await fs.writeFile(path.join(output, job.archiveBaseName), 'test archive');
       return {
         archiveFiles: [{ name: job.archiveBaseName, size: 12 }], archiveTotalBytes: 12,
-        manifest: [{ relativePath: 'sample.txt', name: 'sample.txt', size: 17, md5: 'a'.repeat(32) }],
+        manifest: [{ relativePath: 'sample.txt', name: 'sample.txt', size: 17, modifiedAtMs: sourceStats.mtimeMs, md5: crypto.createHash('md5').update('synthetic content').digest('hex') }],
         directories: [], skippedFiles: [], verifiedAt: new Date().toISOString(),
         archivePublication: await createArchivePublicationReceipt(job.id, output, staging, [job.archiveBaseName])
       };
@@ -173,8 +185,69 @@ test('AI compressed intake overrides desktop trash post-processing without chang
   await createMcpTools(manager).call('hamster_batch_import', { requestId: 'compressed-test', paths: [source], mode: 'archive' });
   await idle;
   assert.equal(manager.jobs[0].status, 'completed', manager.jobs[0].errorMessage);
-  assert.equal(trashed, false);
+  assert.equal(trashed, true);
   assert.equal(manager.config.autoTrashCompleted, true);
-  assert.equal(manager.catalog[0].completionAction, 'keep');
-  await fs.access(path.join(source, 'sample.txt'));
+  assert.equal(manager.catalog[0].completionAction, 'trash');
+  await assert.rejects(fs.access(path.join(source, 'sample.txt')), /ENOENT/);
+});
+
+test('generic discovery is compact, paginated, and exposes schemas only on describe', async () => {
+  const service = createMcpTools(fakeManager());
+  assert.deepEqual(service.definitions.map((tool) => tool.name), ['hamster_discover', 'hamster_describe', 'hamster_call']);
+  assert.ok(Buffer.byteLength(JSON.stringify(service.definitions)) < 2000);
+  const discovered = await service.call('hamster_discover', { domain: 'settings', limit: 2 });
+  assert.equal(discovered.items.length, 2);
+  assert.equal(Object.hasOwn(discovered.items[0], 'inputSchema'), false);
+  const described = await service.call('hamster_describe', { capability: 'settings.intake_preferences' });
+  assert.equal(described.inputSchema.required.includes('sourceDisposition'), true);
+});
+
+test('first AI archive returns missing preferences and never queues work', async () => {
+  const manager = fakeManager();
+  manager.config = { archiveOutputDirectory: path.resolve('output'), autoTrashCompleted: false, moveCompleted: false };
+  const result = await createMcpTools(manager).call('hamster_batch_import', {
+    requestId: 'first-run', paths: [path.resolve('source')], mode: 'archive'
+  });
+  assert.deepEqual(result.missingPreferences, ['archiveOutputDirectory', 'sourceDisposition']);
+  assert.equal(manager.jobs.length, 0);
+});
+
+test('settings are redacted and destructive preferences require exact one-time confirmation', async () => {
+  const manager = fakeManager();
+  manager.config.archivePassword = 'do-not-return';
+  manager.config.autoTrashCompleted = false;
+  manager.config.moveCompleted = false;
+  manager.updateConfig = async function (config, context) {
+    this.config = { ...config };
+    if (context.recordIntakePreferences) this.config.intakePreferences = {
+      version: 1, archiveOutputDirectory: config.archiveOutputDirectory,
+      sourceDisposition: config.autoTrashCompleted ? 'trash' : config.moveCompleted ? 'move' : 'keep',
+      processedSourceDirectory: config.processedSourceDirectory || '', source: 'mcp'
+    };
+    return { config: this.config };
+  };
+  const service = createMcpTools(manager);
+  const settings = await service.call('hamster_call', { capability: 'settings.get' });
+  assert.equal(JSON.stringify(settings).includes('do-not-return'), false);
+  assert.equal(settings.settings.passwordConfigured, true);
+  const input = { archiveOutputDirectory: path.resolve('output-two'), sourceDisposition: 'trash' };
+  const preview = await service.call('hamster_call', { capability: 'settings.intake_preferences', input });
+  assert.equal(preview.requiresConfirmation, true);
+  assert.match(preview.confirmation.impact, /recycled/);
+  const applied = await service.call('hamster_call', { capability: 'settings.intake_preferences', input, confirmationToken: preview.confirmation.token });
+  assert.equal(applied.intakePreferences.sourceDisposition, 'trash');
+  await assert.rejects(service.call('hamster_call', { capability: 'settings.intake_preferences', input, confirmationToken: preview.confirmation.token }), /INVALID_CONFIRMATION/);
+});
+
+test('confirmation token is bound to product state and app capabilities report runtime availability', async () => {
+  const manager = fakeManager();
+  manager.undoStack = [];
+  const service = createMcpTools(manager);
+  const input = { targetDirectory: path.resolve('warehouse-two') };
+  const preview = await service.call('hamster_call', { capability: 'warehouse.change_directory', input });
+  manager.jobs.push({ id: 'changed', status: 'queued' });
+  await assert.rejects(service.call('hamster_call', { capability: 'warehouse.change_directory', input, confirmationToken: preview.confirmation.token }), /STALE_CONFIRMATION/);
+  const app = await service.call('hamster_describe', { capability: 'app.set_theme' });
+  assert.equal(app.available, false);
+  assert.deepEqual(app.inputSchema.properties.theme.enum, ['classic', 'day', 'night', 'forest', 'twilight']);
 });

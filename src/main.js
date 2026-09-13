@@ -3,6 +3,7 @@
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const crypto = require('node:crypto');
+const os = require('node:os');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, shell } = require('electron');
 const { AppStore, writeJsonAtomic } = require('./core/store');
 const { QueueManager } = require('./core/queue-manager');
@@ -60,6 +61,15 @@ let closePromptOpen = false;
 let shutdownInProgress = false;
 let scheduleTimer = null;
 let mcpServer = null;
+let mcpServerStarting = null;
+let mcpApplicationServices = null;
+let startedAsMcpBackground = false;
+let mcpUiWasShown = false;
+let exitAfterMcpIdle = false;
+let mcpShutdownInProgress = false;
+let mcpShutdownComplete = false;
+let resolveApplicationInitialized;
+const applicationInitialized = new Promise((resolve) => { resolveApplicationInitialized = resolve; });
 let lastCatalogPushSignature = '';
 const isSmokeTest = process.env.HAMSTER_SMOKE_TEST === '1';
 if (isSmokeTest) {
@@ -110,12 +120,141 @@ if (!hasSingleInstanceLock) {
   app.quit();
 }
 
-app.on('second-instance', () => {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+app.on('second-instance', (_event, argv) => {
+  if (argv.includes('--enable-mcp')) {
+    void enableMcpForArguments(argv).catch((error) => console.error(`MCP_START_FAILED ${error.stack || error.message}`));
+    if (!argv.includes('--show-ui')) return;
+  }
+  showMainWindow();
+});
+
+function argumentValue(argv, name) {
+  const prefix = `${name}=`;
+  return argv.find((value) => value.startsWith(prefix))?.slice(prefix.length) || '';
+}
+
+function validatedMcpReadyFile(argv) {
+  const value = argumentValue(argv, '--mcp-ready-file');
+  if (!value || !path.isAbsolute(value)) return null;
+  const resolved = path.resolve(value);
+  if (normalizeForComparison(path.dirname(resolved)) !== normalizeForComparison(os.tmpdir()) ||
+      !/^hamster-mcp-ready-\d+-[a-f0-9]{32}\.json$/i.test(path.basename(resolved))) return null;
+  return resolved;
+}
+
+async function writeMcpReadyFile(argv) {
+  const readyFile = validatedMcpReadyFile(argv);
+  if (!readyFile || !mcpServer) return;
+  await writeJsonAtomic(readyFile, { connectionFile: mcpServer.connectionFile });
+}
+
+function showMainWindow() {
+  mcpUiWasShown = true;
+  exitAfterMcpIdle = false;
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
-});
+}
+
+function handleMcpSessionCountChanged(count) {
+  if (!startedAsMcpBackground || mcpUiWasShown || count !== 0) return;
+  const timer = setTimeout(() => {
+    if (!mcpServer || mcpServer.sessionCount !== 0 || mcpUiWasShown) return;
+    if (queueManager?.running) exitAfterMcpIdle = true;
+    else app.quit();
+  }, 2_000);
+  timer.unref?.();
+}
+
+async function enableMcpForArguments(argv) {
+  await applicationInitialized;
+  if (!mcpApplicationServices) {
+    const { createMcpApplicationServices } = require('./core/mcp-application-services');
+    mcpApplicationServices = createMcpApplicationServices({
+      app,
+      net,
+      queueManager,
+      appStore,
+      applicationRoot,
+      activeUserDataLocationPath,
+      isInstalledDistribution,
+      getMainWindow: () => mainWindow,
+      showUi: controlMainWindow,
+      copyText: async (value) => clipboard.writeText(value),
+      openPath: (targetPath) => openItemLocation(targetPath, '应用位置'),
+      requestQuitForRestart: async () => {
+        allowWindowClose = true;
+        const timer = setTimeout(() => app.quit(), 150);
+        timer.unref?.();
+      },
+      onUpdateProgress: (progress) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:progress', progress);
+      }
+    });
+  }
+  if (!mcpServerStarting) {
+    mcpServerStarting = require('./core/mcp-server')
+      .startMcpServer(queueManager, queueManager.config.userDataDirectory, app.getVersion(), {
+        services: mcpApplicationServices,
+        onSessionCountChanged: handleMcpSessionCountChanged,
+        getRuntimeStatus: () => ({
+          pid: process.pid,
+          background: startedAsMcpBackground,
+          windowCount: BrowserWindow.getAllWindows().length,
+          hasVisibleWindow: BrowserWindow.getAllWindows().some((window) => window.isVisible())
+        })
+      })
+      .then((server) => { mcpServer = server; return server; })
+      .catch((error) => { mcpServerStarting = null; throw error; });
+  }
+  await mcpServerStarting;
+  await writeMcpReadyFile(argv);
+  handleMcpSessionCountChanged(mcpServer.sessionCount);
+}
+
+async function waitForWindowReady(browserWindow) {
+  if (browserWindow.webContents.getURL() && !browserWindow.webContents.isLoadingMainFrame()) return;
+  await new Promise((resolve, reject) => {
+    const loaded = () => { cleanup(); resolve(); };
+    const failed = (_event, code, description) => { cleanup(); reject(new Error(`界面加载失败 (${code})：${description}`)); };
+    const closed = () => { cleanup(); reject(new Error('界面在加载完成前已关闭。')); };
+    const cleanup = () => {
+      browserWindow.webContents.removeListener('did-finish-load', loaded);
+      browserWindow.webContents.removeListener('did-fail-load', failed);
+      browserWindow.removeListener('closed', closed);
+    };
+    browserWindow.webContents.once('did-finish-load', loaded);
+    browserWindow.webContents.once('did-fail-load', failed);
+    browserWindow.once('closed', closed);
+  });
+}
+
+async function controlMainWindow({ section, theme } = {}) {
+  showMainWindow();
+  const browserWindow = mainWindow;
+  await waitForWindowReady(browserWindow);
+  const page = section === 'catalog' ? 'library-page' : section ? 'workbench-page' : '';
+  await browserWindow.webContents.executeJavaScript(`(() => {
+    const page = ${JSON.stringify(page)};
+    const section = ${JSON.stringify(section || '')};
+    const theme = ${JSON.stringify(theme || '')};
+    if (page) document.querySelector('.nav-button[data-page="' + page + '"]')?.click();
+    if (section === 'settings') document.querySelector('.settings-col')?.scrollIntoView({ block: 'start' });
+    if (theme) {
+      const picker = document.querySelector('#theme-mode');
+      if (picker) {
+        picker.value = theme;
+        picker.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    }
+  })()`);
+  return {
+    shown: true,
+    ...(section ? { section } : {}),
+    ...(theme ? { theme } : {})
+  };
+}
 
 async function createThumbnails(job, manifest, config, options = {}) {
   const thumbnailDir = path.join(config.repositoryDirectory, 'thumbnails', job.id);
@@ -1485,10 +1624,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     resolveProgramPath: (configuredPath) => resolveApplicationPath(workspaceRoot, configuredPath)
   });
   await queueManager.initialize();
-  if (!isSmokeTest && (process.argv.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1')) {
-    mcpServer = await require('./core/mcp-server').startMcpServer(queueManager, userDataLayout.root, app.getVersion());
-    queueManager.on('automation-error', (error) => console.error('MCP_QUEUE_ERROR', error.message));
-  }
+  const mcpRequested = !isSmokeTest && (process.argv.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1');
+  startedAsMcpBackground = mcpRequested && process.argv.includes('--background') && !process.argv.includes('--show-ui');
   const pendingUpdateSuccess = await readUpdateSuccessNotice({
     userDataDirectory: userDataLayout.root,
     noticeFile: process.env.HAMSTER_UPDATE_NOTICE_FILE,
@@ -1681,8 +1818,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     });
   }
   registerIpc();
-  createWindow();
-  if (pendingUpdateSuccess && !isSmokeTest) {
+  if (!startedAsMcpBackground) createWindow();
+  if (pendingUpdateSuccess && !isSmokeTest && !startedAsMcpBackground) {
     setImmediate(() => {
       void showUpdateSuccessDialog(pendingUpdateSuccess)
         .catch((error) => console.error(`UPDATE_SUCCESS_DIALOG_WARNING ${error.message}`))
@@ -1690,7 +1827,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
           .catch((error) => console.warn(`UPDATE_SUCCESS_CLEANUP_WARNING ${error.message}`)));
     });
   }
-  if (pendingUpdateFailure && !isSmokeTest) {
+  if (pendingUpdateFailure && !isSmokeTest && !startedAsMcpBackground) {
     setImmediate(() => {
       void showUpdateFailureDialog({
         error: pendingUpdateFailure.error,
@@ -1710,6 +1847,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
         mainWindow.webContents.send('catalog:changed', catalog);
       }
     }
+    if (exitAfterMcpIdle && !queueManager.running && mcpServer?.sessionCount === 0 && !mcpUiWasShown) app.quit();
   });
   queueManager.on('progress', (progress) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('task:progress', progress);
@@ -1724,6 +1862,9 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       mainWindow.webContents.send('similarity:rebuild-progress', progress);
     }
   });
+  queueManager.on('automation-error', (error) => console.error('MCP_QUEUE_ERROR', error.message));
+  resolveApplicationInitialized();
+  if (mcpRequested) await enableMcpForArguments(process.argv);
 
   if (process.env.HAMSTER_UPDATE_VALIDATION_FILE) {
     await fs.writeFile(process.env.HAMSTER_UPDATE_VALIDATION_FILE, JSON.stringify({
@@ -1733,10 +1874,10 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   }
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    if (BrowserWindow.getAllWindows().length === 0) showMainWindow();
   });
 }).catch((error) => {
-  if (process.env.HAMSTER_SMOKE_TEST === '1') console.error(`HAMSTER_STARTUP_FAILED ${error.stack || error.message}`);
+  if (process.env.HAMSTER_SMOKE_TEST === '1' || process.argv.includes('--background')) console.error(`HAMSTER_STARTUP_FAILED ${error.stack || error.message}`);
   else dialog.showErrorBox('程序启动失败', error.message);
   app.quit();
 });
@@ -1746,7 +1887,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', (event) => {
-  if (mcpServer) { void mcpServer.close(); mcpServer = null; }
   if (scheduleTimer) clearInterval(scheduleTimer);
   if (queueManager?.running && !allowWindowClose) {
     event.preventDefault();
@@ -1757,6 +1897,22 @@ app.on('before-quit', (event) => {
       .finally(() => {
         appStore?.closeAll();
         allowWindowClose = true;
+        app.quit();
+    });
+    return;
+  }
+  if (mcpServer && !mcpShutdownComplete) {
+    event.preventDefault();
+    if (mcpShutdownInProgress) return;
+    mcpShutdownInProgress = true;
+    const server = mcpServer;
+    void server.close()
+      .catch((error) => console.warn(`MCP_SHUTDOWN_WARNING ${error.message}`))
+      .finally(() => {
+        if (mcpServer === server) mcpServer = null;
+        mcpServerStarting = null;
+        mcpShutdownComplete = true;
+        mcpShutdownInProgress = false;
         app.quit();
       });
     return;
