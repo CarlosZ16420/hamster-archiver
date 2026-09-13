@@ -10,7 +10,7 @@ on:
         default: main
         type: string
       publish:
-        description: Upload a complete Release draft (never publish automatically)
+        description: Build, verify, upload and publish the complete Release
         default: false
         type: boolean
       retain_artifact:
@@ -79,6 +79,15 @@ jobs:
         if: inputs.publish
         shell: pwsh
         run: node scripts/release-publish.js upload --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
+      - name: Publish verified GitHub Release
+        if: inputs.publish
+        shell: pwsh
+        run: |
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" | ConvertFrom-Json
+          if ($release.draft -or $release.prerelease -or $release.assets.Count -ne 4) { throw 'Published Release verification failed.' }
+          'GitHub Release is published with four verified attachments.' >> $env:GITHUB_STEP_SUMMARY
       - name: Optionally retain temporary package
         if: inputs.retain_artifact
         continue-on-error: true

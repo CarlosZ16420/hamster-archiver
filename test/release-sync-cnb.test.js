@@ -340,7 +340,7 @@ test('workflow is default-disabled, repository-guarded, checks out github.sha, a
   assert.match(workflow, /ref: \$\{\{ github\.sha \}\}/);
   assert.doesNotMatch(workflow, /ref: \$\{\{ github\.event\.release\.tag_name/);
   assert.doesNotMatch(workflow.slice(0, workflow.indexOf('- name: Mirror')), /CNB_TOKEN:/);
-  assert.match(workflow.slice(workflow.indexOf('- name: Mirror')), /CNB_TOKEN: \$\{\{ secrets\.CNB_TOKEN \}\}/);
+  assert.match(workflow.slice(workflow.indexOf('- name: Mirror')), /CNB_TOKEN: \$\{\{ secrets\.CNB \}\}/);
   assert.match(workflow, /CNB_SYNC_ENABLED: 'true'/);
   assert.match(workflow, /CNB_MAKE_LATEST: \$\{\{ github\.event_name == 'release' \|\| inputs\.make_latest \}\}/);
   assert.match(workflow, /--make-latest "\$CNB_MAKE_LATEST"/);
