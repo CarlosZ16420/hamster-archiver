@@ -54,6 +54,17 @@ function getRelease(repo, tag, commandRunner = run) {
   return null;
 }
 
+function getReleaseByTag(repo, tag, commandRunner = run) {
+  try {
+    const release = JSON.parse(commandRunner('gh', ['api', `repos/${repo}/releases/tags/${tag}`]));
+    if (release && release.tag_name === tag) return release;
+  } catch {
+    // Drafts can be briefly absent from the direct endpoint; use the
+    // authenticated paginated listing as a bounded fallback.
+  }
+  return getRelease(repo, tag, commandRunner);
+}
+
 function preflight(repo, tag, commandRunner = run) {
   validateTarget(repo, tag, commandRunner);
   const release = getRelease(repo, tag, commandRunner);
@@ -137,7 +148,7 @@ async function upload(repo, tag) {
   const assets = await verifyFiles();
   if (!release) {
     run('gh', ['release', 'create', tag, '--repo', repo, '--draft', '--verify-tag', '--title', `Hamster Archiver ${tag}`, '--notes-file', notes]);
-    release = getRelease(repo, tag);
+    release = getReleaseByTag(repo, tag);
   }
   if (!release?.draft) throw new Error('Release is no longer a draft.');
   const pending = planUploads(assets, release.assets || []);
@@ -165,4 +176,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, expectedReleaseAssetNames, findReleaseByTag, getRelease, parseArgs, planUploads, preflight, run, upload, validateTarget, verifyFiles };
+module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, parseArgs, planUploads, preflight, run, upload, validateTarget, verifyFiles };

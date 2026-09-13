@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { expectedReleaseAssetNames, findReleaseByTag, getRelease, planUploads, parseArgs, preflight } = require('../scripts/release-publish');
+const { expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, planUploads, parseArgs, preflight } = require('../scripts/release-publish');
 const { optionsFrom, findRequest } = require('../scripts/release');
 const { readReleaseNotes, assertDraftNotes } = require('../scripts/release-publish');
 const fs = require('node:fs/promises');
@@ -64,6 +64,20 @@ test('release lookup returns null for a short page and rejects malformed pages',
   const short = getRelease('CarlosZ16420/hamster-archiver', 'v4.6.1', () => JSON.stringify([]));
   assert.equal(short, null);
   assert.throws(() => getRelease('CarlosZ16420/hamster-archiver', 'v4.6.1', () => JSON.stringify({})), /invalid response/);
+});
+
+test('release lookup prefers the direct tag endpoint and falls back to the paginated list', () => {
+  const direct = getReleaseByTag('CarlosZ16420/hamster-archiver', 'v4.6.1', (_command, args) => {
+    assert.match(args[1], /releases\/tags\/v4\.6\.1$/);
+    return JSON.stringify({ tag_name: 'v4.6.1', draft: true, id: 11 });
+  });
+  assert.equal(direct.id, 11);
+
+  const fallback = getReleaseByTag('CarlosZ16420/hamster-archiver', 'v4.6.1', (_command, args) => {
+    if (args[1].endsWith('/releases/tags/v4.6.1')) throw new Error('HTTP 404');
+    return JSON.stringify([{ tag_name: 'v4.6.1', draft: true, id: 12 }]);
+  });
+  assert.equal(fallback.id, 12);
 });
 
 test('preflight preserves published refusal and returns a draft through injected GitHub calls', () => {

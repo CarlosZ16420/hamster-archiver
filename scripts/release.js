@@ -1,7 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
-const { completeDraft, getRelease, preflight, run, upload } = require('./release-publish');
+const { completeDraft, getRelease, getReleaseByTag, preflight, run, upload } = require('./release-publish');
 const version = require('../package.json').version;
 
 function optionsFrom(argv) {
@@ -37,7 +37,7 @@ async function cloud(options) {
       runId = current.id;
       if (current.status === 'completed') {
         if (current.conclusion !== 'success') throw new Error(`Cloud build ${runId} ended: ${current.conclusion}.`);
-        const release = getRelease(options.repo, options.tag);
+        const release = getReleaseByTag(options.repo, options.tag);
         if (!completeDraft(release, options.tag)) {
           throw new Error('Cloud run succeeded but complete Release draft was not found.');
         }
