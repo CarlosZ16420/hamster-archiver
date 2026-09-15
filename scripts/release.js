@@ -1,7 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
-const { completeDraft, completePublishedRelease, getReleaseByTag, publishCompleteDraft, releaseArtifacts, releaseState, run } = require('./release-publish');
+const { completeDraft, completePublishedRelease, getReleaseByTag, publishCompleteDraft, releaseArtifacts, releaseState, run, verifyFiles } = require('./release-publish');
 const version = require('../package.json').version;
 
 function optionsFrom(argv) {
@@ -82,11 +82,17 @@ async function local(options) {
       (item.display_title?.startsWith(`Windows release ${options.tag} / `) || item.head_branch === options.tag))) {
     throw new Error('A cloud build for this tag is still active. Cancel it and wait for completion before local mode.');
   }
-  const npmCli = process.env.npm_execpath;
-  if (!npmCli) throw new Error('Start with npm run release -- --mode local.');
-  run(process.execPath, [npmCli, 'run', 'release:local', '--', '--full-checks'], {
-    stdio: 'inherit', timeout: 1800000
-  });
+  try {
+    await verifyFiles();
+    console.log('Reusing the complete locally verified release bundle for this exact commit; no tests or rebuild were repeated.');
+  } catch (reuseError) {
+    const npmCli = process.env.npm_execpath;
+    if (!npmCli) throw new Error('Start with npm run release -- --mode local.');
+    console.log(`No reusable local release bundle was found (${reuseError.message}). Building and verifying once.`);
+    run(process.execPath, [npmCli, 'run', 'release:local', '--', '--full-checks'], {
+      stdio: 'inherit', timeout: 1800000
+    });
+  }
   await releaseArtifacts(options.repo, options.tag);
 }
 

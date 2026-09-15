@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { completeDraft, completePublishedRelease, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, planUploads, parseArgs, preflight, publishCompleteDraft, releaseArtifacts, releaseState, uploadAssetWithRecovery } = require('../scripts/release-publish');
+const { assertMatchingReleaseAssets, completeDraft, completePublishedRelease, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, planUploads, parseArgs, preflight, publishCompleteDraft, releaseArtifacts, releaseState, uploadAssetWithRecovery, validateMirrorTarget } = require('../scripts/release-publish');
 const { optionsFrom, findRequest } = require('../scripts/release');
 const { readReleaseNotes, assertDraftNotes } = require('../scripts/release-publish');
 const fs = require('node:fs/promises');
@@ -108,6 +108,27 @@ test('release publication and CNB mirroring share the exact four expected attach
   ]);
 });
 
+test('public GitHub Release mirroring requires the exact private snapshot mapping', () => {
+  const tag = `v${require('../package.json').version}`;
+  const runner = (_command, args) => {
+    if (args[0] === 'status') return '';
+    if (args[0] === 'rev-parse') return 'abc123def4567890';
+    if (args[1] === `repos/CarlosZ16420/hamster-archive/commits/${tag}`) {
+      return JSON.stringify({ sha: 'abc123def4567890' });
+    }
+    if (args[1] === `repos/CarlosZ16420/hamster-archiver/commits/${tag}`) {
+      return JSON.stringify({ sha: 'public123', commit: { message: 'Snapshot abc123def456: release' } });
+    }
+    throw new Error(`unexpected call: ${args.join(' ')}`);
+  };
+  assert.equal(validateMirrorTarget(
+    'CarlosZ16420/hamster-archive', 'CarlosZ16420/hamster-archiver', tag, runner
+  ), 'abc123def4567890');
+  assert.throws(() => validateMirrorTarget(
+    'CarlosZ16420/hamster-archiver', 'CarlosZ16420/hamster-archive', tag, runner
+  ), /restricted/);
+});
+
 function completeRelease(tag, draft) {
   return {
     tag_name: tag,
@@ -139,6 +160,13 @@ function localAssets(tag) {
     digest: `sha256:${String(index + 1).repeat(64)}`
   }));
 }
+
+test('public mirroring accepts only the four byte-identical private Release assets', () => {
+  const tag = 'v4.6.8';
+  const assets = localAssets(tag);
+  assert.doesNotThrow(() => assertMatchingReleaseAssets(assets, completeRelease(tag, false), tag));
+  assert.throws(() => assertMatchingReleaseAssets(assets, { ...completeRelease(tag, false), assets: [] }, tag), /complete published/);
+});
 
 function releaseRunner(tag, getCurrentRelease, onReleaseCommand = () => {}) {
   return (command, args, options) => {

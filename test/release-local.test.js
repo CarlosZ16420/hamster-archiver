@@ -25,6 +25,9 @@ test('local release prepares Electron without implicitly allowing a download', (
 
   assert.equal(packageJson.scripts['electron:prepare'], 'node scripts/prepare-electron-runtime.js');
   assert.match(source, /prepare-electron-runtime\.js/);
+  assert.match(source, /@electron-internal[\s\S]*extract-zip/);
+  assert.match(source, /\[npmCli, 'ci'\]/);
+  assert.match(source, /\[npmCli, 'run', 'tools:prepare'\]/);
   assert.doesNotMatch(source, /--allow-download/);
 });
 
@@ -39,4 +42,25 @@ test('local Current promotion also builds both executable distributions once', (
   assert.match(localRelease, /安装程序/);
   assert.doesNotMatch(formalRelease, /\['build:installer'\]/);
   assert.doesNotMatch(workflow, /run:\s*npm run build:installer/);
+});
+
+test('packaged smoke acceptance uses durable files instead of GUI stdout markers', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'release-local.js'), 'utf8');
+  const application = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+
+  assert.match(source, /HAMSTER_SMOKE_RESULT_FILE: smokeResultPath/);
+  assert.match(application, /async function writeSmokeResult/);
+  assert.match(application, /writeSmokeResult\(true, 'complete'/);
+  assert.match(application, /usesEnglishUi\(\)[\s\S]*Keep Originals[\s\S]*归档后不移动原文件/);
+  assert.match(source, /HAMSTER_UPDATE_VALIDATION_FILE: validationPath/);
+  assert.match(source, /release-integrity-v1\.json/);
+  assert.doesNotMatch(source, /smokeOutput\.includes\('HAMSTER_SMOKE_TEST_OK'\)/);
+  assert.doesNotMatch(source, /startupOutputs.*cacheHit/s);
+});
+
+test('formal local fallback reuses a complete exact-commit bundle before rebuilding', () => {
+  const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'release.js'), 'utf8');
+
+  assert.ok(source.indexOf('await verifyFiles()') < source.indexOf("'release:local'"));
+  assert.match(source, /no tests or rebuild were repeated/);
 });

@@ -5,14 +5,14 @@
 正式发行选择一次构建方式：默认 `npm run release`，或 `npm run release -- --mode local`。在需要发布的仓库工作树中执行；默认从该仓库的 origin 识别目标，也可明确指定 `--repo CarlosZ16420/hamster-archive` 或 `--repo CarlosZ16420/hamster-archiver`。目标远端标签必须与当前已提交 HEAD 完全一致，版本必须匹配 package.json；禁止移动历史标签。
 
 - 云端：显式触发 `package.yml`，在 GitHub runner 上执行完整检查、便携 ZIP/隔离启动验收、安装 EXE 构建以及两份 SHA-256 校验。目标版本尚无 Release 时，一次调用 GitHub CLI 并同时传入四个附件；GitHub CLI 按其官方流程在内部创建临时草稿、上传全部附件并发布，项目脚本不再手工创建草稿后立即反查。产物不会先下载到本机，也不依赖 Actions artifact 存储；正式云端 Release 不上传本机刚生成的 Current 产物，避免占用维护机上行流量。
-- 本地：只在云端任务已经停止且确实失败，或用户明确选择本地方式时，运行 `npm run release -- --mode local`。它执行相同完整构建和校验，并复用同一 GitHub CLI 原生发布入口，不触发云端打包。执行前准备依赖、Electron 运行时和锁定工具，见开发文档。该命令用于正式发行；日常维护后的手动测试 Current 使用 `npm run release:local`。
+- 本地：只在云端任务已经停止且确实失败，或用户明确选择本地方式时，运行 `npm run release -- --mode local`。入口先校验当前提交是否已有完整的本地发行清单、ZIP、安装 EXE 和两份 SHA-256；完全一致时直接复用并上传，不重复执行测试或构建。只有产物缺失或提交不一致时才执行一次完整构建和校验。缺少 npm 依赖时按锁文件安装；缺少发行工具时从固定来源恢复并校验；Electron 运行时仍只从校验通过的本机缓存恢复，不会隐式下载。该命令用于正式发行；日常维护后的手动测试 Current 使用 `npm run release:local`。
 - 云端任务最长运行 25 分钟；启动器连同排队默认最多等 30 分钟。启动后只用 15、30、60 秒三个有界等待窗口定位本次唯一请求，随后交给一次 `gh run watch` 阻塞等待，不再每 10 秒自行查询；超时请求取消并退出，提供明确的本地命令。不会无限查找运行、自动重复提交或暗中启动本地构建。切换前必须确认同版本云端任务已结束；本地入口会拒绝与活动云端任务同时发行。
 - Actions 分钟数/执行额度不足时，可直接选本地模式；仅 artifact 存储不足不妨碍直接上传 Release。GitHub 本身或登录不可用时，上传仍会失败，此时先保留本地产物并修复连接。
 - 任务成功必须具备 EXE、ZIP 及对应的两份校验文件。GitHub CLI 在首次发布中负责保证附件上传完成后才公开；任何上传中断最多留下内部草稿，不把缺文件的版本公开。已发布且完整的 Release 视为幂等成功，一律不重建或覆盖；已发布但不完整或为预发行时安全停止。草稿已有同名同摘要文件则跳过，冲突则停止并提示检查，绝不覆盖不明文件。
 - 上传中断后可保留现有构建，执行 `node scripts/release-publish.js release --repo OWNER/REPO --tag vX.Y.Z` 继续上传并在完整核验后发布，不必重新打包。对 EOF、连接重置、超时及可重试的 GitHub 服务错误，每个附件最多等待 30 秒回读一次并重试一次；若失败响应前远端其实已收到同名同大小同摘要附件，则视为成功而不重复上传。若从云端部分草稿切换到本地新构建，应先检查并删除该未发布草稿中冲突的附件，再重试上传；不得删除历史正式 Release。
 - 若发布入口发现完整草稿，先确认标签/提交、双语正文以及远端恰好四个非空且带 GitHub SHA-256 摘要的预期附件，然后直接发布，不重新构建、不读取本地产物、不重复上传；发布后的立即回读未达到预期时只固定等待 30 秒再回读一次，不进行高频轮询。部分草稿才进入构建、续传和冲突核验。云端任务成功后，本地启动器接受“完整正式 Release”为成功状态。应用的自动更新只读取正式 Release，安装版和便携版历史附件不受 Actions 清理影响。
 
-Git 标签推送不再触发打包；两个仓库不会因同步同一版本而自动各打一次。普通 CI 仍自动运行。公开仓库仍只接受私有源码的受控快照，只有需要向公开用户发行时才选择公开仓库构建；不要同时对两个仓库启动同版本发布。
+Git 标签推送不再触发打包；两个仓库不会因同步同一版本而自动各打一次。普通 CI 仍自动运行。私有与公开 GitHub Release 的 Windows 附件来自同一私有版本时，使用 `node scripts/release-publish.js mirror --from-repo CarlosZ16420/hamster-archive --repo CarlosZ16420/hamster-archiver --tag vX.Y.Z`：它核对公开标签的快照提交映射、私有正式 Release、四个本地文件及远端大小/SHA-256，再以公开累积双语正文发布相同附件。公开仓库无需再为同一版本重复构建。
 
 ## CNB 发行镜像
 
@@ -47,7 +47,7 @@ Actions 页面也可手动运行：`tag` 填现有版本标签，`publish=true` 
 2. 审查差异和仓库安全，提交到本地 `main` 并推送私人 `origin/main`，确保本地主干、远端主干一致且工作树干净。
 3. 每次代码维护完成都运行 `npm run release:local`，将当前已提交且已推送的 `main` 刷新到外部 `HamsterArchiver-Local/builds/current`，并在同一次本地测试发行中生成便携 ZIP、安装 EXE 与各自 SHA-256。手动测试至少覆盖 `builds/current/HamsterArchiver.exe` 和 `builds/installers/HamsterArchiver-Setup-vX.Y.Z-win-x64.exe`；该入口默认不重复执行完整源码测试矩阵。云端正式发行避免无条件重复本地打包或上传本地产物，但不得以云端成功为由默默遗漏本轮明确要求的 Current。
 4. 用户明确要求测试、SemVer 主版本或被指定为重大/正式发布、上传私有 GitHub Release、或推送公开仓库时，改用 `npm run release:local -- --full-checks`。
-5. 两种模式都直接使用当前受支持的本机 Node.js 22.12+（22.x）或 24.x，以及 npm 10.x/11.x；不下载第二套 Node，也不限制支持范围内的补丁版本。发行入口先校验 Electron 运行时，缺失时只从 SHA-256 校验通过的本机缓存恢复；没有可用缓存时停止并明确说明未下载，只有人工确认后显式运行 `npm run electron:prepare -- --allow-download` 才允许联网。发行清单记录实际使用版本。随后从当前提交构建到仓库外 staging，并强制验证锁定工具、发行清单、ZIP、SHA-256、隔离数据烟雾启动，以及打包应用首次全量校验和第二次缓存命中。完整模式还执行依赖、语法、单元测试、目录/版本/发布安全检查。
+5. 两种模式都直接使用当前受支持的本机 Node.js 22.12+（22.x）或 24.x，以及 npm 10.x/11.x；不下载第二套 Node，也不限制支持范围内的补丁版本。`electron.exe` 是锁定 npm 依赖生成的运行时文件，不进入 Git；公开快照重建或全新检出后由发行入口按锁文件恢复 npm 包，再从 SHA-256 校验通过的本机缓存恢复 Electron 运行时。没有可用缓存时停止并明确说明未下载，只有人工确认后显式运行 `npm run electron:prepare -- --allow-download` 才允许联网。发行清单记录实际使用版本。随后从当前提交构建到仓库外 staging，并强制验证锁定工具、发行清单、ZIP、SHA-256、隔离数据烟雾启动，以及打包应用首次全量校验和第二次缓存命中。烟雾验收使用隔离目录中的结果文件，不依赖 Windows GUI 进程在 runner 上不稳定的标准输出。完整模式还执行依赖、语法、单元测试、目录/版本/发布安全检查。
 6. 验收成功后旧 current 进入 history，新构建提升为 `builds/current`，便携压缩包写入 `builds/packages`，安装 EXE 写入 `builds/installers`。`release:local` 成功必须同时报告 Current 中的便携 EXE、便携 ZIP、安装 EXE 和两份 SHA-256；缺少任一发行形态时不得宣称本地测试发行完成。
 7. 使用 `npm run preview:current` 启动；不要在源码根目录复制或运行 EXE。
 

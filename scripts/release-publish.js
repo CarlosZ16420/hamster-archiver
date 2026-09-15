@@ -22,7 +22,9 @@ function parseArgs(argv) {
   const [command, ...rest] = argv;
   const options = { command };
   for (let i = 0; i < rest.length; i += 2) {
-    if (!['--repo', '--tag'].includes(rest[i]) || !rest[i + 1]) throw new Error('Expected --repo OWNER/REPO --tag vX.Y.Z');
+    if (!['--repo', '--tag', '--from-repo'].includes(rest[i]) || !rest[i + 1]) {
+      throw new Error('Expected --repo OWNER/REPO --tag vX.Y.Z [--from-repo OWNER/REPO]');
+    }
     options[rest[i].slice(2)] = rest[i + 1];
   }
   return options;
@@ -90,15 +92,16 @@ function preflight(repo, tag, commandRunner = run) {
   return release;
 }
 
-async function verifyFiles() {
+async function verifyFiles(expectedCommit = run('git', ['rev-parse', 'HEAD'])) {
   const layout = makeLocalLayout(root);
-  const head = run('git', ['rev-parse', 'HEAD']);
   for (const manifestPath of [
     path.join(layout.currentBuild, 'release-manifest.json'),
     path.join(layout.stagingRoot, `HamsterArchiver-v${version}-win-x64-installed`, 'release-manifest.json')
   ]) {
     const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
-    if (manifest.version !== version || manifest.commit !== head) throw new Error('Build manifest does not match current commit/version.');
+    if (manifest.version !== version || manifest.commit !== expectedCommit) {
+      throw new Error('Build manifest does not match the expected commit/version.');
+    }
   }
   const binaries = [
     path.join(layout.packageRoot, `HamsterArchiver-v${version}-win-x64.zip`),
@@ -128,6 +131,33 @@ function planUploads(local, remote) {
     }
     return false;
   });
+}
+
+function validateMirrorTarget(sourceRepo, targetRepo, tag, commandRunner = run) {
+  if (sourceRepo !== 'CarlosZ16420/hamster-archive' || targetRepo !== 'CarlosZ16420/hamster-archiver') {
+    throw new Error('Release mirroring is restricted to the private Hamster source and public snapshot repositories.');
+  }
+  if (tag !== `v${version}`) throw new Error(`Tag must match package version v${version}.`);
+  if (commandRunner('git', ['status', '--porcelain'])) throw new Error('Commit changes before mirroring a release.');
+  const sourceCommit = commandRunner('git', ['rev-parse', `${tag}^{commit}`]);
+  const remoteSource = JSON.parse(commandRunner('gh', ['api', `repos/${sourceRepo}/commits/${tag}`]));
+  if (remoteSource.sha !== sourceCommit) throw new Error('The private remote tag differs from the local version tag.');
+  const remoteTarget = JSON.parse(commandRunner('gh', ['api', `repos/${targetRepo}/commits/${tag}`]));
+  const snapshotSource = /^Snapshot ([a-f0-9]{12})(?::|$)/i
+    .exec(String(remoteTarget?.commit?.message || '').trim())?.[1]?.toLowerCase();
+  if (snapshotSource !== sourceCommit.slice(0, 12).toLowerCase()) {
+    throw new Error('The public version tag is not a snapshot of the private release commit.');
+  }
+  return sourceCommit;
+}
+
+function assertMatchingReleaseAssets(localAssets, release, tag) {
+  if (!completePublishedRelease(release, tag)) {
+    throw new Error('The private source Release is not a complete published stable Release.');
+  }
+  if (planUploads(localAssets, release.assets || []).length !== 0) {
+    throw new Error('The private source Release is missing one or more locally verified assets.');
+  }
 }
 
 function expectedReleaseAssetNames(tag) {
@@ -222,9 +252,15 @@ async function releaseArtifacts(repo, tag, dependencies = {}) {
   const sourceRoot = dependencies.sourceRoot || root;
   const wait = dependencies.wait || delay;
   const waitMs = dependencies.waitMs ?? RELEASE_READ_BACK_DELAY_MS;
-  let release = preflight(repo, tag, commandRunner);
+  let release = dependencies.preflightRelease
+    ? dependencies.preflightRelease()
+    : preflight(repo, tag, commandRunner);
   const { notes, body } = await readReleaseNotes(repo, tag, sourceRoot);
   assertDraftNotes(release, body);
+  if (completePublishedRelease(release, tag)) {
+    console.log(`Release is already published and complete: ${release.html_url}`);
+    return release;
+  }
   const assets = await fileVerifier();
   if (!release) {
     try {
@@ -273,6 +309,32 @@ async function releaseArtifacts(repo, tag, dependencies = {}) {
   return publishCompleteDraft(repo, tag, final, commandRunner, sourceRoot, wait, waitMs);
 }
 
+async function mirrorReleaseArtifacts(sourceRepo, targetRepo, tag, dependencies = {}) {
+  const commandRunner = dependencies.commandRunner || run;
+  const sourceRoot = dependencies.sourceRoot || root;
+  const wait = dependencies.wait || delay;
+  const waitMs = dependencies.waitMs ?? RELEASE_READ_BACK_DELAY_MS;
+  const sourceCommit = validateMirrorTarget(sourceRepo, targetRepo, tag, commandRunner);
+  const fileVerifier = dependencies.fileVerifier || verifyFiles;
+  const assets = await fileVerifier(sourceCommit);
+  assertMatchingReleaseAssets(assets, getReleaseByTag(sourceRepo, tag, commandRunner), tag);
+  return releaseArtifacts(targetRepo, tag, {
+    commandRunner,
+    fileVerifier: async () => assets,
+    sourceRoot,
+    wait,
+    waitMs,
+    preflightRelease: () => {
+      const release = getReleaseByTag(targetRepo, tag, commandRunner);
+      if (release && !release.draft) {
+        if (completePublishedRelease(release, tag)) return release;
+        throw new Error('The public Release exists but is incomplete or marked as a prerelease.');
+      }
+      return release;
+    }
+  });
+}
+
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.command === 'verify') console.log(JSON.stringify(await verifyFiles(), null, 2));
@@ -283,12 +345,16 @@ async function main() {
     }
   }
   else if (options.command === 'release' || options.command === 'upload') await releaseArtifacts(options.repo, options.tag);
+  else if (options.command === 'mirror') {
+    if (!options['from-repo']) throw new Error('Mirror requires --from-repo OWNER/REPO.');
+    await mirrorReleaseArtifacts(options['from-repo'], options.repo, options.tag);
+  }
   else if (options.command === 'publish') {
     validateTarget(options.repo, options.tag);
     await publishCompleteDraft(options.repo, options.tag);
   }
-  else throw new Error('Use state, preflight, verify, release, or publish.');
+  else throw new Error('Use state, preflight, verify, release, mirror, or publish.');
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, completePublishedRelease, errorText, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, parseArgs, planUploads, preflight, publishCompleteDraft, readReleaseWithOneDelayedRetry, releaseArtifacts, releaseState, run, uploadAssetWithRecovery, validateTarget, verifyFiles };
+module.exports = { assertDraftNotes, assertMatchingReleaseAssets, readReleaseNotes, completeDraft, completePublishedRelease, errorText, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, mirrorReleaseArtifacts, parseArgs, planUploads, preflight, publishCompleteDraft, readReleaseWithOneDelayedRetry, releaseArtifacts, releaseState, run, uploadAssetWithRecovery, validateMirrorTarget, validateTarget, verifyFiles };

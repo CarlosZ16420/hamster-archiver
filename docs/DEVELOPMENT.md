@@ -2,7 +2,7 @@
 
 ## 环境
 
-使用 Windows，以及 Node.js 22.12+（22.x）或 Node.js 24.x，配套 npm 10.x/11.x。`.nvmrc` 与 CI 跟随 Node.js 24.x 作为开发建议；开发和本地发行只校验兼容范围，不限定补丁版本。项目通过 `.npmrc` 使用官方 npm 仓库，首次安装运行 `npm ci`；随后运行 `npm run electron:prepare` 准备 Electron 运行时。该命令默认只使用本机校验通过的缓存，缓存不存在时会停止且不会下载；人工确认允许下载后才运行 `npm run electron:prepare -- --allow-download`。缺少锁定工具时运行 `npm run tools:prepare`。
+使用 Windows，以及 Node.js 22.12+（22.x）或 Node.js 24.x，配套 npm 10.x/11.x。`.nvmrc` 与 CI 跟随 Node.js 24.x 作为开发建议；开发和本地发行只校验兼容范围，不限定补丁版本。项目通过 `.npmrc` 使用官方 npm 仓库，首次安装运行 `npm ci`；随后运行 `npm run electron:prepare` 准备 Electron 运行时。`electron.exe` 位于被 Git 忽略的 `node_modules/electron/dist/`，不是源码文件；全新检出或公开快照重建后需要重新准备。该命令默认只使用本机校验通过的缓存，缓存不存在时会停止且不会下载；人工确认允许下载后才运行 `npm run electron:prepare -- --allow-download`。缺少锁定工具时运行 `npm run tools:prepare`。正式本地发行入口会自动补齐缺失的锁定 npm 依赖和工具。
 
 ## 两层目录
 

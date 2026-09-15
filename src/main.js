@@ -794,6 +794,19 @@ async function inspectSmokeVisualColorStates(browserWindow) {
   };
 }
 
+async function writeSmokeResult(ok, stage, details = null) {
+  const target = String(process.env.HAMSTER_SMOKE_RESULT_FILE || '').trim();
+  if (!target) return;
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  await fs.writeFile(target, JSON.stringify({
+    ok,
+    stage,
+    version: app.getVersion(),
+    completedAt: new Date().toISOString(),
+    ...(details ? { details } : {})
+  }), 'utf8');
+}
+
 function createWindow() {
   const replacesStartupWindow = Boolean(startupWindow && !startupWindow.isDestroyed());
   mainWindow = new BrowserWindow({
@@ -883,6 +896,7 @@ function createWindow() {
       })()`);
       if (!bridgeStatus.exists || bridgeStatus.missing.length > 0) {
         console.error(`HAMSTER_BRIDGE_TEST_FAILED ${JSON.stringify(bridgeStatus)}`);
+        await writeSmokeResult(false, 'bridge', bridgeStatus);
         app.exitCode = 1;
         app.quit();
         return;
@@ -897,11 +911,9 @@ function createWindow() {
       const expectedSourceState = ['trash', 'move', 'keep'].includes(process.env.HAMSTER_SMOKE_SOURCE_DISPOSITION)
         ? process.env.HAMSTER_SMOKE_SOURCE_DISPOSITION
         : 'keep';
-      const expectedSourceLabels = {
-        trash: '归档后移入回收站',
-        move: '归档后移动原文件',
-        keep: '归档后不移动原文件'
-      };
+      const expectedSourceLabels = usesEnglishUi()
+        ? { trash: 'Move to Recycle Bin', move: 'Move Originals', keep: 'Keep Originals' }
+        : { trash: '归档后移入回收站', move: '归档后移动原文件', keep: '归档后不移动原文件' };
       const uiStatus = await mainWindow.webContents.executeJavaScript(`({
         hasVolumeControls: Boolean(document.querySelector('#split-volume') && document.querySelector('#volume-size') && document.querySelector('#volume-unit')),
         hasNoVolumeExample: !document.querySelector('#volume-hint') || !document.querySelector('#volume-hint')?.textContent,
@@ -927,6 +939,7 @@ function createWindow() {
             { state: 'keep', label: '归档后不移动原文件' }
           ])) {
         console.error(`HAMSTER_IPC_TEST_FAILED ${JSON.stringify({ ipcStatus, uiStatus })}`);
+        await writeSmokeResult(false, 'ipc-ui', { ipcStatus, uiStatus });
         app.exitCode = 1;
         app.quit();
         return;
@@ -961,6 +974,7 @@ function createWindow() {
         console.log(`HAMSTER_VIDEO_FRAME_TEST ${JSON.stringify(frameStatus)}`);
         if (frameStatus.count !== 6 || !frameStatus.grouped || !frameStatus.increasing || !frameStatus.filesExist) {
           console.error('HAMSTER_VIDEO_FRAME_TEST_FAILED');
+          await writeSmokeResult(false, 'video-frame', frameStatus);
           app.exitCode = 1;
           app.quit();
           return;
@@ -1003,8 +1017,10 @@ function createWindow() {
               emptyLibraryStatus.hasNoCoverWords || emptyLibraryStatus.stillLoading || !emptyLibraryStatus.usesForestGradient ||
               !emptyLibraryStatus.navCentered || !emptyLibraryStatus.headerControlsSeparate) {
             console.error('HAMSTER_EMPTY_LIBRARY_TEST_FAILED');
+            await writeSmokeResult(false, 'empty-library', emptyLibraryStatus);
             app.exitCode = 1;
           } else {
+            await writeSmokeResult(true, 'complete', { bridgeStatus, ipcStatus, uiStatus });
             console.log(`HAMSTER_SMOKE_TEST_OK ${JSON.stringify({ bridgeStatus, ipcStatus, uiStatus })}`);
           }
           app.quit();
@@ -1231,6 +1247,7 @@ function createWindow() {
             libraryStatus.dotArtCount !== 0 || libraryStatus.thumbnailImages < 1 ||
             !libraryStatus.hasContainedDetailImage || libraryStatus.virtualTreeCanvasHeight < 1) {
           console.error('HAMSTER_LIBRARY_TEST_FAILED');
+          await writeSmokeResult(false, 'library', { libraryStatus, listViewStatus });
           app.exitCode = 1;
           app.quit();
           return;
@@ -1281,6 +1298,7 @@ function createWindow() {
         await fs.mkdir(path.dirname(process.env.HAMSTER_SCREENSHOT_PATH), { recursive: true });
         await fs.writeFile(process.env.HAMSTER_SCREENSHOT_PATH, image.toPNG());
       }
+      await writeSmokeResult(true, 'complete', { bridgeStatus, ipcStatus, uiStatus });
       console.log(`HAMSTER_SMOKE_TEST_OK ${JSON.stringify({ bridgeStatus, ipcStatus, uiStatus })}`);
       app.quit();
     });
