@@ -1,7 +1,7 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
-const { completeDraft, completePublishedRelease, getReleaseByTag, publishCompleteDraft, releaseState, run, upload } = require('./release-publish');
+const { completeDraft, completePublishedRelease, getReleaseByTag, publishCompleteDraft, releaseArtifacts, releaseState, run } = require('./release-publish');
 const version = require('../package.json').version;
 
 function optionsFrom(argv) {
@@ -28,34 +28,51 @@ async function cloud(options) {
   run('gh', ['workflow', 'run', 'package.yml', '--repo', options.repo, '--ref', 'main',
     '-f', `tag=${options.tag}`, '-f', 'publish=true', '-f', 'retain_artifact=false', '-f', `request_id=${requestId.id}`]);
   const deadline = Date.now() + options.waitMinutes * 60000;
-  let runId;
-  while (Date.now() < deadline) {
+  let current;
+  for (const waitMs of [15000, 30000, 60000]) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    await delay(Math.min(waitMs, remaining));
     const data = JSON.parse(run('gh', ['api', `repos/${options.repo}/actions/workflows/package.yml/runs?event=workflow_dispatch&per_page=100`]));
-    const current = findRequest(data.workflow_runs, requestId);
-    if (current) {
-      if (!runId) console.log(`Cloud build: ${current.html_url}`);
-      runId = current.id;
-      if (current.status === 'completed') {
-        if (current.conclusion !== 'success') throw new Error(`Cloud build ${runId} ended: ${current.conclusion}.`);
-        const release = getReleaseByTag(options.repo, options.tag);
-        if (completePublishedRelease(release, options.tag)) {
-          console.log(`Cloud Release published: ${release.html_url}`);
-          return;
-        }
-        if (completeDraft(release, options.tag)) {
-          await publishCompleteDraft(options.repo, options.tag, release);
-          return;
-        }
-        throw new Error('Cloud run succeeded but neither a complete published Release nor a complete draft was found.');
-      }
+    current = findRequest(data.workflow_runs, requestId);
+    if (current) break;
+  }
+  if (!current) throw new Error('The dispatched cloud run was not visible within the bounded wait. No second run was submitted.');
+  console.log(`Cloud build: ${current.html_url}`);
+  if (current.status !== 'completed') {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      run('gh', ['run', 'cancel', String(current.id), '--repo', options.repo]);
+      throw new Error(`Cloud wait exceeded ${options.waitMinutes} minutes; cancellation was requested for run ${current.id}.`);
     }
-    await delay(10000);
+    try {
+      run('gh', ['run', 'watch', String(current.id), '--repo', options.repo, '--exit-status', '--interval', '30'], {
+        stdio: ['ignore', 'inherit', 'inherit'], timeout: remaining
+      });
+    } catch (error) {
+      const state = JSON.parse(run('gh', ['run', 'view', String(current.id), '--repo', options.repo, '--json', 'status,conclusion,url']));
+      if (state.status !== 'completed' && Date.now() >= deadline) {
+        run('gh', ['run', 'cancel', String(current.id), '--repo', options.repo]);
+        throw new Error(`Cloud wait exceeded ${options.waitMinutes} minutes; cancellation was requested for run ${current.id}.`);
+      }
+      if (state.status !== 'completed') throw new Error(`Cloud run watch stopped before completion: ${error.message}`);
+      current = { ...current, ...state };
+    }
   }
-  if (runId) {
-    run('gh', ['run', 'cancel', String(runId), '--repo', options.repo]);
-    console.error(`Cancellation requested for run ${runId}. Confirm it has stopped before using local mode.`);
+  if (current.status !== 'completed' || !current.conclusion) {
+    current = { ...current, ...JSON.parse(run('gh', ['run', 'view', String(current.id), '--repo', options.repo, '--json', 'status,conclusion,url'])) };
   }
-  throw new Error(`Cloud wait exceeded ${options.waitMinutes} minutes. No automatic retry or local build was started.`);
+  if (current.conclusion !== 'success') throw new Error(`Cloud build ${current.id} ended: ${current.conclusion}.`);
+  const release = getReleaseByTag(options.repo, options.tag);
+  if (completePublishedRelease(release, options.tag)) {
+    console.log(`Cloud Release published: ${release.html_url}`);
+    return;
+  }
+  if (completeDraft(release, options.tag)) {
+    await publishCompleteDraft(options.repo, options.tag, release);
+    return;
+  }
+  throw new Error('Cloud run succeeded but neither a complete published Release nor a complete draft was found.');
 }
 
 async function local(options) {
@@ -67,11 +84,10 @@ async function local(options) {
   }
   const npmCli = process.env.npm_execpath;
   if (!npmCli) throw new Error('Start with npm run release -- --mode local.');
-  for (const args of [['release:local', '--', '--full-checks'], ['build:installer']]) {
-    run(process.execPath, [npmCli, 'run', ...args], { stdio: 'inherit', timeout: 1800000 });
-  }
-  const draft = await upload(options.repo, options.tag);
-  await publishCompleteDraft(options.repo, options.tag, draft);
+  run(process.execPath, [npmCli, 'run', 'release:local', '--', '--full-checks'], {
+    stdio: 'inherit', timeout: 1800000
+  });
+  await releaseArtifacts(options.repo, options.tag);
 }
 
 async function main() {

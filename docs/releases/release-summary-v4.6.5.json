@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.5",
+  "notes": {
+    "zh-CN": [
+      "库存数量与 GB 容量可打开记录统计，按月纵向翻阅完整历史或查看年度汇总。",
+      "活跃度默认显示截至当前周的最近 16 周，正常宽度占满区域，只有窄窗口才提供横向滚动。",
+      "白昼主题无封面随机漫步使用森林绿金渐变，空仓库立即显示同一背景；顶部导航保持居中且不与其他控件重叠。"
+    ],
+    "en-US": [
+      "Inventory and GB totals open scrollable monthly history or yearly summaries.",
+      "Activity shows the latest 16 weeks by default, fills normal-width containers, and scrolls horizontally only in narrow windows.",
+      "Daylight no-cover Random Walk cards use the Forest green-and-gold gradient, including an immediate empty-library background; top navigation stays centered without overlapping other controls."
+    ]
+  }
+}

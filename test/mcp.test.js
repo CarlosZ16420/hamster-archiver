@@ -251,3 +251,157 @@ test('confirmation token is bound to product state and app capabilities report r
   assert.equal(app.available, false);
   assert.deepEqual(app.inputSchema.properties.theme.enum, ['classic', 'day', 'night', 'forest', 'twilight']);
 });
+
+test('current three-tool intake refuses unrelated desktop work and starts only its own job ids', async () => {
+  const manager = fakeManager();
+  const service = createMcpTools(manager);
+  manager.jobs.push({ id: 'desktop', sourcePath: path.resolve('desktop'), status: 'queued', intakeModeSelected: true });
+  await assert.rejects(service.call('hamster_call', {
+    capability: 'intake.add_batch',
+    input: { requestId: 'mcp-only', paths: [path.resolve('source')], mode: 'inventory_only' }
+  }), /UNRELATED_QUEUE_WORK/);
+
+  manager.jobs = [];
+  manager.startQueue = async function (jobIds) { this.startedJobIds = jobIds; };
+  const result = await service.call('hamster_call', {
+    capability: 'intake.add_batch',
+    input: { requestId: 'mcp-only', paths: [path.resolve('source')], mode: 'inventory_only' }
+  });
+  assert.deepEqual(manager.startedJobIds, [result.jobs[0].id]);
+});
+
+test('queue.state filters and paginates without returning a duplicate full jobs array', async () => {
+  const manager = fakeManager();
+  manager.jobs = Array.from({ length: 120 }, (_, index) => ({
+    id: `job-${index}`, mcpRequestId: index < 3 ? 'small-batch' : 'large-batch',
+    displayName: `sample-${index}`, status: 'queued', progress: 0
+  }));
+  const service = createMcpTools(manager);
+  const first = await service.call('hamster_call', {
+    capability: 'queue.state', input: { requestId: 'large-batch', limit: 1 }
+  });
+  assert.equal(first.totalJobs, 120);
+  assert.equal(first.total, 117);
+  assert.equal(first.items.length, 1);
+  assert.equal(Object.hasOwn(first, 'jobs'), false);
+  assert.ok(Buffer.byteLength(JSON.stringify(first)) < 2000);
+
+  const exact = await service.call('hamster_call', {
+    capability: 'queue.state', input: { jobId: 'job-2' }
+  });
+  assert.equal(exact.total, 1);
+  assert.equal(exact.items[0].id, 'job-2');
+});
+
+test('catalog.insights is compact by default and returns only non-empty activity when requested', async () => {
+  const manager = fakeManager();
+  manager.getWarehouseInsights = () => ({
+    inventoryCount: 2,
+    uniqueTagCount: 3,
+    totalOriginalBytes: 4489,
+    year: 2026,
+    activity: Array.from({ length: 371 }, (_, index) => ({
+      date: `2026-day-${index + 1}`,
+      inventoryCount: index === 100 ? 2 : 0,
+      originalBytes: index === 100 ? 4489 : 0,
+      future: index > 255,
+      outsideYear: false
+    }))
+  });
+  const service = createMcpTools(manager);
+  const described = await service.call('hamster_describe', { capability: 'catalog.insights' });
+  assert.equal(described.inputSchema.properties.includeActivity.type, 'boolean');
+
+  const summary = await service.call('hamster_call', { capability: 'catalog.insights', input: {} });
+  assert.equal(summary.inventoryCount, 2);
+  assert.equal(Object.hasOwn(summary, 'activity'), false);
+  assert.ok(Buffer.byteLength(JSON.stringify(summary)) < 200);
+
+  const detailed = await service.call('hamster_call', {
+    capability: 'catalog.insights', input: { includeActivity: true }
+  });
+  assert.equal(detailed.activity.length, 1);
+  assert.equal(detailed.activity[0].inventoryCount, 2);
+});
+
+test('common settings schema is explicit, rejects repository bypass, and never returns passwords', async () => {
+  const manager = fakeManager();
+  manager.updateConfig = async function (config) { this.config = { ...config }; return { config: this.config }; };
+  const service = createMcpTools(manager);
+  const described = await service.call('hamster_describe', { capability: 'settings.patch' });
+  const properties = described.inputSchema.properties.patch.properties;
+  for (const key of ['archivePassword', 'archiveNamingMode', 'archiveFormat', 'videoFrameBackup', 'videoFrameCount', 'thumbnailLimit', 'smallItemFilter', 'minimumTaskBytes', 'autoSkipExactDuplicates', 'autoSkipExactDuplicateAction']) {
+    assert.ok(Object.hasOwn(properties, key), `missing settings field ${key}`);
+  }
+  assert.equal(Object.hasOwn(properties, 'repositoryDirectory'), false);
+  await assert.rejects(service.call('hamster_call', {
+    capability: 'settings.patch', input: { patch: { repositoryDirectory: path.resolve('bypass') } }
+  }), /Unknown argument/);
+
+  const input = { patch: { archivePassword: 'private-test-password', recordArchivePassword: false, archiveNamingMode: 'original', videoFrameCount: 5 } };
+  const preview = await service.call('hamster_call', { capability: 'settings.patch', input });
+  assert.equal(preview.requiresConfirmation, true);
+  const applied = await service.call('hamster_call', {
+    capability: 'settings.patch', input, confirmationToken: preview.confirmation.token
+  });
+  assert.equal(applied.settings.passwordConfigured, true);
+  assert.equal(applied.settings.recordArchivePassword, false);
+  assert.equal(applied.settings.archiveNamingMode, 'original');
+  assert.equal(applied.settings.videoFrameCount, 5);
+  assert.equal(JSON.stringify(applied).includes('private-test-password'), false);
+});
+
+test('new queue decisions require current evidence and a concrete confirmation', async () => {
+  const manager = fakeManager();
+  const job = { id: 'review', mcpRequestId: 'batch', status: 'awaiting_duplicate_confirmation', duplicateReviewFingerprint: 'first' };
+  manager.jobs = [job];
+  const service = createMcpTools(manager);
+  const state = await service.call('hamster_call', { capability: 'queue.state', input: { jobId: job.id } });
+  const input = { jobId: job.id, decisionToken: state.items[0].decisionToken };
+  const preview = await service.call('hamster_call', { capability: 'queue.confirm', input });
+  assert.equal(preview.requiresConfirmation, true);
+  job.duplicateReviewFingerprint = 'changed';
+  await assert.rejects(service.call('hamster_call', {
+    capability: 'queue.confirm', input, confirmationToken: preview.confirmation.token
+  }), /STALE_DECISION/);
+
+  const refreshed = await service.call('hamster_call', { capability: 'queue.state', input: { jobId: job.id } });
+  const currentInput = { jobId: job.id, decisionToken: refreshed.items[0].decisionToken };
+  const currentPreview = await service.call('hamster_call', { capability: 'queue.confirm', input: currentInput });
+  const result = await service.call('hamster_call', {
+    capability: 'queue.confirm', input: currentInput, confirmationToken: currentPreview.confirmation.token
+  });
+  assert.equal(result.job.status, 'queued');
+});
+
+test('warehouse capabilities require confirmation and return compact verifiable results', async () => {
+  const manager = fakeManager();
+  manager.config.repositoryDirectory = path.resolve('warehouse-one');
+  manager.changeWarehouseDirectory = async function (target) {
+    const previous = this.config.repositoryDirectory;
+    this.config.repositoryDirectory = target;
+    return { copied: true, previous, state: { catalog: Array(200).fill({ large: true }) } };
+  };
+  manager.exportWarehouseToFile = async (target) => ({ path: target, state: { catalog: Array(200).fill({ large: true }) } });
+  manager.importWarehouseFromArchiveOrDirectory = async () => ({ importedCount: 2, skippedCount: 1, state: { catalog: Array(200).fill({ large: true }) } });
+  const service = createMcpTools(manager);
+
+  const changeInput = { targetDirectory: path.resolve('warehouse-two') };
+  const changePreview = await service.call('hamster_call', { capability: 'warehouse.change_directory', input: changeInput });
+  const changed = await service.call('hamster_call', { capability: 'warehouse.change_directory', input: changeInput, confirmationToken: changePreview.confirmation.token });
+  assert.equal(changed.copied, true);
+  assert.equal(changed.warehouseDirectory, path.resolve('warehouse-two'));
+  assert.equal(Object.hasOwn(changed, 'state'), false);
+
+  const exportInput = { targetFile: path.resolve('warehouse-export.zip') };
+  const exportPreview = await service.call('hamster_call', { capability: 'warehouse.export', input: exportInput });
+  const exported = await service.call('hamster_call', { capability: 'warehouse.export', input: exportInput, confirmationToken: exportPreview.confirmation.token });
+  assert.equal(exported.path, exportInput.targetFile);
+  assert.equal(Object.hasOwn(exported, 'state'), false);
+
+  const importInput = { sourcePath: path.resolve('warehouse-import.zip') };
+  const importPreview = await service.call('hamster_call', { capability: 'warehouse.import', input: importInput });
+  const imported = await service.call('hamster_call', { capability: 'warehouse.import', input: importInput, confirmationToken: importPreview.confirmation.token });
+  assert.deepEqual({ imported: imported.importedCount, skipped: imported.skippedCount }, { imported: 2, skipped: 1 });
+  assert.equal(Object.hasOwn(imported, 'state'), false);
+});

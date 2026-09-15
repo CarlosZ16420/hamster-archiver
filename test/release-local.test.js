@@ -27,3 +27,16 @@ test('local release prepares Electron without implicitly allowing a download', (
   assert.match(source, /prepare-electron-runtime\.js/);
   assert.doesNotMatch(source, /--allow-download/);
 });
+
+test('local Current promotion also builds both executable distributions once', () => {
+  const localRelease = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'release-local.js'), 'utf8');
+  const formalRelease = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'release.js'), 'utf8');
+  const workflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'package.yml'), 'utf8');
+
+  assert.match(localRelease, /build-installer\.js/);
+  assert.ok(localRelease.indexOf('build-installer.js') < localRelease.indexOf('await promoteCurrent(suffix)'));
+  assert.match(localRelease, /便携版程序/);
+  assert.match(localRelease, /安装程序/);
+  assert.doesNotMatch(formalRelease, /\['build:installer'\]/);
+  assert.doesNotMatch(workflow, /run:\s*npm run build:installer/);
+});

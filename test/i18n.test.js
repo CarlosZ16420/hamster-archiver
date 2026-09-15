@@ -27,7 +27,7 @@ if (!rendererDir) {
     assert.ok(i18n.patterns.length > 100, 'pattern table should stay comprehensive');
     for (const [pattern, replacement] of i18n.patterns) {
       assert.ok(pattern instanceof RegExp, `pattern must be a RegExp: ${pattern}`);
-      assert.equal(typeof replacement, 'string', `replacement must be a string for ${pattern}`);
+      assert.ok(['string', 'function'].includes(typeof replacement), `replacement must be a string or function for ${pattern}`);
     }
   });
 
@@ -37,7 +37,7 @@ if (!rendererDir) {
       assert.ok(!CJK.test(target), `"${source}" still contains Chinese: ${target}`);
     }
     for (const [, replacement] of i18n.patterns) {
-      assert.ok(!CJK.test(replacement), `pattern replacement still contains Chinese: ${replacement}`);
+      assert.ok(!CJK.test(String(replacement)), `pattern replacement still contains Chinese: ${replacement}`);
     }
     for (const [, target] of i18n.stageFragments) {
       assert.ok(!CJK.test(target), `stage fragment target still contains Chinese: ${target}`);
@@ -53,63 +53,109 @@ if (!rendererDir) {
   test('exact, pattern and recursive-capture translations', () => {
     i18n.setLocale('en-US');
     assert.equal(i18n.translate('保存设置'), 'Save settings');
-    assert.equal(i18n.translate('一键加入白名单'), 'Add to whitelist');
+    assert.equal(i18n.translate('一键加入白名单'), 'Ignore Term');
     assert.equal(i18n.translate('未评分'), 'Unrated');
-    assert.equal(i18n.translate('所选目录已经不存在。'), 'The selected directory no longer exists.');
+    assert.equal(i18n.translate('所选目录已经不存在。'), 'Selected folder no longer exists.');
     assert.equal(i18n.translate('入库'), 'Added');
     assert.equal(
       i18n.translate('扫描时会把所选目录下的每个文件夹或视频分别加入队列，跳过其他根级文件；启用小项目过滤时，低于当前阈值的项目也不会入队（默认 100 MB）'),
-      'Scanning queues each folder or video directly under the selected directory and skips other root-level files. When small-item filtering is enabled, items below the current threshold are also excluded (100 MB by default)'
+      'Queues each folder/video. Skips other top-level files and items under the limit (default 100 MB).'
     );
     assert.equal(
       i18n.translate('以下词汇在相似度计算中将被忽略'),
-      'The following term will be ignored in similarity calculations'
+      'Ignored in similarity checks'
     );
     assert.equal(
       i18n.translate('与仓库内项目完全一致，已自动跳过'),
-      'Identical to a warehouse project; auto-skipped'
+      'Identical to a Warehouse item; auto-skipped'
     );
-    assert.equal(i18n.translate('等待下次入库'), 'Waiting for next intake run');
+    assert.equal(i18n.translate('等待下次入库'), 'Next Run');
     assert.equal(i18n.translate('2 个低于 100 MB 的小项目'), '2 small items below 100 MB');
     assert.equal(
       i18n.translate('“PRESTIGE”已加入相似度白名单；已有关系不会自动重算'),
-      '“PRESTIGE” added to the similarity whitelist; existing relations were not recalculated'
+      'Added “PRESTIGE” to ignore list; existing links unchanged.'
     );
     assert.equal(i18n.translate('第 2 / 7 页'), 'Page 2 / 7');
     // Captured groups are translated recursively (拖放 is an exact entry).
     assert.equal(i18n.translate('已通过拖放加入 3 个任务'), 'Added 3 tasks via Drop');
-    assert.equal(i18n.translate('无法打开仓库：系统错误'), 'Could not open the Warehouse: 系统错误');
+    assert.equal(i18n.translate('无法打开仓库：系统错误'), 'Couldn’t open the Warehouse: 系统错误');
     // Composed undo labels resolve through nested patterns.
     assert.equal(
       i18n.translate('撤回：修改“旅行相册”的整理信息'),
-      'Undo: Edit organization details of “旅行相册”'
+      'Undo: Edit details for “旅行相册”'
     );
     // Regression: hours/minutes estimates used to lose the unit suffix.
     assert.equal(
       i18n.translate('已完成 2/5 项 · 预计还需 3 小时 12 分钟'),
-      'Completed 2/5 items · estimated time remaining: 3 hours 12 minutes'
+      '2/5 done · ~3h 12m left'
     );
     assert.equal(
       i18n.translate('已验证成品发布完成：同盘重命名 3 个文件，用时 42 毫秒。'),
-      'Verified archive publication complete: renamed 3 file(s) on the same volume in 42 ms.'
+      'Archive published: renamed 3 files on the same drive in 42 ms.'
     );
     assert.equal(
       i18n.translate('已验证成品发布完成：跨盘复制 2 个文件，用时 125.5 毫秒。'),
-      'Verified archive publication complete: copied 2 file(s) across volumes in 125.5 ms.'
+      'Archive published: copied 2 files across drives in 125.5 ms.'
     );
+    assert.equal(i18n.translate('已选择 1 项'), 'Selected 1 item');
+    assert.equal(i18n.translate('1 个文件 · 1 卷'), '1 file · 1 volume');
+    assert.equal(i18n.translate('1 小时 1 分钟'), '1 hour 1 minute');
+    assert.equal(i18n.translate('发现 1 个相似候选'), 'Found 1 similar candidate');
+  });
+
+  test('pattern captures preserve user text unless explicitly marked as UI copy', () => {
+    i18n.setLocale('en-US');
+    assert.equal(
+      i18n.translate('撤回：修改“仓库”的整理信息'),
+      'Undo: Edit details for “仓库”'
+    );
+    assert.equal(i18n.translate('选择 设置'), 'Select 设置');
+    assert.equal(
+      i18n.translate('已把 2 条仓库内容的备份位置修改为：视频。'),
+      'Changed 2 backup locations to: 视频'
+    );
+    assert.equal(
+      i18n.translate('无法打开仓库：所选目录已经不存在。'),
+      'Couldn’t open the Warehouse: Selected folder no longer exists.'
+    );
+  });
+
+  test('dynamic renderer and safety messages have complete English output', () => {
+    i18n.setLocale('en-US');
+    const messages = [
+      '“sample.png”不是支持的 PNG、JPEG、WebP 或 GIF 图片。',
+      '“sample.png”超过 25 MB。',
+      '无法读取“sample.png”。',
+      '已移动到：D:\\Archive',
+      '其中 2 项记录为已移动或已进入回收站；复原失败时会保留对应仓库记录和压缩包。',
+      '相似度引擎已更新（强度：标准），正在后台重建相似项目关系…',
+      '用户已确认任务风险；大任务将按 10 GiB 分卷。',
+      '已验证入库并复制到完成位置，但原位置副本未能删除，请手动核对',
+      '源文件后处理已经执行，但处理结果未能写回仓库：仓库记录保存失败。请勿重试归档，并按运行日志核对源文件位置。',
+      '自动跳过项目完全重复的任务“Project A”：Project B、Project C；源文件和仓库均未修改，队列项已删除。',
+      '界面加载失败 (-105)：NAME_NOT_RESOLVED',
+      '完整性清单包含不安全路径：../app.js',
+      '发行包关键文件 SHA-256 校验失败：resources/app.asar',
+      '发行清单缺少关键文件完整性记录。',
+      '无法确认源项目是否保留在回收站，且原位置已经不存在。队列已安全停止，请立即检查回收站。'
+    ];
+    for (const message of messages) {
+      const translated = i18n.translateStage(message);
+      assert.ok(!CJK.test(translated), `dynamic message is not fully translated: ${message} -> ${translated}`);
+    }
   });
 
   test('stage fragments translate queue stage wording', () => {
     i18n.setLocale('en-US');
     assert.equal(
       i18n.translateStage('正在加密压缩并生成 10.5 GB (16x1.00g) 分卷'),
-      'Encrypting and compressing and creating 10.5 GB (16x1.00g) volumes'
+      'Encrypting/compressing and creating 10.5 GB (16x1.00g) volumes'
     );
     assert.equal(
       i18n.translateStage('已确认，等待库内项目压缩'),
-      'Confirmed; queued for warehouse item compression'
+      'Confirmed; Warehouse compression queued.'
     );
-    assert.equal(i18n.translateStage('等待下次入库'), 'Waiting for next intake run');
+    assert.equal(i18n.translateStage('等待下次入库'), 'Next Run');
     assert.equal(
       i18n.translateStage('发现 3 个相似项目 · 等待手动确认'),
       'Found 3 similar items · Awaiting manual confirmation'
@@ -119,15 +165,15 @@ if (!rendererDir) {
     )));
     assert.equal(
       i18n.translateStage('2 个文件内容完全一致 · 1 个文件名称相似 · 项目名称完全一致'),
-      '2 file(s) with identical content · 1 file name(s) are similar · Identical project name'
+      '2 exact-match files · 1 file name is similar · Exact project name'
     );
     assert.equal(
       i18n.translateStage('正在压缩 · 已完成 1/4 项 · 预计还需 3 小时 12 分钟'),
-      'Compressing · Completed 1/4 items · estimated time remaining: 3 hours 12 minutes'
+      'Compressing · 1/4 done · ~3h 12m left'
     );
     assert.equal(
       i18n.translateStage('开始调用 7-Zip；本任务未设置密码。'),
-      'Starting 7-Zip; this task has no password.'
+      'Starting 7-Zip. No password set.'
     );
   });
 
@@ -191,10 +237,10 @@ if (!rendererDir) {
       assert.equal(chineseBadge.textNode.nodeValue, '待选入库方式');
 
       i18n.setLocale('en-US');
-      assert.equal(chineseBadge.textNode.nodeValue, 'Choose intake mode');
+      assert.equal(chineseBadge.textNode.nodeValue, 'Choose archive mode');
       const regeneratedEnglishBadge = makeBadge('待选入库方式');
       i18n.translateDom(regeneratedEnglishBadge);
-      assert.equal(regeneratedEnglishBadge.textNode.nodeValue, 'Choose intake mode');
+      assert.equal(regeneratedEnglishBadge.textNode.nodeValue, 'Choose archive mode');
 
       const queuedBadge = makeBadge('等待压缩');
       i18n.translateDom(queuedBadge);
@@ -292,6 +338,43 @@ if (!rendererDir) {
     }
   });
 
+  test('exact dictionary keys are live source text or documented non-literal compatibility entries', () => {
+    const sourceRoot = path.dirname(rendererDir);
+    const collect = (directory) => fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+      const target = path.join(directory, entry.name);
+      return entry.isDirectory() ? collect(target) : [target];
+    });
+    const corpus = collect(sourceRoot)
+      .filter((filePath) => /\.(?:html|js)$/.test(filePath) && path.resolve(filePath) !== path.resolve(path.join(rendererDir, 'i18n.js')))
+      .map((filePath) => fs.readFileSync(filePath, 'utf8')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&'));
+    const documented = new Set(i18n.nonLiteralExactSources);
+    const unused = Object.keys(i18n.exact)
+      .filter((source) => !corpus.some((content) => content.includes(source)))
+      .filter((source) => !documented.has(source));
+    assert.deepEqual(unused, [], 'remove stale dictionary keys or document why runtime constructs them');
+    const unusedStageFragments = i18n.stageFragments
+      .map(([source]) => source)
+      .filter((source) => !corpus.some((content) => content.includes(source)));
+    assert.deepEqual(unusedStageFragments, [], 'remove stale queue-stage fragments');
+    for (const source of documented) {
+      assert.ok(i18n.exact[source], `documented non-literal source must exist: ${source}`);
+    }
+  });
+
+  test('native file dialogs and startup errors select the active UI language', () => {
+    const mainPath = path.join(path.dirname(rendererDir), 'main.js');
+    if (!fs.existsSync(mainPath)) return;
+    const main = fs.readFileSync(mainPath, 'utf8');
+    assert.match(main, /title: english \? 'Choose a folder' : '选择文件夹'/);
+    assert.match(main, /title: english \? 'Choose a video' : '选择视频'/);
+    assert.match(main, /english \? 'Application failed to start' : '程序启动失败'/);
+    assert.match(main, /nativeText\(error\.message, english\)/);
+  });
+
   test('every static Chinese string in index.html is translatable', () => {
     i18n.setLocale('en-US');
     // Extract markup-free text first (entities stay encoded so `<`/`>` inside
@@ -305,7 +388,9 @@ if (!rendererDir) {
       .replace(/&amp;/g, '&');
     const allowlist = new Set([
       // Symbols and layout-only text nodes never need entries.
-      '!', '⇄', '·', '⌄', '×', '＋', '--:--', '1'
+      '!', '⇄', '·', '⌄', '×', '＋', '--:--', '1',
+      // The onboarding language picker keeps its bilingual labels fixed.
+      'Language / 语言', '中文'
     ]);
     const uncovered = [];
     const consider = (raw) => {

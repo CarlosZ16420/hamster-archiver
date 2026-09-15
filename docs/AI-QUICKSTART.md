@@ -39,6 +39,8 @@ The launcher connects to an existing instance or starts one headlessly; `--show-
 
 启动器会连接已有实例或在后台启动；`--show-ui` 可显示窗口。不要另开第二个仓库写入者；按客户端需要重连或重载。执行备份时保持 MCP 会话连接。
 
+空仓库的新手引导只是桌面覆盖层，不会阻断 MCP 或队列；后台连接无需先完成或关闭引导。只有用户要求以后不再显示时，才通过常用设置修改 `suppressOnboarding`。
+
 Verify **all three** tools are listed: `hamster_discover`, `hamster_describe`, `hamster_call`. Start with read-only capability discovery, settings and warehouse statistics. A successful launch or configuration file is not proof of a working connection.
 
 确认三个工具都已列出，再用能力发现、读取设置、仓库统计完成只读自检；写好配置或进程启动不等于连接成功。
@@ -59,9 +61,9 @@ The following JSON blocks are **MCP `tools/call` params**, not shell commands. E
 {"name":"hamster_call","arguments":{"capability":"settings.get","input":{}}}
 ```
 
-Then discover the `catalog` domain, describe `catalog.insights`, and call it with `{}`. Report the connection mode, effective data directory and warehouse count without printing passwords or connection tokens. An unexpected empty warehouse calls for checking the data location, not importing or moving data automatically.
+Then discover the `catalog` domain, describe `catalog.insights`, and call it with `{}` for a compact summary. Use `{"includeActivity":true}` only when the user needs non-empty daily activity. Report the connection mode, effective data directory and warehouse count without printing passwords or connection tokens. An unexpected empty warehouse calls for checking the data location, not importing or moving data automatically.
 
-随后发现 `catalog` 领域、描述 `catalog.insights`，再用 `{}` 调用。回报连接方式、实际数据目录和仓库数量，不输出密码或连接令牌。如果用户预期有记录却查到空仓库，先核对数据位置，不自动迁移或导入。
+随后发现 `catalog` 领域、描述 `catalog.insights`，再用 `{}` 读取紧凑汇总；只有用户需要非空每日活动时才传 `{"includeActivity":true}`。回报连接方式、实际数据目录和仓库数量，不输出密码或连接令牌。如果用户预期有记录却查到空仓库，先核对数据位置，不自动迁移或导入。
 
 If the assistant has shell access but no MCP client registration, a launcher-equipped build also supports one-shot CLI calls. These PowerShell examples only inspect capabilities; they do not enqueue work:
 
@@ -86,9 +88,11 @@ Use `settings.get` → `intakePreferences` to see whether backup preferences are
 | --- | --- |
 | Find projects and backup locations / 查找收藏与备份位置 | `catalog.search`, `catalog.details` |
 | Add tags or edit notes / 加标签、改备注 | `catalog.add_tags`, `catalog.update_metadata` |
+| Change common archive/intake settings / 修改常用压缩与入库设置 | `settings.patch` |
 | Batch intake / 批量入库 | `intake.add_batch` |
 | Track progress / 查看进度 | `queue.state` |
 | Review, skip or retry a task / 确认、跳过或重试 | `queue.confirm`, `queue.cancel`, `queue.retry`; inspect the current job and required queue-resume action / 先读取当前任务，并核对是否需要恢复队列 |
+| Export/import or change warehouse / 导出、导入或修改仓库位置 | `warehouse.export`, `warehouse.import`, `warehouse.change_directory` |
 
 For intake, check the user-supplied paths, intended project boundaries and saved destinations first; let the application's own validation handle source/layout checks. Each folder is one project: use individual child-folder paths if the user wants separate records. Read `queue.state`; wait if running, and do not start unrelated selected desktop tasks. Do not run `intake.scan` as a read-only probe: it adds queue rows.
 
@@ -106,11 +110,15 @@ Use `archive` for compression or `inventory_only` to catalog without compression
 
 `archive` 为压缩入库，`inventory_only` 为不压缩入库，不替用户猜选。每批最多 100 个路径，保存返回的任务 ID 并检查 `failures`。`configured:false` 表示尚缺偏好，不代表已提交。历史仍保留时，部分提交重试复用同一请求 ID、模式和路径集合；清空历史后先查仓库再提交。
 
+For common settings, describe `settings.patch` and send only requested fields. It covers archive passwords and password recording, archive naming/format/level/volumes, video frames and thumbnail limits, small-item filtering, exact-duplicate auto-skip behavior, bounded MD5/performance controls, schedules and backup locations. Byte values use binary bytes. Empty `archivePassword` clears the password used by future archives; the response never returns password text. Use `warehouse.change_directory` for the warehouse location.
+
+常用设置先 describe `settings.patch`，只发送用户要求修改的字段。它覆盖压缩密码与是否记录、命名/格式/等级/分卷、视频帧与缩略图、小项目过滤、完整重复自动跳过、受控 MD5/性能参数、定时与备份位置。字节字段使用二进制字节数；`archivePassword` 为空表示清除后续归档密码，响应不回显密码。仓库位置必须走 `warehouse.change_directory`。
+
 ## 4. Confirm completion / 核实完成
 
-Poll `queue.state` through `hamster_call` every 2–5 seconds, following pagination and matching this batch's job IDs. `queued`, paused, schedule waiting and confirmation waiting are not success. Read `stageText`, `status`, `errorCode` and `errorMessage`; inspect fresh evidence before confirming similarity. `skipped_duplicate` is a skip, not a new archive. `completed_cleanup_failed` is partial success requiring review, not a reason to blindly run the source task again. Stop for desktop review when `needsDesktop` or `safetyHalt` is returned.
+Poll `queue.state` through `hamster_call` every 2–5 seconds, filtering by this batch's `requestId` or a returned `jobId` and following `items` pagination. `queued`, paused, schedule waiting and confirmation waiting are not success. Read `stageText`, `status`, `errorCode`, `errorMessage`, `possibleActions` and the latest `decisionToken`; use that token when the user chooses continue, skip/cancel or retry. `queue.confirm` additionally performs the impact-confirmation flow. `skipped_duplicate` is a skip, not a new archive. `completed_cleanup_failed` is partial success requiring review. Stop for desktop review when `needsDesktop` or `safetyHalt` is returned.
 
-每 2–5 秒用 `hamster_call` 调用 `queue.state`，跟进分页并匹配本批任务 ID。排队、暂停、定时等待和待确认都不是成功。读取阶段、状态及错误；确认相似项前重新看依据。`skipped_duplicate` 是跳过，不是新建成品；`completed_cleanup_failed` 是需要核对的部分成功，不要盲目重跑源任务。返回 `needsDesktop` 或 `safetyHalt` 时转桌面检查。
+每 2–5 秒用 `hamster_call` 调用 `queue.state`，按本批 `requestId` 或返回的 `jobId` 过滤并跟进 `items` 分页。排队、暂停、定时等待和待确认都不是成功。读取阶段、状态、错误、可用动作与最新 `decisionToken`；用户选择继续、跳过/取消或重试时带上它，`queue.confirm` 还要完成影响确认。`skipped_duplicate` 是跳过，不是新建成品；`completed_cleanup_failed` 是需要核对的部分成功。返回 `needsDesktop` 或 `safetyHalt` 时转桌面检查。
 
 After a task finishes, use catalog search/details to verify its record and report: successful/skipped/failed counts, actual archive path or “inventory only,” warehouse record, verification outcome, and original-file disposition. Separate any unverified or unfinished state. A sync-folder path does not prove cloud upload.
 

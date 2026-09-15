@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.6",
+  "notes": {
+    "zh-CN": [
+      "归档工作台的扫描与入库操作恢复为两行右对齐，窗口变化时不再挤压、错位或被截断。",
+      "仓库活跃度固定显示最近 20 周与固定列距；仅在空间不足时横向滚动，并默认保持最新日期可见。",
+      "优化详情按钮间距、收纳设置引导和完成烟花；手动库存备注改为选填并移除冗余说明。",
+      "MCP 仓库概览默认返回紧凑汇总，仅在明确请求时提供非空活动日期。"
+    ],
+    "en-US": [
+      "Workbench scan and intake actions return to two right-aligned rows without overlap, misalignment or clipping.",
+      "Warehouse activity uses a fixed 20-week layout and fixed gaps, scrolling only when needed while keeping the newest dates visible by default.",
+      "Detail-button spacing, settings onboarding and completion fireworks are improved; manual inventory notes are now optional and redundant help copy is removed.",
+      "MCP warehouse insights return a compact summary by default and provide non-empty activity dates only when explicitly requested."
+    ]
+  }
+}

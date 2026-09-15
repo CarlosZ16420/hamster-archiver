@@ -7,6 +7,8 @@ const path = require('node:path');
 const MAX_PAGE = 100;
 const SOURCE_DISPOSITIONS = ['keep', 'trash', 'move'];
 const THEME_VALUES = ['classic', 'day', 'night', 'forest', 'twilight'];
+const MIB = 1024 ** 2;
+const GIB = 1024 ** 3;
 
 const objectSchema = (properties = {}, required = [], additionalProperties = false) => ({
   type: 'object', properties, required, additionalProperties
@@ -16,6 +18,60 @@ const idListSchema = { type: 'array', minItems: 1, maxItems: 100, items: stringS
 const pageProperties = {
   offset: { type: 'integer', minimum: 0 },
   limit: { type: 'integer', minimum: 1, maximum: MAX_PAGE }
+};
+const optionalStringSchema = (maxLength = 4096) => ({ type: 'string', maxLength });
+const settingsPatchProperties = {
+  language: { type: 'string', enum: ['zh-CN', 'en-US'] },
+  intakeDirectory: optionalStringSchema(),
+  archiveStagingDirectory: optionalStringSchema(),
+  archiveOutputDirectory: optionalStringSchema(),
+  moveCompleted: { type: 'boolean' },
+  autoTrashCompleted: { type: 'boolean' },
+  processedSourceDirectory: optionalStringSchema(),
+  archiveNamingMode: { type: 'string', enum: ['timestamp_random', 'original', 'custom_random'] },
+  customArchiveName: optionalStringSchema(120),
+  archiveFormat: { type: 'string', enum: ['7z', 'zip'] },
+  compressionLevel: { type: 'integer', minimum: 0, maximum: 9 },
+  archiveVolumeEnabled: { type: 'boolean' },
+  archiveVolumeBytes: { type: 'integer', minimum: 64 * MIB, maximum: 10 * GIB },
+  archivePassword: optionalStringSchema(128),
+  recordArchivePassword: { type: 'boolean' },
+  videoFrameBackup: { type: 'boolean' },
+  videoFrameCount: { type: 'integer', minimum: 1, maximum: 20 },
+  thumbnailLimit: { type: 'integer', minimum: 1, maximum: 500 },
+  smallItemFilter: { type: 'boolean' },
+  minimumTaskBytes: { type: 'integer', minimum: MIB, maximum: 100 * 1024 * MIB },
+  similarityReportEnabled: { type: 'boolean' },
+  largeFolderSimplification: { type: 'boolean' },
+  largeFolderFileThreshold: { type: 'integer', minimum: 1, maximum: 100000 },
+  largeFolderMd5SampleLimit: { type: 'integer', minimum: 1, maximum: 100000 },
+  skipTinyMd5Files: { type: 'boolean' },
+  tinyFileMd5ThresholdBytes: { type: 'integer', minimum: 1024, maximum: GIB },
+  autoSkipExactDuplicates: { type: 'boolean' },
+  autoSkipExactDuplicateAction: { type: 'string', enum: ['keep', 'remove'] },
+  scheduleEnabled: { type: 'boolean' },
+  scheduleStart: optionalStringSchema(5),
+  scheduleEnd: optionalStringSchema(5),
+  similarityEnabled: { type: 'boolean' },
+  similarityStrength: { type: 'string', enum: ['loose', 'standard', 'strict'] },
+  recordBackupLocation: { type: 'boolean' },
+  backupLocation: optionalStringSchema(200),
+  suppressInventoryOnlyRisk: { type: 'boolean' },
+  suppressCatalogCompressionRisk: { type: 'boolean' },
+  suppressOnboarding: { type: 'boolean' }
+};
+const settingsPatchKeys = new Set(Object.keys(settingsPatchProperties));
+const safePasswordMetadataKeys = new Set([
+  'hasPassword', 'passwordConfigured', 'passwordRecorded', 'passwordScheme', 'recordArchivePassword'
+]);
+const catalogMetadataProperties = {
+  title: optionalStringSchema(200),
+  tags: { type: 'array', maxItems: 30, items: optionalStringSchema(30) },
+  rating: { type: 'integer', minimum: 0, maximum: 5 },
+  notes: optionalStringSchema(5000),
+  backupLocation: optionalStringSchema(200),
+  archivePassword: optionalStringSchema(128),
+  passwordRecorded: { type: 'boolean' }
 };
 
 function stable(value) {
@@ -31,6 +87,7 @@ function redact(value) {
   for (const [key, entry] of Object.entries(value)) {
     if (/password/i.test(key)) {
       if (key === 'archivePassword') result.passwordConfigured = Boolean(entry);
+      else if (safePasswordMetadataKeys.has(key)) result[key] = redact(entry);
       continue;
     }
     if (/token|secret/i.test(key)) continue;
@@ -39,19 +96,60 @@ function redact(value) {
   return result;
 }
 
-function compactState(manager) {
+function queueSummary(manager) {
   return redact({
     running: manager.running,
     paused: manager.paused,
     scheduleWaiting: manager.scheduleWaiting,
     safetyHalt: manager.safetyHalt,
     undoDepth: manager.undoStack?.length || 0,
-    jobs: (manager.jobs || []).map((job) => ({
-      id: job.id, requestId: job.mcpRequestId, displayName: job.displayName, status: job.status,
-      progress: job.progress, stageText: job.stageText, errorCode: job.errorCode,
-      errorMessage: job.errorMessage, sourcePath: job.sourcePath, processingMode: job.processingMode
-    }))
+    totalJobs: manager.jobs?.length || 0
   });
+}
+
+function decisionToken(job) {
+  return crypto.createHash('sha256').update(JSON.stringify([
+    job.id, job.status, job.duplicateReviewFingerprint, job.errorCode, job.errorMessage,
+    job.startedAt, job.confirmedAt, job.completedAt
+  ])).digest('hex');
+}
+
+function jobSummary(job) {
+  const status = String(job.status || '');
+  const possibleActions = ['awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(status)
+    ? ['continue', 'skip']
+    : ['failed', 'cancelled'].includes(status) ? ['retry']
+      : ['awaiting_anomaly_confirmation', 'awaiting_trash_safety_confirmation'].includes(status) ||
+          status.startsWith('completed') || status === 'skipped_duplicate'
+        ? [] : status === 'queued' ? ['skip'] : ['cancel'];
+  return {
+    ...redact({
+      id: job.id, requestId: job.mcpRequestId, displayName: job.displayName, status,
+      progress: job.progress, stageText: job.stageText, errorCode: job.errorCode,
+      errorMessage: job.errorMessage, sourcePath: job.sourcePath, processingMode: job.processingMode,
+      confirmationReasons: job.confirmationReasons,
+      duplicateReviewKind: job.duplicateReviewKind,
+      similarMatches: (job.similarMatches || []).slice(0, 5),
+      exactProjectMatches: (job.exactProjectMatches || []).slice(0, 5),
+      exactDuplicateMatches: (job.exactDuplicateMatches || []).slice(0, 5),
+      nameDuplicateMatches: (job.nameDuplicateMatches || []).slice(0, 5),
+      possibleActions,
+      needsDesktop: ['awaiting_anomaly_confirmation', 'awaiting_trash_safety_confirmation'].includes(status)
+    }),
+    decisionToken: decisionToken(job)
+  };
+}
+
+function compactState(manager) {
+  return queueSummary(manager);
+}
+
+function catalogSummary(record) {
+  if (!record) return null;
+  return redact(Object.fromEntries([
+    'id', 'title', 'displayName', 'recordType', 'fileCount', 'originalBytes', 'archiveState',
+    'inventoryDate', 'rating', 'tags', 'backupLocation', 'sourceDisposition', 'verifiedAt'
+  ].map((key) => [key, record[key]])));
 }
 
 function page(items, input = {}) {
@@ -68,11 +166,25 @@ function publicSettings(config) {
   const hidden = new Set(['pendingTrashSafetyHalt', 'compressionHistory', 'migratedRepositoryFrom']);
   const settings = {};
   for (const [key, value] of Object.entries(config || {})) {
-    if (hidden.has(key) || /password/i.test(key) || /token|secret/i.test(key)) continue;
+    if (hidden.has(key) || key === 'archivePassword' ||
+        (/password/i.test(key) && !safePasswordMetadataKeys.has(key)) || /token|secret/i.test(key)) continue;
     settings[key] = redact(value);
   }
   settings.passwordConfigured = Boolean(config?.archivePassword);
   return settings;
+}
+
+function publicSettingsPatch(config, keys) {
+  const settings = publicSettings(config);
+  const result = {};
+  for (const key of keys) {
+    if (key === 'archivePassword') {
+      result.passwordConfigured = settings.passwordConfigured;
+    } else if (Object.hasOwn(settings, key)) {
+      result[key] = settings[key];
+    }
+  }
+  return result;
 }
 
 function intakePreferences(manager) {
@@ -104,8 +216,7 @@ function intakePreferences(manager) {
 
 function managerFingerprint(manager) {
   return crypto.createHash('sha256').update(JSON.stringify(stable({
-    repositoryDirectory: manager.config?.repositoryDirectory,
-    archiveOutputDirectory: manager.config?.archiveOutputDirectory,
+    config: manager.config,
     running: manager.running,
     safetyHalt: manager.safetyHalt?.id || null,
     jobs: (manager.jobs || []).map((job) => [job.id, job.status, job.progress]),
@@ -137,7 +248,7 @@ function sanitizeCatalogDetails(value) {
 
 const capabilities = [
   ['settings.get', 'settings', 'Read all user settings and directories with password status only.', {}, true],
-  ['settings.patch', 'settings', 'Update a partial set of validated settings. Password text is accepted but never returned.', { patch: { type: 'object', additionalProperties: true } }, false, ['patch']],
+  ['settings.patch', 'settings', 'Update only the supplied common settings through product validation. Byte fields use binary units. Password text is accepted but never returned; an empty password clears it for future archives.', { patch: objectSchema(settingsPatchProperties) }, false, ['patch']],
   ['settings.intake_preferences', 'settings', 'Save the archive output and keep/trash/move preference used by future AI intake.', {
     archiveOutputDirectory: stringSchema(), sourceDisposition: { type: 'string', enum: SOURCE_DISPOSITIONS }, processedSourceDirectory: stringSchema()
   }, false, ['archiveOutputDirectory', 'sourceDisposition']],
@@ -147,19 +258,19 @@ const capabilities = [
     mode: { type: 'string', enum: ['archive', 'inventory_only'] }, start: { type: 'boolean' },
     archiveOutputDirectory: stringSchema(), sourceDisposition: { type: 'string', enum: SOURCE_DISPOSITIONS }, processedSourceDirectory: stringSchema()
   }, false, ['requestId', 'paths', 'mode']],
-  ['queue.state', 'queue', 'Read compact queue state and job progress.', pageProperties, true],
+  ['queue.state', 'queue', 'Read compact, paginated queue state. Filter by requestId or jobId when polling to avoid unrelated jobs.', { requestId: optionalStringSchema(128), jobId: optionalStringSchema(128), ...pageProperties }, true],
   ['queue.start_archive', 'queue', 'Choose archive mode and start eligible jobs.', {}, false],
   ['queue.start_inventory', 'queue', 'Choose inventory-only mode and start eligible jobs.', {}, false],
   ['queue.pause', 'queue', 'Pause the current safe processing stage.', {}, false],
   ['queue.resume', 'queue', 'Resume the paused task.', {}, false],
   ['queue.finish_next', 'queue', 'Finish one task and pause before another starts.', {}, false],
-  ['queue.confirm', 'queue', 'Confirm one large/duplicate queue decision after reading evidence.', { jobId: stringSchema(128) }, false, ['jobId']],
+  ['queue.confirm', 'queue', 'Confirm one current large/duplicate queue decision after the user chooses to continue.', { jobId: stringSchema(128), decisionToken: stringSchema(128) }, false, ['jobId', 'decisionToken']],
   ['queue.confirm_all_duplicates', 'queue', 'Confirm all current duplicate-review jobs.', {}, false],
-  ['queue.confirm_anomaly', 'queue', 'Accept and record an archive whose verified size is anomalous.', { jobId: stringSchema(128) }, false, ['jobId']],
-  ['queue.discard_anomaly', 'queue', 'Move anomalous generated archives to the recycle bin; sources stay.', { jobId: stringSchema(128) }, false, ['jobId']],
+  ['queue.confirm_anomaly', 'queue', 'Accept and record an archive whose verified size is anomalous after desktop review.', { jobId: stringSchema(128), decisionToken: stringSchema(128) }, false, ['jobId', 'decisionToken']],
+  ['queue.discard_anomaly', 'queue', 'Move anomalous generated archives to the recycle bin; sources stay.', { jobId: stringSchema(128), decisionToken: stringSchema(128) }, false, ['jobId', 'decisionToken']],
   ['queue.acknowledge_trash_safety', 'queue', 'Acknowledge a recycle-bin safety stop without re-enabling trash.', { referenceId: stringSchema(128) }, false, ['referenceId']],
-  ['queue.cancel', 'queue', 'Safely cancel one job.', { jobId: stringSchema(128) }, false, ['jobId']],
-  ['queue.retry', 'queue', 'Retry one failed or cancelled job.', { jobId: stringSchema(128) }, false, ['jobId']],
+  ['queue.cancel', 'queue', 'Safely skip or cancel one job in its current state.', { jobId: stringSchema(128), decisionToken: stringSchema(128) }, false, ['jobId', 'decisionToken']],
+  ['queue.retry', 'queue', 'Retry one current failed or cancelled job.', { jobId: stringSchema(128), decisionToken: stringSchema(128) }, false, ['jobId', 'decisionToken']],
   ['queue.remove', 'queue', 'Remove queue rows without deleting catalog records, archives, or sources.', { jobIds: idListSchema }, false, ['jobIds']],
   ['queue.clear', 'queue', 'Cancel processing and clear removable queue rows; protected safety rows remain.', {}, false],
   ['queue.clear_completed', 'queue', 'Clear completed queue rows only.', {}, false],
@@ -168,10 +279,10 @@ const capabilities = [
   ['queue.clear_exact_duplicates', 'queue', 'Remove non-running exact duplicate queue rows.', {}, false],
   ['catalog.search', 'catalog', 'Search catalog metadata with filters and pagination.', { query: { type: 'string', maxLength: 512 }, tag: { type: 'string', maxLength: 200 }, backupLocation: { type: 'string', maxLength: 200 }, rating: { type: 'integer', minimum: 0, maximum: 5 }, sort: { type: 'string', enum: ['inventory_desc', 'inventory_asc', 'name_asc', 'name_desc'] }, ...pageProperties }, true],
   ['catalog.suggestions', 'catalog', 'Get title suggestions.', { query: stringSchema(512), limit: { type: 'integer', minimum: 1, maximum: 20 } }, true, ['query']],
-  ['catalog.insights', 'catalog', 'Read warehouse counts, bytes and activity.', {}, true],
+  ['catalog.insights', 'catalog', 'Read compact warehouse counts and bytes. Set includeActivity only when non-empty daily activity is needed.', { includeActivity: { type: 'boolean' } }, true],
   ['catalog.random', 'catalog', 'Read a random catalog summary.', { excludeId: stringSchema(128) }, true],
   ['catalog.details', 'catalog', 'Read full metadata and a paginated manifest, with passwords redacted.', { recordId: stringSchema(128), ...pageProperties }, true, ['recordId']],
-  ['catalog.update_metadata', 'catalog', 'Update title, tags, rating, notes, backup location or recorded password metadata.', { recordId: stringSchema(128), metadata: { type: 'object', additionalProperties: true } }, false, ['recordId', 'metadata']],
+  ['catalog.update_metadata', 'catalog', 'Update only supplied title, tags, rating, notes, backup location or recorded password metadata.', { recordId: stringSchema(128), metadata: objectSchema(catalogMetadataProperties) }, false, ['recordId', 'metadata']],
   ['catalog.recalculate_similarity', 'catalog', 'Recalculate similarity for one record.', { recordId: stringSchema(128) }, false, ['recordId']],
   ['catalog.remove_similarity', 'catalog', 'Dismiss a similarity relationship in both directions.', { recordId: stringSchema(128), similarId: stringSchema(128) }, false, ['recordId', 'similarId']],
   ['catalog.set_cover', 'catalog', 'Set an existing thumbnail as cover.', { recordId: stringSchema(128), thumbnailRef: stringSchema() }, false, ['recordId', 'thumbnailRef']],
@@ -194,16 +305,16 @@ const capabilities = [
   ['app.show_ui', 'app', 'Show the desktop application at an optional section.', { section: { type: 'string', enum: ['workbench', 'catalog', 'settings'] } }, false],
   ['app.set_view', 'app', 'Switch the desktop view.', { section: { type: 'string', enum: ['workbench', 'catalog', 'settings'] } }, false, ['section']],
   ['app.set_theme', 'app', 'Set the desktop theme.', { theme: { type: 'string', enum: THEME_VALUES } }, false, ['theme']],
-  ['app.copy_text', 'app', 'Copy explicit text to the clipboard.', { text: { type: 'string', maxLength: 100000 } }, false, ['text']],
+  ['app.copy_text', 'app', 'Copy explicit text to the clipboard.', { text: { type: 'string', maxLength: 10000 } }, false, ['text']],
   ['path.open', 'app', 'Open a product-owned location selected by kind and optional record/job id.', { kind: { type: 'string', enum: ['warehouse', 'source', 'catalog_source', 'similarity_terms'] }, id: stringSchema(128) }, false, ['kind']],
-  ['update.check', 'update', 'Check for application updates.', { mode: { type: 'string', enum: ['manual', 'automatic'] } }, true],
+  ['update.check', 'update', 'Check for application updates.', { mode: { type: 'string', enum: ['manual', 'automatic'] } }, true, ['mode']],
   ['update.install', 'update', 'Install the previously checked update version using the product updater.', { version: stringSchema(64) }, false, ['version']],
   ['update.install_package', 'update', 'Validate and install an update package from an absolute path.', { packagePath: stringSchema() }, false, ['packagePath']],
   ['user_data.preflight_move', 'user_data', 'Inspect a user-data relocation without writing.', { targetDirectory: stringSchema() }, true, ['targetDirectory']],
   ['user_data.move', 'user_data', 'Schedule or perform a validated user-data relocation with app-exit safeguards.', { targetDirectory: stringSchema() }, false, ['targetDirectory']]
 ].map(([name, domain, description, properties, readOnly, required = []]) => {
-  const conditional = ['settings.patch', 'settings.intake_preferences', 'intake.add_batch'];
-  const confirmation = ['catalog.delete', 'catalog.restore_source', 'queue.discard_anomaly', 'warehouse.change_directory', 'warehouse.export', 'warehouse.import', 'update.install', 'update.install_package', 'user_data.move', 'similarity.rebuild', 'queue.clear', 'catalog.delete_thumbnail'];
+  const conditional = ['settings.patch', 'settings.intake_preferences', 'intake.add_batch', 'similarity.reload'];
+  const confirmation = ['catalog.delete', 'catalog.restore_source', 'queue.confirm', 'queue.confirm_all_duplicates', 'queue.confirm_anomaly', 'queue.discard_anomaly', 'queue.acknowledge_trash_safety', 'warehouse.change_directory', 'warehouse.export', 'warehouse.import', 'update.install', 'update.install_package', 'user_data.move', 'similarity.rebuild', 'queue.clear', 'catalog.delete_thumbnail'];
   return {
     name, domain, description, readOnly, inputSchema: objectSchema(properties, required),
     risk: conditional.includes(name) ? 'conditional' : confirmation.includes(name) ? 'confirmation' : 'none'
@@ -243,7 +354,21 @@ function createCapabilityService(manager, services = {}) {
     if (name === 'settings.patch') {
       const keys = Object.keys(input.patch || {});
       if (!keys.some((key) => ['archiveOutputDirectory', 'archiveStagingDirectory', 'repositoryDirectory', 'moveCompleted', 'autoTrashCompleted', 'processedSourceDirectory', 'archivePassword'].includes(key))) return null;
-      return { target: keys, impact: 'Changes future archive destinations, source handling, repository pointer, or archive password.', recovery: 'Apply another validated settings patch before starting new work.' };
+      return { target: keys, impact: 'Changes future archive destinations, source handling, or archive password.', recovery: 'Apply another validated settings patch before starting new work.' };
+    }
+    if (name === 'queue.confirm') {
+      const job = (manager.jobs || []).find((candidate) => candidate.id === input.jobId);
+      return { target: jobSummary(job || { id: input.jobId }), impact: 'Continues this task after the user accepts its current large-item or duplicate evidence.', recovery: 'The task can be safely cancelled while it remains pending or at a cancellable stage.' };
+    }
+    if (name === 'queue.confirm_all_duplicates') {
+      const jobs = (manager.jobs || []).filter((job) => ['awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
+      return { target: jobs.slice(0, 20).map(jobSummary), impact: `Continues ${jobs.length} currently waiting duplicate-review tasks.`, recovery: 'Cancel individual tasks that should not continue before confirming again.' };
+    }
+    if (name === 'queue.confirm_anomaly') {
+      return { target: input.jobId, impact: 'Accepts a verified archive-size anomaly, writes its catalog record, and may apply the saved source disposition.', recovery: 'Review the generated archive and source state in the desktop application before confirming.' };
+    }
+    if (name === 'queue.acknowledge_trash_safety') {
+      return { target: input.referenceId, impact: 'Acknowledges the current recycle-bin safety stop; automatic recycling stays disabled and the queue stays stopped.', recovery: 'Inspect the source and recycle bin before manually starting more work.' };
     }
     if (name === 'catalog.delete') {
       const records = (manager.catalog || []).filter((record) => input.recordIds.includes(record.id));
@@ -262,6 +387,7 @@ function createCapabilityService(manager, services = {}) {
     }
     if (name === 'warehouse.import') return { target: path.resolve(input.sourcePath), impact: 'Merges new record IDs and thumbnails into the active warehouse; matching IDs are skipped. The source is retained.', recovery: 'Imported catalog edits can be reviewed; restore the prior warehouse backup for a whole-database rollback.' };
     if (name === 'similarity.rebuild') return { target: `${manager.catalog?.length || 0} catalog records`, impact: 'Recomputes and persists all similarity relations and may take significant time.', recovery: 'Run again after changing similarity settings or ignore terms.' };
+    if (name === 'similarity.reload' && input.rebuild === true) return { target: `${manager.catalog?.length || 0} catalog records`, impact: 'Reloads ignore terms and recomputes all persisted similarity relations.', recovery: 'Run another explicit rebuild after correcting the terms.' };
     if (name === 'queue.clear') return { target: `${manager.jobs?.length || 0} queue rows`, impact: 'Safely cancels active work and clears removable queue rows; catalog, archives, sources and protected safety rows remain.', recovery: 'Sources can be scanned or added again.' };
     if (name === 'queue.discard_anomaly') return { target: input.jobId, impact: 'Moves the generated anomalous archive and its task thumbnails to the Windows recycle bin; source stays.', recovery: 'Restore the generated files manually from the recycle bin or retry the source.' };
     if (name === 'catalog.delete_thumbnail') return { target: { recordId: input.recordId, thumbnailRef: input.thumbnailRef }, impact: 'Moves the thumbnail into warehouse-local trash and updates cover selection.', recovery: 'catalog.undo can restore the latest deletion.' };
@@ -294,10 +420,10 @@ function createCapabilityService(manager, services = {}) {
     if (name === 'settings.get') return { settings: publicSettings(manager.config), intakePreferences: intakePreferences(manager) };
     if (name === 'settings.patch') {
       const patch = { ...(input.patch || {}) };
-      for (const key of Object.keys(patch)) if (/token|secret/i.test(key) || key === 'pendingTrashSafetyHalt' || key === 'intakePreferences') throw new Error(`Setting ${key} cannot be written through MCP`);
+      for (const key of Object.keys(patch)) if (!settingsPatchKeys.has(key)) throw new Error(`Setting ${key} cannot be written through MCP`);
       const preferenceKeys = ['archiveOutputDirectory', 'moveCompleted', 'autoTrashCompleted', 'processedSourceDirectory'];
       const state = await manager.updateConfig({ ...manager.config, ...patch }, { source: 'mcp', recordIntakePreferences: preferenceKeys.some((key) => Object.hasOwn(patch, key)) });
-      return { settings: publicSettings(state.config) };
+      return { settings: publicSettingsPatch(state.config, Object.keys(patch)) };
     }
     if (name === 'settings.intake_preferences') {
       const patch = sourceDispositionPatch(input);
@@ -306,6 +432,10 @@ function createCapabilityService(manager, services = {}) {
     }
     if (name === 'intake.scan') return compactState(await manager.scanSource(path.resolve(input.directory), input.scanToken || 'mcp'));
     if (name === 'intake.add_batch') {
+      if (manager.running) throw new Error('QUEUE_RUNNING: wait until the queue is idle before adding an AI batch');
+      if ((manager.jobs || []).some((job) => !job.mcpRequestId && job.intakeModeSelected && job.status === 'queued')) {
+        throw new Error('UNRELATED_QUEUE_WORK: finish or pause selected desktop jobs before AI intake');
+      }
       let preferences = intakePreferences(manager);
       if (input.archiveOutputDirectory || input.sourceDisposition || input.processedSourceDirectory) {
         const prefPatch = sourceDispositionPatch(input);
@@ -326,10 +456,18 @@ function createCapabilityService(manager, services = {}) {
         } catch (error) { failures.push({ source, code: error.code || 'INTAKE_FAILED', message: error.message }); }
       }
       const jobs = manager.jobs.filter((job) => job.mcpRequestId === input.requestId);
-      if (input.start !== false && jobs.length && !manager.running) void manager.startQueue().catch((error) => manager.emit('automation-error', error));
-      return { jobs: jobs.map(redact), failures, reused: failures.length === 0 && jobs.length === previous.length };
+      if (input.start !== false && jobs.length && !manager.running) void manager.startQueue(jobs.map((job) => job.id)).catch((error) => manager.emit('automation-error', error));
+      return { jobs: jobs.map(jobSummary), failures, reused: failures.length === 0 && jobs.length === previous.length };
     }
-    if (name === 'queue.state') return { ...compactState(manager), ...page((manager.jobs || []).map(redact), input) };
+    if (name === 'queue.state') {
+      const jobs = (manager.jobs || []).filter((job) =>
+        (!input.requestId || job.mcpRequestId === input.requestId) && (!input.jobId || job.id === input.jobId));
+      return { ...compactState(manager), ...page(jobs.map(jobSummary), input) };
+    }
+    if (['queue.confirm', 'queue.confirm_anomaly', 'queue.discard_anomaly', 'queue.cancel', 'queue.retry'].includes(name)) {
+      const job = manager.findJob(input.jobId);
+      if (decisionToken(job) !== input.decisionToken) throw new Error('STALE_DECISION: read queue.state again');
+    }
     const direct = {
       'queue.start_archive': () => manager.startArchiveQueue(), 'queue.start_inventory': () => manager.startInventoryOnlyQueue(),
       'queue.pause': () => manager.pauseCurrent(), 'queue.resume': () => manager.resumeCurrent(), 'queue.finish_next': () => manager.finishNextAndPause(),
@@ -351,16 +489,34 @@ function createCapabilityService(manager, services = {}) {
       'catalog.restore_source': () => manager.restoreCatalogSource(input.recordId),
       'catalog.delete': () => manager.deleteCatalogRecords(input.recordIds, { restoreOriginalSources: input.restoreOriginalSources === true }),
       'catalog.undo': () => manager.undoCatalogAction(), 'similarity.add_term': () => manager.addSimilarityIgnoreTerm(input.term),
-      'similarity.reload': () => manager.reloadSimilarityIgnoreTerms({ rebuild: input.rebuild !== false }),
+      'similarity.reload': () => manager.reloadSimilarityIgnoreTerms({ rebuild: input.rebuild === true }),
       'similarity.rebuild': () => manager.rebuildAllSimilarityRelations(),
-      'warehouse.change_directory': () => manager.changeWarehouseDirectory(path.resolve(input.targetDirectory)),
-      'warehouse.export': () => manager.exportWarehouseToFile(path.resolve(input.targetFile)),
-      'warehouse.import': () => manager.importWarehouseFromArchiveOrDirectory(path.resolve(input.sourcePath))
     };
-    if (direct[name]) return redact(await direct[name]());
+    if (direct[name]) {
+      const result = await direct[name]();
+      if (name.startsWith('queue.')) {
+        const job = input.jobId ? (manager.jobs || []).find((candidate) => candidate.id === input.jobId) : null;
+        return { ...queueSummary(manager), ...(job ? { job: jobSummary(job) } : {}), ...(Number.isInteger(result?.removedCount) ? { removedCount: result.removedCount } : {}) };
+      }
+      if (name.startsWith('catalog.')) {
+        const recordIds = input.recordIds || (input.recordId ? [input.recordId] : result?.id ? [result.id] : []);
+        return { records: recordIds.map((id) => catalogSummary((manager.catalog || []).find((record) => record.id === id))).filter(Boolean), totalRecords: manager.catalog?.length || 0 };
+      }
+      if (name.startsWith('similarity.')) {
+        return { path: result?.path || '', count: Number(result?.count) || manager.similarityIgnoreTerms?.length || 0, totalRecords: manager.catalog?.length || 0 };
+      }
+      return redact(result);
+    }
     if (name === 'catalog.search') return page(manager.searchCatalog(input).map(redact), input);
     if (name === 'catalog.suggestions') return manager.getCatalogSuggestions(input.query, input.limit);
-    if (name === 'catalog.insights') return manager.getWarehouseInsights();
+    if (name === 'catalog.insights') {
+      const { activity = [], ...summary } = manager.getWarehouseInsights();
+      if (input.includeActivity !== true) return summary;
+      return {
+        ...summary,
+        activity: activity.filter((entry) => Number(entry.inventoryCount) > 0 || Number(entry.originalBytes) > 0)
+      };
+    }
     if (name === 'catalog.random') return redact(manager.getRandomCatalogRecord(input.excludeId));
     if (name === 'catalog.details') {
       const details = sanitizeCatalogDetails(manager.getCatalogDetails(input.recordId));
@@ -369,6 +525,18 @@ function createCapabilityService(manager, services = {}) {
       return { ...details, manifest: page(manifest, input) };
     }
     if (name === 'similarity.terms') return page([...(manager.similarityIgnoreTerms || [])], input);
+    if (name === 'warehouse.change_directory') {
+      const result = await manager.changeWarehouseDirectory(path.resolve(input.targetDirectory));
+      return { copied: result.copied, previousDirectory: result.previous, warehouseDirectory: manager.config.repositoryDirectory, totalRecords: manager.catalog?.length || 0 };
+    }
+    if (name === 'warehouse.export') {
+      const result = await manager.exportWarehouseToFile(path.resolve(input.targetFile));
+      return { path: result.path, totalRecords: manager.catalog?.length || 0 };
+    }
+    if (name === 'warehouse.import') {
+      const result = await manager.importWarehouseFromArchiveOrDirectory(path.resolve(input.sourcePath));
+      return { importedCount: result.importedCount, skippedCount: result.skippedCount, warehouseDirectory: manager.config.repositoryDirectory, totalRecords: manager.catalog?.length || 0 };
+    }
     const serviceName = unavailableService[name];
     if (serviceName) {
       const handler = serviceAt(services, serviceName);
@@ -411,4 +579,4 @@ function createCapabilityService(manager, services = {}) {
   };
 }
 
-module.exports = { capabilities, createCapabilityService, intakePreferences, publicSettings, redact };
+module.exports = { capabilities, createCapabilityService, decisionToken, intakePreferences, jobSummary, publicSettings, queueSummary, redact };

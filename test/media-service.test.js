@@ -24,7 +24,18 @@ test('FFmpeg probe parser tolerates extra stream metadata and tbr frame rates', 
 
 const ffmpegPath = path.resolve(__dirname, '..', 'tools', 'ffmpeg', 'ffmpeg.exe');
 
-test('portable FFmpeg probes video metadata and extracts evenly spaced JPEG thumbnails', {
+function readImageDimensions(imagePath) {
+  const inspected = spawnSync(ffmpegPath, [
+    '-hide_banner', '-i', imagePath, '-map', '0:v:0', '-frames:v', '0', '-f', 'null', '-'
+  ], { windowsHide: true, encoding: 'utf8' });
+  assert.equal(inspected.status, 0, inspected.stderr);
+  const videoLine = inspected.stderr.split(/\r?\n/).find((line) => /Stream #.*Video:/i.test(line)) || '';
+  const match = videoLine.match(/(?:^|[\s,])(\d{2,6})x(\d{2,6})(?:[\s,\[]|$)/);
+  assert.ok(match, `Could not read thumbnail dimensions from: ${videoLine}`);
+  return { width: Number(match[1]), height: Number(match[2]) };
+}
+
+test('portable FFmpeg extracts evenly spaced JPEG thumbnails without baked-in letterboxing', {
   skip: process.platform !== 'win32' || !fsSync.existsSync(ffmpegPath)
 }, async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-media-'));
@@ -52,5 +63,21 @@ test('portable FFmpeg probes video metadata and extracts evenly spaced JPEG thum
   for (const frame of result.frames) {
     assert.equal(path.extname(frame.thumbnailPath), '.jpg');
     assert.ok((await fs.stat(frame.thumbnailPath)).size > 0);
+    const dimensions = readImageDimensions(frame.thumbnailPath);
+    assert.equal(dimensions.width, 360);
+    assert.ok(dimensions.height < 240);
+    assert.ok(Math.abs((dimensions.width / dimensions.height) - (16 / 9)) < 0.02);
   }
+
+  const portraitVideoPath = path.join(root, 'portrait.mp4');
+  const generatedPortrait = spawnSync(ffmpegPath, [
+    '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=360x640:rate=24',
+    '-t', '1', '-pix_fmt', 'yuv420p', '-y', portraitVideoPath
+  ], { windowsHide: true, encoding: 'utf8' });
+  assert.equal(generatedPortrait.status, 0, generatedPortrait.stderr);
+  const portrait = await extractVideoFrames(portraitVideoPath, root, 3, 1, config);
+  const portraitDimensions = readImageDimensions(portrait.frames[0].thumbnailPath);
+  assert.equal(portraitDimensions.height, 240);
+  assert.ok(portraitDimensions.width < 360);
+  assert.ok(Math.abs((portraitDimensions.width / portraitDimensions.height) - (9 / 16)) < 0.02);
 });

@@ -7,7 +7,7 @@
 
 把散乱的本地资源，整理成自己的可视化资源仓库。
 
-![Version](https://img.shields.io/badge/version-4.6.1-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.8-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -111,13 +111,13 @@
 
 1. 从 [下载页](https://github.com/CarlosZ16420/hamster-archiver/releases/latest) 选择 **Setup EXE 安装版**，或 **ZIP 便携版**。便携版完整解压后运行 `HamsterArchiver.exe`。
 2. 在“归档工作台”扫描目录，或拖入文件夹、视频，查看待处理内容。
-3. 想先做**本地整理**，点击“不压缩直接入库”；准备**打包备份**，填写“压缩后保存在”，点击“开始压缩入库”。完成后到“仓库”浏览和整理。
+3. 想先做**本地整理**，点击“不压缩直接入库”；准备**打包备份**，在“收纳设置”中填写“压缩包保存在”，点击“开始压缩入库”。完成后到“仓库”浏览和整理。
 
-便携版请保留完整目录，例如 `HamsterArchiver-v4.6.1-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供。
+便携版请保留完整目录，例如 `HamsterArchiver-v4.6.8-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供。
 
 ## AI 可以直接调用
 
-**给 AI 一个项目地址，让它帮你接入，再用自然语言整理收藏。** 提供本机 MCP 启动器，能自动启动或连接应用，使用程序自带运行时，无需另装 Node.js。AI 可以发现工具、查询仓库、批量入库、整理标签和备注，并追踪任务直到结束；具体能力由正在运行的程序提供。
+**给 AI 一个项目地址，让它帮你接入，再用自然语言整理收藏。** 提供本机 MCP 启动器，能自动启动或连接应用，使用程序自带运行时，无需另装 Node.js。AI 可以按需发现工具，查询仓库，压缩或不压缩入库，修改密码、命名、预览、过滤与自动跳过等常用设置，整理项目，并在确认后导入、导出或切换仓库；队列结果按任务分页跟踪，密码不会在响应中回显。具体能力由正在运行的程序提供。
 
 ### 把这段发给你的 AI
 

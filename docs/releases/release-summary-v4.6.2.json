@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.2",
+  "notes": {
+    "zh-CN": [
+      "默认进入仓库，并为首次使用的空仓库增加可跳过、可永久关闭的三步引导。",
+      "未压缩项目再次压缩时可选择更新或保留已有备份位置；界面文案、按钮和暗色活跃度同步完善。",
+      "视频抽帧保留原始比例、不再补黑边；发行与公共更新后备流程更稳健。"
+    ],
+    "en-US": [
+      "The app opens the Warehouse by default and adds a skippable three-step guide for first use.",
+      "Recompressing uncompressed items can preserve or update existing backup locations; interface copy, controls and dark activity colors are refined.",
+      "Video frames retain their original aspect ratio without black padding, with more robust release and public update fallback flows."
+    ]
+  }
+}

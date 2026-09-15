@@ -8,7 +8,7 @@
 
 Turn scattered local files into your own visual resource library.
 
-![Version](https://img.shields.io/badge/version-4.6.1-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.8-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -112,7 +112,7 @@ Choose 7z/ZIP, passwords and custom split volumes. Queue batches, pause or sched
 
 ## Let your AI client use the library
 
-**Give your AI assistant the project URL, let it help with setup, then organize your collection in plain language.** Current source includes a local MCP launcher that starts or connects to the app using the bundled runtime, without a separate Node.js installation. AI can discover tools, search, submit batches, edit tags and notes, and follow tasks to completion. The running application determines the available capabilities.
+**Give your AI assistant the project URL, let it help with setup, then organize your collection in plain language.** The local MCP launcher starts or connects to the app using the bundled runtime, without a separate Node.js installation. AI can discover only the capabilities it needs, query the warehouse, run compressed or inventory-only intake, update common password, naming, preview, filtering and exact-skip settings, organize records, and confirm warehouse import, export or location changes. Queue results are paginated by task and password text is never returned. The running application determines the available capabilities.
 
 ### Send this to your AI assistant
 
@@ -145,7 +145,7 @@ The application itself does not upload media. Metadata returned through MCP, suc
 2. In the archive workbench, scan a directory or drop folders and videos, then review the pending resources.
 3. For **local organization**, choose uncompressed intake. To **prepare backups**, set the archive output directory and start compressed intake. Open the library afterward to browse and organize the results.
 
-Keep the full portable directory, such as `HamsterArchiver-v4.6.1-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included.
+Keep the full portable directory, such as `HamsterArchiver-v4.6.8-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included.
 
 ## Frequently asked questions
 

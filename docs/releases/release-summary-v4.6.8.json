@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.8",
+  "notes": {
+    "zh-CN": [
+      "汇总正式版 4.6.5 之后的界面维护：扫描/入库操作分行对齐，仓库活跃度固定显示最近 20 周，手动库存备注可选，MCP 概览默认精简。",
+      "补齐中英文状态和弹窗文案并保护用户填写的内容；首次启动按 Windows 界面语言选择中文或 English，可在引导第一步即时切换并保存。",
+      "未变化且已验证的发行包可复用完整性缓存；首次启动、升级或文件变化仍执行全量校验。",
+      "用户资料与仓库格式保持兼容，无需迁移。"
+    ],
+    "en-US": [
+      "Summarizes UI maintenance since stable 4.6.5: aligned Workbench actions, a fixed latest-20-week activity chart, optional manual notes and compact MCP insights.",
+      "Completes bilingual status and dialog copy while preserving user text; choose Chinese or English on first launch and switch in the first onboarding step.",
+      "Reuse integrity verification for an unchanged, verified distribution; first launch, upgrades and changed files still receive full checks.",
+      "Warehouse format and user data remain compatible; no migration is required."
+    ]
+  }
+}

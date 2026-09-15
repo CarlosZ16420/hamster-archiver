@@ -80,22 +80,16 @@ jobs:
           Copy-Item -LiteralPath $bootstrap -Destination tools\7zip\7z.exe
           npm run tools:prepare
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build portable package with full checks
+      - name: Build complete local release with full checks
         if: ${{ !inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft' }}
         run: npm run release:local -- --full-checks
-      - name: Build installer
-        if: ${{ !inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft' }}
-        run: npm run build:installer
       - name: Verify complete release files
         if: ${{ !inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft' }}
         run: node scripts/release-publish.js verify
-      - name: Upload Release draft directly without Actions storage
+      - name: Create or resume and publish verified GitHub Release
         if: inputs.publish && (steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft')
         shell: pwsh
-        run: node scripts/release-publish.js upload --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
-      - name: Publish verified GitHub Release
-        if: inputs.publish && (steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft')
-        run: node scripts/release-publish.js publish --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
+        run: node scripts/release-publish.js release --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
       - name: Optionally retain temporary package
         if: inputs.retain_artifact && (!inputs.publish || steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft')
         continue-on-error: true

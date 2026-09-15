@@ -7,6 +7,8 @@ const { hashFile } = require('../src/core/tool-integrity');
 const { makeLocalLayout } = require('../src/core/local-paths');
 const version = require('../package.json').version;
 const root = path.resolve(__dirname, '..');
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+const RELEASE_READ_BACK_DELAY_MS = 30000;
 
 function run(command, args, options = {}) {
   const output = execFileSync(command, args, {
@@ -38,6 +40,14 @@ function validateTarget(repo, tag, commandRunner = run) {
   return head;
 }
 
+function errorText(error) {
+  return String(error?.stderr || error?.message || error || '').trim();
+}
+
+function isTransientUploadError(error) {
+  return /\bEOF\b|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|connection (?:was )?reset|timed?\s*out|HTTP\s*(?:408|429|500|502|503|504)|status\s*(?:408|429|500|502|503|504)/i.test(errorText(error));
+}
+
 function findReleaseByTag(releases, tag) {
   return releases.find(release => release?.tag_name === tag);
 }
@@ -63,6 +73,14 @@ function getReleaseByTag(repo, tag, commandRunner = run) {
     // authenticated paginated listing as a bounded fallback.
   }
   return getRelease(repo, tag, commandRunner);
+}
+
+async function readReleaseWithOneDelayedRetry(repo, tag, accept, commandRunner = run, wait = delay, waitMs = RELEASE_READ_BACK_DELAY_MS) {
+  let release = getReleaseByTag(repo, tag, commandRunner);
+  if (accept(release)) return release;
+  await wait(waitMs);
+  release = getReleaseByTag(repo, tag, commandRunner);
+  return release;
 }
 
 function preflight(repo, tag, commandRunner = run) {
@@ -161,41 +179,98 @@ function assertDraftNotes(release, body) {
   }
 }
 
-async function publishCompleteDraft(repo, tag, release = getReleaseByTag(repo, tag), commandRunner = run, sourceRoot = root) {
+async function publishCompleteDraft(repo, tag, release = getReleaseByTag(repo, tag), commandRunner = run, sourceRoot = root, wait = delay, waitMs = RELEASE_READ_BACK_DELAY_MS) {
   if (!completeDraft(release, tag)) throw new Error('A complete Release draft was not found.');
   const { body } = await readReleaseNotes(repo, tag, sourceRoot);
   assertDraftNotes(release, body);
   commandRunner('gh', ['release', 'edit', tag, '--repo', repo, '--draft=false', '--latest']);
-  const published = getReleaseByTag(repo, tag, commandRunner);
+  const published = await readReleaseWithOneDelayedRetry(
+    repo, tag, candidate => completePublishedRelease(candidate, tag), commandRunner, wait, waitMs
+  );
   assertDraftNotes(published, body);
   if (!completePublishedRelease(published, tag)) {
-    throw new Error('GitHub Release publication was not visible as a complete stable release during read-back.');
+    throw new Error('GitHub Release publication was not visible as a complete stable release after one delayed read-back.');
   }
   console.log(`Published GitHub Release (EXE + ZIP + two checksums): ${published.html_url}`);
   return published;
 }
 
-async function upload(repo, tag) {
-  let release = preflight(repo, tag);
-  const { notes, body } = await readReleaseNotes(repo, tag);
-  assertDraftNotes(release, body);
-  const assets = await verifyFiles();
-  if (!release) {
-    run('gh', ['release', 'create', tag, '--repo', repo, '--draft', '--verify-tag', '--title', `Hamster Archiver ${tag}`, '--notes-file', notes]);
-    release = getReleaseByTag(repo, tag);
+async function uploadAssetWithRecovery(repo, tag, asset, body, commandRunner = run, wait = delay, waitMs = RELEASE_READ_BACK_DELAY_MS) {
+  let lastError;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      commandRunner('gh', ['release', 'upload', tag, asset.path, '--repo', repo], { timeout: 600000 });
+      return null;
+    } catch (error) {
+      if (!isTransientUploadError(error)) throw error;
+      lastError = error;
+      await wait(waitMs);
+      const observed = getReleaseByTag(repo, tag, commandRunner);
+      assertDraftNotes(observed, body);
+      if (observed && planUploads([asset], observed.assets || []).length === 0) return observed;
+      if (observed && !observed.draft) {
+        throw new Error('Release was published before all verified assets were uploaded. Stopping without overwriting it.');
+      }
+    }
   }
-  if (!release?.draft) throw new Error('Release is no longer a draft.');
+  throw new Error(`Release asset upload failed after one delayed retry: ${asset.name}: ${errorText(lastError)}`);
+}
+
+async function releaseArtifacts(repo, tag, dependencies = {}) {
+  const commandRunner = dependencies.commandRunner || run;
+  const fileVerifier = dependencies.fileVerifier || verifyFiles;
+  const sourceRoot = dependencies.sourceRoot || root;
+  const wait = dependencies.wait || delay;
+  const waitMs = dependencies.waitMs ?? RELEASE_READ_BACK_DELAY_MS;
+  let release = preflight(repo, tag, commandRunner);
+  const { notes, body } = await readReleaseNotes(repo, tag, sourceRoot);
+  assertDraftNotes(release, body);
+  const assets = await fileVerifier();
+  if (!release) {
+    try {
+      commandRunner('gh', [
+        'release', 'create', tag, '--repo', repo, '--verify-tag', '--title', `Hamster Archiver ${tag}`,
+        '--notes-file', notes, ...assets.map(asset => asset.path)
+      ], { timeout: 1800000 });
+    } catch (error) {
+      // A failed CLI upload can still have created a partial draft, or even
+      // completed remotely before the connection closed. Read back once after
+      // a fixed delay, then resume only the verified missing assets.
+      await wait(waitMs);
+      release = getReleaseByTag(repo, tag, commandRunner);
+      if (!release) {
+        throw new Error(`GitHub CLI did not complete the Release and no resumable draft was visible after one delayed read-back: ${errorText(error)}`);
+      }
+    }
+    if (!release) {
+      release = await readReleaseWithOneDelayedRetry(
+        repo, tag, candidate => completePublishedRelease(candidate, tag), commandRunner, wait, waitMs
+      );
+    }
+    assertDraftNotes(release, body);
+    if (completePublishedRelease(release, tag)) {
+      console.log(`Published GitHub Release (EXE + ZIP + two checksums): ${release.html_url}`);
+      return release;
+    }
+  }
+  if (!release) throw new Error('GitHub Release was not visible after one delayed read-back.');
+  if (!release.draft) throw new Error('A published Release exists but is incomplete or marked as a prerelease; it will not be overwritten.');
   const pending = planUploads(assets, release.assets || []);
   for (const asset of pending) {
-    if (!getRelease(repo, tag)?.draft) throw new Error('Release was published during upload. Stopping.');
-    run('gh', ['release', 'upload', tag, asset.path, '--repo', repo], { timeout: 600000 });
+    const observed = await uploadAssetWithRecovery(repo, tag, asset, body, commandRunner, wait, waitMs);
+    if (observed && !observed.draft) {
+      if (completePublishedRelease(observed, tag)) return observed;
+      throw new Error('Release was published before all verified assets were uploaded. Stopping without overwriting it.');
+    }
   }
-  const final = getRelease(repo, tag);
+  const final = await readReleaseWithOneDelayedRetry(
+    repo, tag, candidate => completeDraft(candidate, tag) || completePublishedRelease(candidate, tag),
+    commandRunner, wait, waitMs
+  );
   assertDraftNotes(final, body);
-  if (!final?.draft || planUploads(assets, final.assets || []).length) throw new Error('Release draft verification failed.');
-  console.log(`Complete Release draft (EXE + ZIP + two checksums): ${final.html_url}`);
-  console.log('The complete draft is ready for immediate publication by the release command.');
-  return final;
+  if (completePublishedRelease(final, tag)) return final;
+  if (!completeDraft(final, tag)) throw new Error('Release draft verification failed after one delayed read-back.');
+  return publishCompleteDraft(repo, tag, final, commandRunner, sourceRoot, wait, waitMs);
 }
 
 async function main() {
@@ -207,13 +282,13 @@ async function main() {
       throw new Error('A complete draft already exists. Publish it directly instead of building again.');
     }
   }
-  else if (options.command === 'upload') await upload(options.repo, options.tag);
+  else if (options.command === 'release' || options.command === 'upload') await releaseArtifacts(options.repo, options.tag);
   else if (options.command === 'publish') {
     validateTarget(options.repo, options.tag);
     await publishCompleteDraft(options.repo, options.tag);
   }
-  else throw new Error('Use state, preflight, verify, upload, or publish.');
+  else throw new Error('Use state, preflight, verify, release, or publish.');
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, completePublishedRelease, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, parseArgs, planUploads, preflight, publishCompleteDraft, releaseState, run, upload, validateTarget, verifyFiles };
+module.exports = { assertDraftNotes, readReleaseNotes, completeDraft, completePublishedRelease, errorText, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, parseArgs, planUploads, preflight, publishCompleteDraft, readReleaseWithOneDelayedRetry, releaseArtifacts, releaseState, run, uploadAssetWithRecovery, validateTarget, verifyFiles };

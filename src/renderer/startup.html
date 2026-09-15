@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self'">
+  <title>Hamster Archiver</title>
+  <link rel="stylesheet" href="startup.css">
+</head>
+<body data-theme="day">
+  <main class="startup-card">
+    <img src="../../assets/app-icon.ico" width="54" height="54" alt="">
+    <h1>Hamster Archiver</h1>
+    <p id="startup-status">正在启动…</p>
+    <div id="startup-progress" class="startup-progress" hidden><span></span></div>
+    <p id="startup-detail" class="startup-detail"></p>
+    <button id="startup-close" type="button" hidden>关闭</button>
+  </main>
+  <script src="startup.js"></script>
+</body>
+</html>

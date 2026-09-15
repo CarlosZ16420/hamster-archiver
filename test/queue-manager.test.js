@@ -6,7 +6,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const os = require('node:os');
 const test = require('node:test');
-const { QueueManager } = require('../src/core/queue-manager');
+const { QueueManager, resolveCatalogCompressionBackupLocation } = require('../src/core/queue-manager');
 const { CancelledError, createArchivePublicationReceipt } = require('../src/core/archive-engine');
 const { buildManifest } = require('../src/core/manifest');
 const { AppStore } = require('../src/core/store');
@@ -2167,7 +2167,7 @@ test('backup location setting requires a text value when enabled', async () => {
   assert.equal(state.config.backupLocation, '移动硬盘 B');
 });
 
-test('manual inventory requires only name and notes and records inventory date', async () => {
+test('manual inventory requires only a name and records inventory date', async () => {
   const store = new FakeStore();
   store.saveCatalog = async (_library, records) => { store.catalog = structuredClone(records); };
   const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
@@ -2179,7 +2179,8 @@ test('manual inventory requires only name and notes and records inventory date',
   assert.equal(record.notes, '存放在书柜第二层。');
   assert.ok(Number.isFinite(Date.parse(record.inventoryDate)));
   assert.deepEqual(record.archiveFiles, []);
-  await assert.rejects(manager.addManualCatalogRecord({ name: '缺少备注' }), /备注不能为空/);
+  const withoutNotes = await manager.addManualCatalogRecord({ name: '无需备注' });
+  assert.equal(withoutNotes.notes, '');
 });
 
 test('manual inventory accepts optional locations and can receive stored images', async () => {
@@ -2531,9 +2532,42 @@ test('warehouse insights calculate inventory, unique tags and GB activity', () =
   assert.equal(insights.inventoryCount, 3);
   assert.equal(insights.uniqueTagCount, 3);
   assert.equal(insights.totalOriginalBytes, 3_000_000_000);
-  assert.equal(insights.activity.length, 112);
+  assert.equal(insights.activity.length, 140);
+  assert.equal(insights.activity.at(-1).date, '2026-08-16');
   assert.equal(insights.activity.find((entry) => entry.date === '2026-08-15').inventoryCount, 1);
   assert.equal(insights.activity.find((entry) => entry.date === '2026-08-15').originalBytes, 2_000_000_000);
+});
+
+test('a new similarity ignore list follows the configured English UI language', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-similarity-ignore-en-'));
+  const termsPath = path.join(root, 'similarity-ignore-terms.txt');
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library',
+    similarityIgnoreTermsPath: termsPath,
+    language: 'en-US'
+  });
+
+  try {
+    await manager.ensureSimilarityIgnoreTermsFile();
+    const content = await fs.readFile(termsPath, 'utf8');
+    assert.match(content, /^# Similarity ignore list/m);
+    assert.doesNotMatch(content.split(/\r?\n/).slice(0, 2).join('\n'), /[\u3400-\u9fff]/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('catalog search filters warehouse records by exact local inventory date', () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.catalog = [
+    { id: 'aug-14', title: '前一天', inventoryDate: new Date(2026, 7, 14, 23, 30).toISOString(), manifest: [], directories: [] },
+    { id: 'aug-15', title: '目标日期', inventoryDate: new Date(2026, 7, 15, 8, 30).toISOString(), manifest: [], directories: [] },
+    { id: 'legacy', title: '旧记录', completedAt: new Date(2026, 7, 15, 17, 0).toISOString(), manifest: [], directories: [] }
+  ];
+
+  const results = manager.searchCatalog({ inventoryDate: '2026-08-15' });
+
+  assert.deepEqual(results.map((record) => record.id).sort(), ['aug-15', 'legacy']);
 });
 
 test('startup upgrades stale absolute thumbnail paths after the warehouse was moved manually', async (t) => {
@@ -2738,6 +2772,19 @@ test('warehouse compression refuses an uncompressed record whose original manife
   assert.match(result.failures[0].reason, /源文件发生变化/);
 });
 
+test('warehouse compression backup location resolution preserves or updates explicit metadata', () => {
+  const record = { backupLocation: '旧备份位置' };
+  const enabledConfig = { recordBackupLocation: true, backupLocation: '新备份位置' };
+
+  assert.equal(resolveCatalogCompressionBackupLocation(record, enabledConfig), '旧备份位置');
+  assert.equal(resolveCatalogCompressionBackupLocation(record, enabledConfig, true), '新备份位置');
+  assert.equal(resolveCatalogCompressionBackupLocation({ backupLocation: '' }, enabledConfig), '新备份位置');
+  assert.equal(resolveCatalogCompressionBackupLocation(record, {
+    recordBackupLocation: false,
+    backupLocation: '不会采用的位置'
+  }, true), '旧备份位置');
+});
+
 test('warehouse compression upgrades the same uncompressed record and removes its system label', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-existing-upgrade-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -2752,6 +2799,8 @@ test('warehouse compression upgrades the same uncompressed record and removes it
     archiveStagingDirectory: path.join(root, 'staging'),
     moveCompleted: false,
     autoTrashCompleted: false,
+    recordBackupLocation: true,
+    backupLocation: '新备份位置',
     autoSkipExactDuplicates: true
   }, {
     archiveRunner: async (_job, _config, hooks) => {
@@ -2781,6 +2830,7 @@ test('warehouse compression upgrades the same uncompressed record and removes it
     tags: ['未压缩', '旅行'],
     rating: 4,
     notes: '保留备注',
+    backupLocation: '旧备份位置',
     sourceType: 'directory',
     sourcePath,
     originalSourcePath: sourcePath,
@@ -2806,13 +2856,17 @@ test('warehouse compression upgrades the same uncompressed record and removes it
     archiveFiles: [{ name: 'existing.7z', size: 5 }]
   }];
 
-  const queued = await manager.queueCatalogRecordsForCompression(['uncompressed-upgrade']);
+  const queued = await manager.queueCatalogRecordsForCompression(
+    ['uncompressed-upgrade'],
+    { updateExistingBackupLocation: true }
+  );
   assert.equal(queued.queuedCount, 1);
   assert.equal(manager.jobs[0].sourceCatalogRecordId, 'uncompressed-upgrade');
   assert.equal(manager.jobs[0].stageText, '库内项目压缩 · 等待压缩');
   assert.deepEqual(manager.jobs[0].nameDuplicateMatches, []);
   assert.deepEqual(manager.jobs[0].similarMatches, []);
   assert.equal(manager.jobs[0].automaticDuplicateCheckPending, false);
+  assert.equal(manager.jobs[0].catalogCompressionBackupLocation, '新备份位置');
   await manager.startQueue();
 
   assert.equal(manager.jobs[0].status, 'completed');
@@ -2823,6 +2877,7 @@ test('warehouse compression upgrades the same uncompressed record and removes it
   assert.equal(manager.catalog[0].tags.includes('旅行'), true);
   assert.equal(manager.catalog[0].title, '保留自定义标题');
   assert.equal(manager.catalog[0].notes, '保留备注');
+  assert.equal(manager.catalog[0].backupLocation, '新备份位置');
   assert.deepEqual(manager.catalog[0].archiveFiles, [{ name: 'upgraded.7z', size: 5 }]);
 });
 

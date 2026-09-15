@@ -41,8 +41,9 @@ const {
 } = require('./core/update-manager');
 const { formatReleaseNotes } = require('./core/release-notes');
 const { findTrashItems, isTrashItemPresent, restoreTrashItem } = require('./core/recycle-bin');
-const { readAndVerifyReleaseManifest } = require('./core/tool-integrity');
+const { verifyReleaseManifestAtStartup } = require('./core/startup-integrity');
 const { resolveDevelopmentUserDataRoot } = require('./core/development-paths');
+const rendererI18n = require('./renderer/i18n');
 
 // Let Windows choose the nearest native-size frame from the multi-resolution
 // ICO. Passing the 1024px PNG here makes the title-bar icon downsample at
@@ -54,6 +55,7 @@ const distributionMode = packageMetadata.distributionMode === 'installed' ? 'ins
 const isInstalledDistribution = app.isPackaged && distributionMode === 'installed';
 
 let mainWindow;
+let startupWindow;
 let queueManager;
 let appStore;
 let allowWindowClose = false;
@@ -68,10 +70,15 @@ let mcpUiWasShown = false;
 let exitAfterMcpIdle = false;
 let mcpShutdownInProgress = false;
 let mcpShutdownComplete = false;
+let applicationReady = false;
+let pendingWindowShow = false;
+let startupUsesEnglish = false;
+const startupStartedAt = Date.now();
 let resolveApplicationInitialized;
 const applicationInitialized = new Promise((resolve) => { resolveApplicationInitialized = resolve; });
 let lastCatalogPushSignature = '';
 const isSmokeTest = process.env.HAMSTER_SMOKE_TEST === '1';
+const isStartupIntegrityTest = process.env.HAMSTER_STARTUP_INTEGRITY_TEST === '1';
 if (isSmokeTest) {
   // Electron may outlive the test runner's captured output pipe for a few milliseconds.
   // A closed diagnostic pipe must not surface as a main-process JavaScript error dialog.
@@ -91,12 +98,14 @@ const activeUserDataLocationPath = isSmokeTest || !isInstalledDistribution
   : userDataLocationPath(defaultElectronUserDataRoot);
 const configuredUserDataRoot = isSmokeTest
   ? resolveUserDataRoot(applicationRoot)
+  : isStartupIntegrityTest && process.env.HAMSTER_SMOKE_USER_DATA_DIR
+    ? path.resolve(process.env.HAMSTER_SMOKE_USER_DATA_DIR)
   : app.isPackaged
     ? (isInstalledDistribution
         ? resolveUserDataRootFromLocationFile(activeUserDataLocationPath, defaultElectronUserDataRoot)
         : resolveUserDataRoot(applicationRoot))
     : resolveDevelopmentUserDataRoot(projectRoot);
-const electronRuntimeDirectory = isSmokeTest && process.env.HAMSTER_SMOKE_USER_DATA_DIR
+const electronRuntimeDirectory = (isSmokeTest || isStartupIntegrityTest) && process.env.HAMSTER_SMOKE_USER_DATA_DIR
   ? path.resolve(process.env.HAMSTER_SMOKE_USER_DATA_DIR)
   : path.join(configuredUserDataRoot, 'electron');
 app.setPath('userData', electronRuntimeDirectory);
@@ -107,6 +116,36 @@ if (isSmokeTest) {
 }
 const hasSingleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
 app.setAppUserModelId('com.carlosz.hamsterarchiver');
+
+function usesEnglishUi() {
+  if (queueManager?.config?.language) return queueManager.config.language === 'en-US';
+  return defaultInterfaceLanguage() === 'en-US';
+}
+
+function defaultInterfaceLanguage() {
+  return String(app.getLocale?.() || '').toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US';
+}
+
+function nativeText(value, english = usesEnglishUi()) {
+  if (!english || typeof value !== 'string') return value;
+  const previousLocale = rendererI18n.getLocale();
+  rendererI18n.setLocale('en-US');
+  try {
+    return value.split(/(\r?\n)/).map((part) => /^\r?\n$/.test(part)
+      ? part
+      : rendererI18n.translateStage(part)).join('');
+  } finally {
+    rendererI18n.setLocale(previousLocale);
+  }
+}
+
+function logStartupTiming(stage, details = {}) {
+  console.log(`HAMSTER_STARTUP_TIMING ${JSON.stringify({
+    stage,
+    elapsedMs: Date.now() - startupStartedAt,
+    ...details
+  })}`);
+}
 
 function catalogPushSignature(catalog) {
   return JSON.stringify((catalog || []).map((record) => [
@@ -151,10 +190,79 @@ async function writeMcpReadyFile(argv) {
 function showMainWindow() {
   mcpUiWasShown = true;
   exitAfterMcpIdle = false;
+  if (!applicationReady) {
+    pendingWindowShow = true;
+    if (startupWindow && !startupWindow.isDestroyed()) {
+      startupWindow.show();
+      startupWindow.focus();
+    }
+    return;
+  }
   if (!mainWindow || mainWindow.isDestroyed()) createWindow();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+async function readStartupPreferences() {
+  try {
+    const saved = JSON.parse(await fs.readFile(path.join(configuredUserDataRoot, 'config', 'settings.json'), 'utf8'));
+    return {
+      language: saved?.language === 'en-US' ? 'en-US' : 'zh-CN',
+      theme: 'day'
+    };
+  } catch {
+    return {
+      language: defaultInterfaceLanguage(),
+      theme: 'day'
+    };
+  }
+}
+
+async function createStartupWindow() {
+  const preferences = await readStartupPreferences();
+  startupUsesEnglish = preferences.language === 'en-US';
+  startupWindow = new BrowserWindow({
+    show: false,
+    width: 460,
+    height: 280,
+    resizable: false,
+    maximizable: false,
+    minimizable: true,
+    title: preferences.language === 'en-US' ? 'Starting Hamster Archiver' : '正在启动 Hamster Archiver',
+    icon: appIconPath,
+    backgroundColor: ['night', 'twilight'].includes(preferences.theme) ? '#17191f' : '#f7f7f8',
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  });
+  startupWindow.removeMenu();
+  startupWindow.once('ready-to-show', () => {
+    if (!isStartupIntegrityTest) startupWindow?.show();
+  });
+  await startupWindow.loadFile(path.join(__dirname, 'renderer', 'startup.html'), {
+    query: { language: preferences.language, theme: preferences.theme }
+  });
+}
+
+function updateStartupWindow(stage, detail = '', percentage = null) {
+  if (!startupWindow || startupWindow.isDestroyed()) return;
+  void startupWindow.webContents.executeJavaScript(
+    `window.setStartupStatus?.(${JSON.stringify(stage)}, ${JSON.stringify(detail)}, ${JSON.stringify(percentage)})`
+  ).catch(() => {});
+}
+
+function showStartupError(error) {
+  if (!startupWindow || startupWindow.isDestroyed()) return false;
+  const repair = startupUsesEnglish
+    ? 'Reinstall or restore the application files, then try again.'
+    : '请重新安装或恢复程序文件后再试。';
+  updateStartupWindow('error', `${nativeText(error.message, startupUsesEnglish)}\n${repair}`);
+  startupWindow.show();
+  startupWindow.focus();
+  return true;
 }
 
 function handleMcpSessionCountChanged(count) {
@@ -391,7 +499,7 @@ async function showUpdateFailureDialog({ error, releaseUrl = releasesUrl, runRoo
       ? 'Program files were not replaced. The current version remains usable.'
       : '程序文件没有被替换，当前版本仍可继续使用。',
     detail: english
-      ? `Reason: ${error || 'The updater returned no usable result.'}\n\nManual update:\n${manualUpdateInstructions('en-US', isInstalledDistribution ? 'installed' : 'portable')}`
+      ? `Reason: ${nativeText(error || 'The updater returned no usable result.', true)}\n\nManual update:\n${manualUpdateInstructions('en-US', isInstalledDistribution ? 'installed' : 'portable')}`
       : `失败原因：${error || '更新助手没有返回可用结果。'}\n\n手动更新方法：\n${manualUpdateInstructions('zh-CN', isInstalledDistribution ? 'installed' : 'portable')}`,
     buttons,
     defaultId: 0,
@@ -445,8 +553,8 @@ async function promptAndLaunchPreparedUpdate({
       ? `Hamster Archiver ${version} has been verified.`
       : `Hamster Archiver ${version} 已校验完成。`,
     detail: appendReleaseNotes(english
-      ? 'Restart now to replace the program files and launch the new version. userdata, the warehouse, and archive packages will not be overwritten.'
-      : '点击“立即重启”后，程序会退出、替换程序文件并自动启动新版本。userdata、仓库和压缩包不会被覆盖。', prepared.releaseNotes, english),
+      ? 'Restart now to replace the program files and launch the new version. User data, the Warehouse, and archive packages will not be overwritten.'
+      : '点击“立即重启”后，程序会退出、替换程序文件并自动启动新版本。用户数据、仓库和压缩包不会被覆盖。', prepared.releaseNotes, english),
     buttons: [english ? 'Restart now' : '立即重启', english ? 'Later' : '稍后'],
     defaultId: 0,
     cancelId: 1,
@@ -687,13 +795,16 @@ async function inspectSmokeVisualColorStates(browserWindow) {
 }
 
 function createWindow() {
+  const replacesStartupWindow = Boolean(startupWindow && !startupWindow.isDestroyed());
   mainWindow = new BrowserWindow({
-    show: process.env.HAMSTER_SMOKE_TEST !== '1' || process.env.HAMSTER_SMOKE_SHOW === '1',
-    width: 1280,
+    show: !replacesStartupWindow && (process.env.HAMSTER_SMOKE_TEST !== '1' || process.env.HAMSTER_SMOKE_SHOW === '1'),
+    width: isSmokeTest && Number(process.env.HAMSTER_SMOKE_WINDOW_WIDTH) > 0
+      ? Number(process.env.HAMSTER_SMOKE_WINDOW_WIDTH)
+      : 1280,
     height: 860,
     minWidth: 980,
     minHeight: 680,
-    title: '仓鼠症大结局',
+    title: usesEnglishUi() ? 'Hamster Archiver' : '仓鼠症大结局',
     icon: appIconPath,
     backgroundColor: '#f7f7f8',
     webPreferences: {
@@ -708,6 +819,19 @@ function createWindow() {
   mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
     console.error(`PRELOAD_ERROR ${preloadPath}: ${error.stack || error.message}`);
   });
+  if (replacesStartupWindow) {
+    mainWindow.once('ready-to-show', () => {
+      if (startupWindow && !startupWindow.isDestroyed()) startupWindow.close();
+      startupWindow = null;
+      if (!isStartupIntegrityTest) {
+        mainWindow?.show();
+        mainWindow?.focus();
+      }
+      logStartupTiming('main-window-ready');
+    });
+  } else {
+    mainWindow.once('ready-to-show', () => logStartupTiming('main-window-ready'));
+  }
   void mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   mainWindow.on('close', async (event) => {
@@ -845,12 +969,89 @@ function createWindow() {
       if (process.env.HAMSTER_SMOKE_PAGE === 'library') {
         await mainWindow.webContents.executeJavaScript(`document.querySelector('[data-page="library-page"]').click()`);
         await new Promise((resolve) => setTimeout(resolve, 500));
-        const activityStatus = await mainWindow.webContents.executeJavaScript(`({
-          cells: document.querySelectorAll('.activity-cell').length,
-          inventory: document.querySelector('#metric-inventory')?.textContent,
-          tags: document.querySelector('#metric-tags')?.textContent,
-          gb: document.querySelector('#metric-gb')?.textContent
-        })`);
+        if (process.env.HAMSTER_SMOKE_EMPTY_LIBRARY === '1') {
+          const emptyLibraryStatus = await mainWindow.webContents.executeJavaScript(`(() => {
+            document.body.dataset.theme = 'day';
+            document.querySelector('#close-onboarding')?.click();
+            const placeholder = document.querySelector('.discovery-hero-empty');
+            const nav = document.querySelector('.top-nav')?.getBoundingClientRect();
+            const actions = document.querySelector('.app-bar-actions')?.getBoundingClientRect();
+            const separated = nav && actions && (
+              nav.right <= actions.left || nav.left >= actions.right ||
+              nav.bottom <= actions.top || nav.top >= actions.bottom
+            );
+            return {
+              inventory: document.querySelector('#metric-inventory')?.textContent,
+              cells: document.querySelectorAll('.activity-cell').length,
+              emptyCardVisible: Boolean(placeholder),
+              hasNoCoverWords: placeholder?.textContent.includes('暂无封面') || placeholder?.textContent.includes('No cover'),
+              stillLoading: document.querySelector('#warehouse-discovery')?.textContent.includes('正在从仓库中挑选') ||
+                document.querySelector('#warehouse-discovery')?.textContent.includes('Choosing a random warehouse item'),
+              usesForestGradient: getComputedStyle(placeholder).backgroundImage.includes('rgb(36, 74, 58)'),
+              navCentered: Boolean(nav) && Math.abs(nav.left + (nav.width / 2) - (document.documentElement.clientWidth / 2)) < 2,
+              headerControlsSeparate: Boolean(separated)
+            };
+          })()`);
+          if (process.env.HAMSTER_SMOKE_OVERVIEW_SCREENSHOT) {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const image = await mainWindow.webContents.capturePage();
+            await fs.mkdir(path.dirname(process.env.HAMSTER_SMOKE_OVERVIEW_SCREENSHOT), { recursive: true });
+            await fs.writeFile(process.env.HAMSTER_SMOKE_OVERVIEW_SCREENSHOT, image.toPNG());
+          }
+          console.log(`HAMSTER_EMPTY_LIBRARY_TEST ${JSON.stringify(emptyLibraryStatus)}`);
+          if (emptyLibraryStatus.inventory !== '0' || emptyLibraryStatus.cells !== 140 || !emptyLibraryStatus.emptyCardVisible ||
+              emptyLibraryStatus.hasNoCoverWords || emptyLibraryStatus.stillLoading || !emptyLibraryStatus.usesForestGradient ||
+              !emptyLibraryStatus.navCentered || !emptyLibraryStatus.headerControlsSeparate) {
+            console.error('HAMSTER_EMPTY_LIBRARY_TEST_FAILED');
+            app.exitCode = 1;
+          } else {
+            console.log(`HAMSTER_SMOKE_TEST_OK ${JSON.stringify({ bridgeStatus, ipcStatus, uiStatus })}`);
+          }
+          app.quit();
+          return;
+        }
+        const activityStatus = await mainWindow.webContents.executeJavaScript(`(() => {
+          const scroll = document.querySelector('.activity-scroll');
+          const nav = document.querySelector('.top-nav').getBoundingClientRect();
+          const actions = document.querySelector('.app-bar-actions').getBoundingClientRect();
+          const cells = [...document.querySelectorAll('.activity-cell')];
+          const activeCells = [...document.querySelectorAll('.activity-cell[data-activity-count]')]
+            .filter((cell) => Number(cell.dataset.activityCount) > 0);
+          const firstCellRect = cells[0]?.getBoundingClientRect();
+          const nextColumnRect = cells[7]?.getBoundingClientRect();
+          const status = {
+            cells: cells.length,
+            inventory: document.querySelector('#metric-inventory')?.textContent,
+            tags: document.querySelector('#metric-tags')?.textContent,
+            gb: document.querySelector('#metric-gb')?.textContent,
+            normalWidthFits: scroll.scrollWidth <= scroll.clientWidth,
+            overflowX: getComputedStyle(scroll).overflowX,
+            fixedColumnGap: Math.round((nextColumnRect?.left || 0) - (firstCellRect?.right || 0)),
+            subtitleRemoved: !document.querySelector('.activity-panel-head > div > strong + span'),
+            latestActivityVisible: Number(activeCells.at(-1)?.dataset.activityCount) > 0,
+            navCentered: Math.abs(nav.left + (nav.width / 2) - (document.documentElement.clientWidth / 2)) < 2,
+            headerControlsSeparate: nav.right <= actions.left || nav.left >= actions.right || nav.bottom <= actions.top || nav.top >= actions.bottom
+          };
+          scroll.style.width = '260px';
+          return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => {
+            status.narrowWidthScrolls = scroll.scrollWidth > scroll.clientWidth;
+            status.narrowDefaultsToLatest = Math.abs(scroll.scrollLeft - (scroll.scrollWidth - scroll.clientWidth)) <= 2;
+            scroll.style.removeProperty('width');
+            resolve(status);
+          })));
+        })()`);
+        const statisticsStatus = await mainWindow.webContents.executeJavaScript(`(() => {
+          document.querySelector('#open-inventory-statistics')?.click();
+          const dialog = document.querySelector('#warehouse-statistics-dialog');
+          const content = document.querySelector('#warehouse-statistics-content');
+          const status = {
+            open: Boolean(dialog?.open),
+            monthCards: document.querySelectorAll('.statistics-month-card').length,
+            verticallyScrollable: content?.scrollHeight > content?.clientHeight
+          };
+          document.querySelector('#close-warehouse-statistics')?.click();
+          return status;
+        })()`);
         const defaultRandomCount = await mainWindow.webContents.executeJavaScript(`document.querySelectorAll('[data-discovery-record]').length`);
         await mainWindow.webContents.executeJavaScript(`document.querySelector('#random-walk')?.click()`);
         await new Promise((resolve) => setTimeout(resolve, 300));
@@ -968,7 +1169,7 @@ function createWindow() {
             document.querySelector('#catalog-pagination')?.nextElementSibling?.id === 'catalog-detail',
           overviewMatchesPrototype: document.querySelector('.warehouse-overview-head')?.parentElement?.classList.contains('warehouse-summary') &&
             !document.querySelector('.warehouse-overview')?.innerText.includes('仓库活跃度') &&
-            document.querySelectorAll('.warehouse-metrics > div').length === 4,
+            document.querySelectorAll('.warehouse-metrics > .warehouse-metric').length === 4,
           hasInventoryDate: document.querySelector('#catalog-detail')?.innerText.includes('入库日期'),
           hasBackupFilter: document.querySelectorAll('#catalog-backup-filter option').length >=
             (${process.env.HAMSTER_SMOKE_REAL_CATALOG === '1' || Boolean(process.env.HAMSTER_SMOKE_IMPORT_DIRECTORY) ? 1 : 2}),
@@ -1003,7 +1204,7 @@ function createWindow() {
           virtualTreeCanvasHeight: Number.parseInt(document.querySelector('.virtual-directory-canvas')?.style.height || '0', 10),
           detailText: document.querySelector('#catalog-detail')?.innerText.slice(0, 120)
         })`);
-        console.log(`HAMSTER_LIBRARY_TEST ${JSON.stringify({ ...libraryStatus, listViewStatus, manualDialogStatus, activityStatus, defaultRandomCount, randomWalkCount, cardLightboxStatus, detailLightboxOpen, selectedCoverPath, coverState })}`);
+        console.log(`HAMSTER_LIBRARY_TEST ${JSON.stringify({ ...libraryStatus, listViewStatus, manualDialogStatus, activityStatus, statisticsStatus, defaultRandomCount, randomWalkCount, cardLightboxStatus, detailLightboxOpen, selectedCoverPath, coverState })}`);
         if (!libraryStatus.hasHeading || !libraryStatus.hasTree || !libraryStatus.hasEditor ||
             !libraryStatus.hasGridMode || libraryStatus.coverImages < 1 || !libraryStatus.hasContainedCover ||
             !libraryStatus.hasFileBadge ||
@@ -1016,8 +1217,12 @@ function createWindow() {
             !libraryStatus.hasNoTreeBulkButtons || !libraryStatus.hasNoDailyReview ||
             !libraryStatus.stagingCanBeSelected || !libraryStatus.hasCollapsibleMedia ||
             (Number(process.env.HAMSTER_SMOKE_CATALOG_COUNT || 0) > 24 && !libraryStatus.paginationVisible) ||
-            !manualDialogStatus.open || !manualDialogStatus.nameRequired || !manualDialogStatus.notesRequired ||
-            activityStatus.cells !== 112 || Number(activityStatus.inventory) < 2 ||
+            !manualDialogStatus.open || !manualDialogStatus.nameRequired || manualDialogStatus.notesRequired ||
+            activityStatus.cells !== 140 || Number(activityStatus.inventory) < 2 ||
+            !activityStatus.normalWidthFits || !activityStatus.narrowWidthScrolls || activityStatus.overflowX !== 'auto' ||
+            !activityStatus.narrowDefaultsToLatest || activityStatus.fixedColumnGap !== 5 || !activityStatus.subtitleRemoved ||
+            !activityStatus.latestActivityVisible || !activityStatus.navCentered || !activityStatus.headerControlsSeparate ||
+            !statisticsStatus.open || statisticsStatus.monthCards < 1 || !statisticsStatus.verticallyScrollable ||
             defaultRandomCount !== 1 || randomWalkCount !== 1 ||
             !cardLightboxStatus.open || !cardLightboxStatus.hasImage || !cardLightboxStatus.hasCoverButton ||
             !detailLightboxOpen || !selectedCoverPath || coverState.coverThumbnailRef !== selectedCoverPath ||
@@ -1090,8 +1295,10 @@ function registerIpc() {
 
   ipcMain.handle('dialog:choose-directory', async (event, initialPath) => {
     assertTrustedSender(event);
+    const english = usesEnglishUi();
     const configuredPath = String(initialPath || '').trim();
     const result = await dialog.showOpenDialog(mainWindow, {
+      title: english ? 'Choose a folder' : '选择文件夹',
       ...(configuredPath ? { defaultPath: path.resolve(configuredPath) } : {}),
       properties: ['openDirectory', 'createDirectory']
     });
@@ -1119,7 +1326,7 @@ function registerIpc() {
     assertTrustedSender(event);
     const english = queueManager?.config?.language === 'en-US';
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: english ? 'Choose warehouse location (saves)' : '选择仓库位置（saves）',
+      title: english ? 'Choose a Warehouse folder' : '选择仓库位置',
       defaultPath: queueManager.config.repositoryDirectory,
       properties: ['openDirectory', 'createDirectory']
     });
@@ -1144,7 +1351,7 @@ function registerIpc() {
       `hamster-warehouse-export-${stamp}.zip`
     );
     const result = await dialog.showSaveDialog(mainWindow, {
-      title: english ? 'Export warehouse as an archive' : '导出仓库为压缩包',
+      title: english ? 'Export Warehouse as an archive' : '导出仓库为压缩包',
       defaultPath,
       filters: [{ name: english ? 'Warehouse archive' : '仓库压缩包', extensions: ['zip'] }]
     });
@@ -1156,7 +1363,7 @@ function registerIpc() {
     assertTrustedSender(event);
     const english = queueManager?.config?.language === 'en-US';
     const result = await dialog.showOpenDialog(mainWindow, {
-      title: english ? 'Choose an external warehouse archive' : '选择外来仓库压缩包',
+      title: english ? 'Choose an external Warehouse archive' : '选择外来仓库压缩包',
       defaultPath: queueManager.config.repositoryDirectory,
       properties: ['openFile'],
       filters: [{ name: english ? 'Warehouse archive' : '仓库压缩包', extensions: ['zip'] }]
@@ -1333,13 +1540,17 @@ function registerIpc() {
     const english = queueManager?.config?.language === 'en-US';
     const options = kind === 'video'
       ? {
+          title: english ? 'Choose a video' : '选择视频',
           properties: ['openFile'],
           filters: [{
             name: english ? 'Video files' : '视频文件',
             extensions: ['3gp', 'avi', 'flv', 'm2ts', 'm4v', 'mkv', 'mov', 'mp4', 'mpeg', 'mpg', 'mts', 'rm', 'rmvb', 'ts', 'vob', 'webm', 'wmv']
           }]
         }
-      : { properties: ['openDirectory'] };
+      : {
+          title: english ? 'Choose a folder' : '选择文件夹',
+          properties: ['openDirectory']
+        };
     const result = await dialog.showOpenDialog(mainWindow, options);
     return result.canceled ? null : result.filePaths[0];
   });
@@ -1552,9 +1763,9 @@ function registerIpc() {
     return queueManager.updateBackupLocationForCatalogRecords(recordIds, location);
   });
 
-  ipcMain.handle('catalog:queue-compression', async (event, recordIds) => {
+  ipcMain.handle('catalog:queue-compression', async (event, recordIds, options) => {
     assertTrustedSender(event);
-    return queueManager.queueCatalogRecordsForCompression(recordIds);
+    return queueManager.queueCatalogRecordsForCompression(recordIds, options);
   });
 
 
@@ -1582,12 +1793,34 @@ function registerIpc() {
 
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const workspaceRoot = applicationRoot;
-  if (app.isPackaged && !isSmokeTest) await readAndVerifyReleaseManifest(workspaceRoot);
+  logStartupTiming('electron-ready');
+  const mcpRequested = !isSmokeTest && (process.argv.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1');
+  startedAsMcpBackground = mcpRequested && process.argv.includes('--background') && !process.argv.includes('--show-ui');
+  if (app.isPackaged && !isSmokeTest) {
+    if (!startedAsMcpBackground) await createStartupWindow();
+    updateStartupWindow('verify-cache');
+    const integrityResult = await verifyReleaseManifestAtStartup({
+      applicationRoot: workspaceRoot,
+      cachePath: path.join(configuredUserDataRoot, 'cache', 'release-integrity-v1.json'),
+      onProgress: ({ processedBytes, totalBytes }) => {
+        const percentage = totalBytes > 0 ? Math.round((processedBytes / totalBytes) * 100) : 100;
+        updateStartupWindow('verify-files', '', percentage);
+      },
+      forceFullVerification: process.argv.includes('--verify-integrity')
+    });
+    logStartupTiming('integrity-ready', { cacheHit: integrityResult.cacheHit });
+    if (!integrityResult.cacheWritten && integrityResult.cacheWriteError) {
+      console.warn(`STARTUP_INTEGRITY_CACHE_WARNING ${integrityResult.cacheWriteError.message}`);
+    }
+    updateStartupWindow('load-data');
+  }
   const userDataLayout = makeUserDataLayout(workspaceRoot, null, configuredUserDataRoot);
   const store = new AppStore(userDataLayout);
   appStore = store;
+  const defaultConfig = makeDefaultConfig(workspaceRoot, userDataLayout);
+  defaultConfig.language = defaultInterfaceLanguage();
   const config = rebasePortableUserDataPaths(
-    await store.loadSettings(makeDefaultConfig(workspaceRoot, userDataLayout)),
+    await store.loadSettings(defaultConfig),
     userDataLayout
   );
   delete config.ffprobePath;
@@ -1624,8 +1857,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     resolveProgramPath: (configuredPath) => resolveApplicationPath(workspaceRoot, configuredPath)
   });
   await queueManager.initialize();
-  const mcpRequested = !isSmokeTest && (process.argv.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1');
-  startedAsMcpBackground = mcpRequested && process.argv.includes('--background') && !process.argv.includes('--show-ui');
+  logStartupTiming('warehouse-ready');
   const pendingUpdateSuccess = await readUpdateSuccessNotice({
     userDataDirectory: userDataLayout.root,
     noticeFile: process.env.HAMSTER_UPDATE_NOTICE_FILE,
@@ -1818,7 +2050,9 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     });
   }
   registerIpc();
+  applicationReady = true;
   if (!startedAsMcpBackground) createWindow();
+  else if (pendingWindowShow) createWindow();
   if (pendingUpdateSuccess && !isSmokeTest && !startedAsMcpBackground) {
     setImmediate(() => {
       void showUpdateSuccessDialog(pendingUpdateSuccess)
@@ -1873,13 +2107,27 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     }), 'utf8');
   }
 
+  if (isStartupIntegrityTest) {
+    await waitForWindowReady(mainWindow);
+    console.log('HAMSTER_STARTUP_INTEGRITY_TEST_OK');
+    allowWindowClose = true;
+    app.quit();
+    return;
+  }
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) showMainWindow();
   });
 }).catch((error) => {
   if (process.env.HAMSTER_SMOKE_TEST === '1' || process.argv.includes('--background')) console.error(`HAMSTER_STARTUP_FAILED ${error.stack || error.message}`);
-  else dialog.showErrorBox('程序启动失败', error.message);
-  app.quit();
+  else if (!showStartupError(error)) {
+    const english = usesEnglishUi();
+    dialog.showErrorBox(
+      english ? 'Application failed to start' : '程序启动失败',
+      nativeText(error.message, english)
+    );
+  }
+  if (!startupWindow || startupWindow.isDestroyed()) app.quit();
 });
 
 app.on('window-all-closed', () => {

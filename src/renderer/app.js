@@ -81,6 +81,7 @@ const elements = {
   catalogTagFilter: document.querySelector('#catalog-tag-filter'),
   catalogBackupFilter: document.querySelector('#catalog-backup-filter'),
   catalogRatingFilter: document.querySelector('#catalog-rating-filter'),
+  catalogDateFilter: document.querySelector('#catalog-date-filter'),
   catalogSort: document.querySelector('#catalog-sort'),
   catalogListView: document.querySelector('#catalog-list-view'),
   catalogGridView: document.querySelector('#catalog-grid-view'),
@@ -132,9 +133,14 @@ const elements = {
   metricTags: document.querySelector('#metric-tags'),
   metricGb: document.querySelector('#metric-gb'),
   metricWeek: document.querySelector('#metric-week'),
+  activityTitle: document.querySelector('#activity-title'),
+  activityScroll: document.querySelector('.activity-scroll'),
   activityGrid: document.querySelector('#activity-grid'),
   activityMonths: document.querySelector('#activity-months'),
+  activityTooltip: document.querySelector('#activity-tooltip'),
   warehouseDiscovery: document.querySelector('#warehouse-discovery'),
+  warehouseStatisticsDialog: document.querySelector('#warehouse-statistics-dialog'),
+  warehouseStatisticsContent: document.querySelector('#warehouse-statistics-content'),
   thumbnailLightbox: document.querySelector('#thumbnail-lightbox'),
   queueSimilarityReportDialog: document.querySelector('#queue-similarity-report-dialog'),
   queueSimilarityReportContent: document.querySelector('#queue-similarity-report-content'),
@@ -157,6 +163,22 @@ const elements = {
   confirmDialogMessage: document.querySelector('#confirm-dialog-message'),
   acceptConfirmDialog: document.querySelector('#accept-confirm-dialog'),
   cancelConfirmDialog: document.querySelector('#cancel-confirm-dialog'),
+  onboardingTour: document.querySelector('#onboarding-tour'),
+  onboardingBackdrop: document.querySelector('#onboarding-backdrop'),
+  onboardingSpotlight: document.querySelector('#onboarding-spotlight'),
+  onboardingSpotlightSecondary: document.querySelector('#onboarding-spotlight-secondary'),
+  onboardingCard: document.querySelector('#onboarding-card'),
+  onboardingProgress: document.querySelector('#onboarding-progress'),
+  onboardingLanguageChoice: document.querySelector('#onboarding-language-choice'),
+  onboardingLanguageOptions: document.querySelectorAll('[data-onboarding-locale]'),
+  onboardingTitle: document.querySelector('#onboarding-title'),
+  onboardingCopy: document.querySelector('#onboarding-copy'),
+  suppressOnboarding: document.querySelector('#suppress-onboarding'),
+  skipOnboarding: document.querySelector('#skip-onboarding'),
+  nextOnboarding: document.querySelector('#next-onboarding'),
+  onboardingCelebration: document.querySelector('#onboarding-celebration'),
+  intakePreviewSettings: document.querySelector('#intake-preview-settings'),
+  smallItemFilterCard: document.querySelector('#small-item-filter-card'),
   toast: document.querySelector('#toast')
 };
 
@@ -200,10 +222,14 @@ let currentCatalogPageRecords = [];
 let catalogViewMode = localStorage.getItem('hamster-catalog-view-v2') === 'list' ? 'list' : 'grid';
 let currentWarehouseInsights = null;
 let warehouseInsightsSignature = '';
+let activityRangeSignature = '';
+let activityPinnedToLatest = true;
+let warehouseStatisticsMode = 'month';
 let discoveryMode = 'loading';
 let currentDiscoveryRecordIds = [];
 let lightboxContext = null;
 let catalogPage = 1;
+let activeActivityDateFilter = '';
 const CATALOG_PAGE_SIZE = 24;
 const CATALOG_GRID_MIN_CARD = 230;
 const CATALOG_GRID_MAX_CARD = 280;
@@ -233,6 +259,9 @@ const thumbnailPending = new Map();
 const THUMBNAIL_CACHE_LIMIT = 300;
 const selectedJobIds = new Set();
 const selectedCatalogIds = new Set();
+let onboardingOffered = false;
+let onboardingActive = false;
+let onboardingStep = 0;
 
 const themeMode = document.querySelector('#theme-mode');
 const THEME_VALUES = ['classic', 'day', 'night', 'forest', 'twilight'];
@@ -254,13 +283,24 @@ function updateLanguageToggle(locale = i18n?.getLocale?.() || 'zh-CN') {
     elements.languageToggle.setAttribute('aria-label', t(label));
     elements.languageToggle.title = t(label);
   }
+  elements.onboardingLanguageOptions.forEach((button) => {
+    button.setAttribute('aria-pressed', String(button.dataset.onboardingLocale === locale));
+  });
 }
-elements.languageToggle?.addEventListener('click', () => {
-  const nextLocale = i18n?.getLocale?.() === 'en-US' ? 'zh-CN' : 'en-US';
+
+function selectInterfaceLanguage(nextLocale) {
   i18n?.setLocale(nextLocale);
   updateLanguageToggle(nextLocale);
   updateLocaleSensitiveWarehouseText();
+  if (onboardingActive) renderOnboardingStep();
   void saveConfig();
+}
+
+elements.languageToggle?.addEventListener('click', () => {
+  selectInterfaceLanguage(i18n?.getLocale?.() === 'en-US' ? 'zh-CN' : 'en-US');
+});
+elements.onboardingLanguageOptions.forEach((button) => {
+  button.addEventListener('click', () => selectInterfaceLanguage(button.dataset.onboardingLocale));
 });
 
 function formatBytes(bytes) {
@@ -386,11 +426,226 @@ function confirmUser(message, options = {}) {
   elements.confirmDialogTitle.textContent = t(options.title || '请确认操作');
   elements.confirmDialogMessage.textContent = t(message);
   elements.acceptConfirmDialog.textContent = t(options.confirmLabel || '继续');
+  elements.cancelConfirmDialog.textContent = t(options.cancelLabel || '取消');
   elements.acceptConfirmDialog.className = `button ${options.tone === 'danger' ? 'danger' : 'primary'}`;
   elements.confirmDialog.showModal();
   elements.acceptConfirmDialog.focus();
   return new Promise((resolve) => { settleConfirmDialog = resolve; });
 }
+
+const onboardingSteps = [
+  {
+    target: '.nav-button[data-page="workbench-page"]',
+    progress: '新手引导 · 1/6',
+    title: '仓库还是空的',
+    copy: '先到归档工作台选择文件夹或视频，完成第一次入库后，这里就会显示可以搜索和整理的内容。',
+    nextLabel: '进入归档工作台'
+  },
+  {
+    target: '.location-panel',
+    placement: 'right',
+    progress: '新手引导 · 2/6',
+    title: '首先进行收纳设置',
+    copy: '',
+    nextLabel: '下一步'
+  },
+  {
+    target: '#archive-output-directory-field',
+    progress: '新手引导 · 3/6',
+    title: '必须填写的只有压缩包存放位置',
+    copy: '',
+    nextLabel: '下一步'
+  },
+  {
+    target: ['#source-disposition-options', '#source-safety-chip'],
+    progress: '新手引导 · 4/6',
+    title: '可以设置收纳后，自动改动原文件的位置，不勾选任何选项，就不会移动',
+    copy: '',
+    nextLabel: '下一步'
+  },
+  {
+    target: '.queue-actions',
+    progress: '新手引导 · 5/6',
+    title: '把内容加入队列并开始',
+    copy: '',
+    nextLabel: '下一步'
+  },
+  {
+    target: '#drop-zone',
+    progress: '新手引导 · 6/6',
+    title: '也可以直接把要收纳的内容拖拽到这里，快速开始',
+    copy: '',
+    nextLabel: '完成'
+  }
+];
+
+function closeOnboarding() {
+  onboardingActive = false;
+  elements.onboardingTour.hidden = true;
+}
+
+function positionOnboarding() {
+  if (!onboardingActive) return;
+  const step = onboardingSteps[onboardingStep];
+  const selectors = Array.isArray(step.target) ? step.target : [step.target];
+  const targets = selectors.map((selector) => document.querySelector(selector))
+    .filter((target) => target && target.getClientRects().length > 0);
+  if (targets.length === 0) return;
+  const rect = targets[0].getBoundingClientRect();
+  const margin = 7;
+  const targetRects = targets.slice(0, 2).map((target) => target.getBoundingClientRect());
+  const holes = targetRects.map((targetRect) => ({
+    left: Math.max(0, targetRect.left - margin),
+    top: Math.max(0, targetRect.top - margin),
+    right: Math.min(window.innerWidth, targetRect.right + margin),
+    bottom: Math.min(window.innerHeight, targetRect.bottom + margin)
+  }));
+  const xCuts = [...new Set([0, window.innerWidth, ...holes.flatMap((hole) => [hole.left, hole.right])])].sort((a, b) => a - b);
+  const yCuts = [...new Set([0, window.innerHeight, ...holes.flatMap((hole) => [hole.top, hole.bottom])])].sort((a, b) => a - b);
+  elements.onboardingBackdrop.replaceChildren();
+  for (let y = 0; y < yCuts.length - 1; y += 1) {
+    for (let x = 0; x < xCuts.length - 1; x += 1) {
+      const left = xCuts[x];
+      const top = yCuts[y];
+      const width = xCuts[x + 1] - left;
+      const height = yCuts[y + 1] - top;
+      const centerX = left + width / 2;
+      const centerY = top + height / 2;
+      if (holes.some((hole) => centerX >= hole.left && centerX <= hole.right && centerY >= hole.top && centerY <= hole.bottom)) continue;
+      const tile = make('i', 'onboarding-backdrop-tile');
+      Object.assign(tile.style, { left: `${left}px`, top: `${top}px`, width: `${width}px`, height: `${height}px` });
+      elements.onboardingBackdrop.append(tile);
+    }
+  }
+  const spotlights = [elements.onboardingSpotlight, elements.onboardingSpotlightSecondary];
+  spotlights.forEach((spotlight, index) => {
+    const target = targets[index];
+    spotlight.hidden = !target;
+    if (!target) return;
+    const targetRect = targetRects[index];
+    Object.assign(spotlight.style, {
+      left: `${Math.max(0, targetRect.left - margin)}px`,
+      top: `${Math.max(0, targetRect.top - margin)}px`,
+      width: `${Math.min(window.innerWidth, targetRect.right + margin) - Math.max(0, targetRect.left - margin)}px`,
+      height: `${Math.min(window.innerHeight, targetRect.bottom + margin) - Math.max(0, targetRect.top - margin)}px`
+    });
+  });
+
+  const cardRect = elements.onboardingCard.getBoundingClientRect();
+  const gap = 18;
+  const viewportMargin = 16;
+  const fitsRight = rect.right + gap + cardRect.width <= window.innerWidth - viewportMargin;
+  const useRight = step.placement === 'right' && fitsRight;
+  const fitsBelow = rect.bottom + gap + cardRect.height <= window.innerHeight - viewportMargin;
+  const placement = useRight ? 'right' : (fitsBelow ? 'below' : 'above');
+  const top = useRight
+    ? Math.max(viewportMargin, Math.min(window.innerHeight - cardRect.height - viewportMargin, rect.top + rect.height / 2 - cardRect.height / 2))
+    : (fitsBelow ? rect.bottom + gap : Math.max(viewportMargin, rect.top - gap - cardRect.height));
+  const left = useRight
+    ? rect.right + gap
+    : Math.max(
+        viewportMargin,
+        Math.min(window.innerWidth - cardRect.width - viewportMargin, rect.left + rect.width / 2 - cardRect.width / 2)
+      );
+  elements.onboardingCard.dataset.placement = placement;
+  elements.onboardingCard.style.top = `${top}px`;
+  elements.onboardingCard.style.left = `${left}px`;
+  elements.onboardingCard.style.setProperty(
+    '--onboarding-arrow-left',
+    `${Math.max(20, Math.min(cardRect.width - 36, rect.left + rect.width / 2 - left - 8))}px`
+  );
+  elements.onboardingCard.style.setProperty(
+    '--onboarding-arrow-top',
+    `${Math.max(20, Math.min(cardRect.height - 36, rect.top + rect.height / 2 - top - 8))}px`
+  );
+}
+
+function renderOnboardingStep() {
+  if (!onboardingActive) return;
+  const step = onboardingSteps[onboardingStep];
+  elements.onboardingProgress.textContent = t(step.progress);
+  elements.onboardingLanguageChoice.hidden = onboardingStep !== 0;
+  updateLanguageToggle(i18n?.getLocale?.() || 'zh-CN');
+  elements.onboardingTitle.textContent = t(step.title);
+  elements.onboardingCopy.textContent = t(step.copy);
+  elements.onboardingCopy.hidden = !step.copy;
+  elements.nextOnboarding.textContent = t(step.nextLabel);
+  elements.skipOnboarding.textContent = t('跳过引导');
+  const suppressLabel = elements.suppressOnboarding.closest('label')?.querySelector('span');
+  if (suppressLabel) suppressLabel.textContent = t('不再提示此引导');
+  const firstSelector = Array.isArray(step.target) ? step.target[0] : step.target;
+  const target = document.querySelector(firstSelector);
+  if (onboardingStep > 0) target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  requestAnimationFrame(positionOnboarding);
+}
+
+function maybeStartOnboarding(state) {
+  if (onboardingOffered || state?.config?.suppressOnboarding || (state?.catalog || []).length > 0) return;
+  onboardingOffered = true;
+  onboardingActive = true;
+  onboardingStep = 0;
+  elements.suppressOnboarding.checked = false;
+  elements.onboardingTour.hidden = false;
+  renderOnboardingStep();
+}
+
+function celebrateOnboardingCompletion() {
+  const emojis = ['🎉', '✨', '🎊', '⭐', '🌟', '🐹'];
+  const colors = ['#d45a32', '#e2ad3b', '#58b787', '#6b8fe8', '#dc6fa7'];
+  elements.onboardingCelebration.replaceChildren();
+  elements.onboardingCelebration.hidden = false;
+  for (let burst = 0; burst < 5; burst += 1) {
+    const firework = make('span', 'celebration-burst');
+    firework.style.setProperty('--burst-x', `${14 + burst * 18}vw`);
+    firework.style.setProperty('--burst-y', `${18 + (burst % 2) * 20}vh`);
+    firework.style.setProperty('--burst-delay', `${120 + burst * 130}ms`);
+    for (let ray = 0; ray < 12; ray += 1) {
+      const spark = make('i', 'celebration-spark');
+      spark.style.setProperty('--spark-angle', `${ray * 30}deg`);
+      spark.style.setProperty('--spark-distance', `${46 + (ray % 3) * 13}px`);
+      spark.style.setProperty('--spark-color', colors[(burst + ray) % colors.length]);
+      firework.append(spark);
+    }
+    elements.onboardingCelebration.append(firework);
+  }
+  for (let index = 0; index < 36; index += 1) {
+    const particle = make('span', 'celebration-particle', emojis[index % emojis.length]);
+    particle.style.setProperty('--celebration-x', `${8 + Math.random() * 84}vw`);
+    particle.style.setProperty('--celebration-delay', `${180 + Math.random() * 420}ms`);
+    particle.style.setProperty('--celebration-drift', `${-70 + Math.random() * 140}px`);
+    particle.style.setProperty('--celebration-scale', `${0.75 + Math.random() * 0.75}`);
+    elements.onboardingCelebration.append(particle);
+  }
+  setTimeout(() => {
+    elements.onboardingCelebration.hidden = true;
+    elements.onboardingCelebration.replaceChildren();
+  }, 2400);
+}
+
+async function finishOnboarding({ celebrate = false } = {}) {
+  const suppressFuturePrompts = elements.suppressOnboarding.checked;
+  closeOnboarding();
+  if (celebrate) celebrateOnboardingCompletion();
+  if (!suppressFuturePrompts) return;
+  const state = await safely(() => window.archiveApp.saveConfig({
+    ...readConfig(),
+    suppressOnboarding: true
+  }));
+  if (state) render(state, true);
+}
+
+elements.skipOnboarding?.addEventListener('click', () => { void finishOnboarding(); });
+document.querySelector('#close-onboarding')?.addEventListener('click', () => { void finishOnboarding(); });
+elements.nextOnboarding?.addEventListener('click', () => {
+  if (onboardingStep === 0) activatePage('workbench-page');
+  if (onboardingStep >= onboardingSteps.length - 1) {
+    void finishOnboarding({ celebrate: true });
+    return;
+  }
+  onboardingStep += 1;
+  renderOnboardingStep();
+});
+window.addEventListener('resize', positionOnboarding);
 
 async function safely(action) {
   try {
@@ -541,6 +796,7 @@ function updateLocaleSensitiveWarehouseText() {
     button.setAttribute('aria-label', uiState.ratingButtonLabel(button.dataset.rating, i18n?.getLocale?.()));
   }
   if (currentWarehouseInsights) renderWarehouseInsights(currentWarehouseInsights);
+  if (elements.warehouseStatisticsDialog?.open) renderWarehouseStatistics();
 }
 
 function formatDecimalGb(bytes) {
@@ -562,6 +818,54 @@ function activityLevel(entry, maxBytes, maxCount) {
   return 1;
 }
 
+function activityTooltipText(cell) {
+  const count = Number(cell?.dataset.activityCount) || 0;
+  const countLabel = i18n?.getLocale?.() === 'en-US'
+    ? `${count} ${count === 1 ? 'warehouse item' : 'warehouse items'}`
+    : `${count} 条仓储内容`;
+  return `${cell?.dataset.activityDateLabel || ''} · ${countLabel}`;
+}
+
+function positionActivityTooltip(clientX, clientY) {
+  const tooltip = elements.activityTooltip;
+  if (!tooltip || tooltip.hidden) return;
+  const gap = 12;
+  const rect = tooltip.getBoundingClientRect();
+  const left = Math.max(8, Math.min(window.innerWidth - rect.width - 8, clientX + gap));
+  const top = Math.max(8, Math.min(window.innerHeight - rect.height - 8, clientY - rect.height - gap));
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${top}px`;
+}
+
+function showActivityTooltip(cell, clientX, clientY) {
+  if (!cell?.matches?.('.activity-cell')) return;
+  elements.activityTooltip.textContent = activityTooltipText(cell);
+  elements.activityTooltip.hidden = false;
+  positionActivityTooltip(clientX, clientY);
+}
+
+function hideActivityTooltip() {
+  elements.activityTooltip.hidden = true;
+}
+
+function updateActivityDateFilterControl() {
+  if (!elements.catalogDateFilter) return;
+  elements.catalogDateFilter.hidden = !activeActivityDateFilter;
+  if (activeActivityDateFilter) {
+    elements.catalogDateFilter.textContent = t(`入库日期：${activeActivityDateFilter} · 清除`);
+  }
+}
+
+async function applyActivityDateFilter(date) {
+  activeActivityDateFilter = String(date || '');
+  catalogPage = 1;
+  updateActivityDateFilterControl();
+  hideActivityTooltip();
+  activatePage('library-page');
+  await refreshCatalog();
+  document.querySelector('.library-toolbar')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 function renderWarehouseInsights(insights) {
   currentWarehouseInsights = insights;
   const locale = i18n?.getLocale?.() === 'en-US' ? 'en-US' : 'zh-CN';
@@ -569,27 +873,39 @@ function renderWarehouseInsights(insights) {
   elements.metricTags.textContent = Number(insights.uniqueTagCount || 0).toLocaleString(locale);
   elements.metricGb.textContent = formatDecimalGb(insights.totalOriginalBytes);
   elements.metricWeek.textContent = insights.activity
+    .filter((entry) => !entry.future)
     .slice(-7)
     .reduce((sum, entry) => sum + (entry.future ? 0 : Number(entry.inventoryCount || 0)), 0)
     .toLocaleString(locale);
+  elements.activityTitle.textContent = t('最近 20 周');
+
+  const nextRangeSignature = `${insights.activity[0]?.date || ''}:${insights.activity.at(-1)?.date || ''}`;
+  const rangeChanged = nextRangeSignature !== activityRangeSignature;
+  activityRangeSignature = nextRangeSignature;
+  if (rangeChanged) activityPinnedToLatest = true;
 
   elements.activityGrid.replaceChildren();
   for (const entry of insights.activity) {
     const cell = make('span', 'activity-cell');
     const level = activityLevel(entry);
     cell.dataset.level = String(level);
+    cell.dataset.activityDate = entry.date;
+    cell.dataset.activityCount = String(Number(entry.inventoryCount) || 0);
+    cell.tabIndex = 0;
+    cell.setAttribute('role', 'button');
     const dateLabel = new Date(`${entry.date}T12:00:00`).toLocaleDateString(i18n?.getLocale?.() === 'en-US' ? 'en-US' : 'zh-CN', {
       year: 'numeric', month: 'long', day: 'numeric', weekday: 'short'
     });
-    cell.title = entry.future
-      ? t(`${dateLabel} · 尚未到达`)
-      : t(`${dateLabel} · ${entry.inventoryCount} 项库存 · ${formatDecimalGb(entry.originalBytes)} GB`);
+    cell.dataset.activityDateLabel = dateLabel;
+    cell.setAttribute('aria-label', activityTooltipText(cell));
     elements.activityGrid.append(cell);
   }
 
   elements.activityMonths.replaceChildren();
   let previousMonth = null;
-  for (let week = 0; week < 16; week += 1) {
+  const weekCount = Math.ceil(insights.activity.length / 7);
+  elements.activityMonths.style.setProperty('--activity-columns', String(weekCount));
+  for (let week = 0; week < weekCount; week += 1) {
     const entry = insights.activity[week * 7];
     const date = new Date(`${entry.date}T12:00:00`);
     const month = date.getMonth();
@@ -599,6 +915,195 @@ function renderWarehouseInsights(insights) {
     elements.activityMonths.append(label);
     previousMonth = month;
   }
+  updateActivityDateFilterControl();
+  if (activityPinnedToLatest) requestAnimationFrame(scrollActivityToLatest);
+}
+
+function scrollActivityToLatest() {
+  if (!elements.activityScroll) return;
+  elements.activityScroll.scrollLeft = Math.max(0, elements.activityScroll.scrollWidth - elements.activityScroll.clientWidth);
+  activityPinnedToLatest = true;
+}
+
+function localStatisticsDateKey(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function warehouseStatisticsData() {
+  const byDate = new Map();
+  let earliestYear = new Date().getFullYear();
+  for (const record of currentState?.catalog || []) {
+    const key = localStatisticsDateKey(record.inventoryDate || record.completedAt || record.verifiedAt);
+    if (!key) continue;
+    const current = byDate.get(key) || { inventoryCount: 0, originalBytes: 0 };
+    current.inventoryCount += 1;
+    current.originalBytes += Number(record.originalBytes) || 0;
+    byDate.set(key, current);
+    earliestYear = Math.min(earliestYear, Number(key.slice(0, 4)));
+  }
+  return { byDate, earliestYear };
+}
+
+function statisticsMonthSummary(year, month, byDate) {
+  const days = new Date(year, month + 1, 0).getDate();
+  const summary = { inventoryCount: 0, originalBytes: 0, activeDays: 0 };
+  for (let day = 1; day <= days; day += 1) {
+    const key = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    const entry = byDate.get(key);
+    if (!entry) continue;
+    summary.inventoryCount += entry.inventoryCount;
+    summary.originalBytes += entry.originalBytes;
+    summary.activeDays += 1;
+  }
+  return summary;
+}
+
+function statisticsSummaryText(summary) {
+  const english = i18n?.getLocale?.() === 'en-US';
+  return [
+    english ? `${summary.inventoryCount} items` : `${summary.inventoryCount} 条`,
+    `${formatDecimalGb(summary.originalBytes)} GB`,
+    english ? `${summary.activeDays} active days` : `${summary.activeDays} 个入库日`
+  ];
+}
+
+function renderStatisticsMonthCard(year, month, byDate, today) {
+  const english = i18n?.getLocale?.() === 'en-US';
+  const summary = statisticsMonthSummary(year, month, byDate);
+  const card = make('article', 'statistics-month-card');
+  const heading = make('div', 'statistics-card-heading');
+  const date = new Date(year, month, 1);
+  heading.append(make('h4', '', english
+    ? date.toLocaleDateString('en-US', { month: 'long' })
+    : `${String(month + 1).padStart(2, '0')} 月`));
+  const meta = make('div', 'statistics-card-meta');
+  for (const label of statisticsSummaryText(summary)) meta.append(make('span', '', label));
+  card.append(heading, meta);
+
+  const calendar = make('div', 'statistics-calendar');
+  for (const label of (english ? ['M', 'T', 'W', 'T', 'F', 'S', 'S'] : ['一', '二', '三', '四', '五', '六', '日'])) {
+    calendar.append(make('span', 'statistics-weekday', label));
+  }
+  const firstOffset = (new Date(year, month, 1).getDay() + 6) % 7;
+  for (let offset = 0; offset < firstOffset; offset += 1) calendar.append(make('span', 'statistics-day empty'));
+  const dayCount = new Date(year, month + 1, 0).getDate();
+  for (let day = 1; day <= dayCount; day += 1) {
+    const key = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    const entry = byDate.get(key) || { inventoryCount: 0, originalBytes: 0 };
+    const cell = make('span', 'statistics-day');
+    const cellDate = new Date(year, month, day);
+    cell.append(make('small', '', String(day)));
+    const square = make('i', 'statistics-day-square');
+    square.dataset.level = String(activityLevel({ ...entry, future: cellDate > today }));
+    square.title = `${cellDate.toLocaleDateString(english ? 'en-US' : 'zh-CN')} · ${statisticsSummaryText({ ...entry, activeDays: entry.inventoryCount > 0 ? 1 : 0 })[0]}`;
+    cell.append(square);
+    calendar.append(cell);
+  }
+  card.append(calendar);
+  return card;
+}
+
+function renderStatisticsYearCard(year, byDate) {
+  const english = i18n?.getLocale?.() === 'en-US';
+  const summaries = Array.from({ length: 12 }, (_, month) => statisticsMonthSummary(year, month, byDate));
+  const total = summaries.reduce((result, summary) => ({
+    inventoryCount: result.inventoryCount + summary.inventoryCount,
+    originalBytes: result.originalBytes + summary.originalBytes,
+    activeDays: result.activeDays + summary.activeDays
+  }), { inventoryCount: 0, originalBytes: 0, activeDays: 0 });
+  const card = make('article', 'statistics-year-card');
+  card.append(make('h3', '', String(year)));
+  const meta = make('div', 'statistics-card-meta');
+  for (const label of statisticsSummaryText(total)) meta.append(make('span', '', label));
+  card.append(meta);
+  const months = make('div', 'statistics-year-months');
+  summaries.forEach((summary, month) => {
+    const item = make('div', 'statistics-year-month');
+    item.append(
+      make('span', '', english ? new Date(year, month, 1).toLocaleDateString('en-US', { month: 'short' }) : `${month + 1}月`),
+      make('strong', '', summary.inventoryCount.toLocaleString(english ? 'en-US' : 'zh-CN'))
+    );
+    months.append(item);
+  });
+  card.append(months);
+  return card;
+}
+
+function renderWarehouseStatistics() {
+  const content = elements.warehouseStatisticsContent;
+  if (!content) return;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const { byDate, earliestYear } = warehouseStatisticsData();
+  content.replaceChildren();
+  for (const button of elements.warehouseStatisticsDialog.querySelectorAll('[data-statistics-mode]')) {
+    const active = button.dataset.statisticsMode === warehouseStatisticsMode;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  }
+  for (let year = today.getFullYear(); year >= earliestYear; year -= 1) {
+    if (warehouseStatisticsMode === 'year') {
+      content.append(renderStatisticsYearCard(year, byDate));
+      continue;
+    }
+    const section = make('section', 'statistics-year-section');
+    section.append(make('h3', '', String(year)));
+    const months = make('div', 'statistics-months');
+    const lastMonth = year === today.getFullYear() ? today.getMonth() : 11;
+    for (let month = lastMonth; month >= 0; month -= 1) {
+      months.append(renderStatisticsMonthCard(year, month, byDate, today));
+    }
+    section.append(months);
+    content.append(section);
+  }
+}
+
+function openWarehouseStatistics() {
+  renderWarehouseStatistics();
+  if (!elements.warehouseStatisticsDialog.open) elements.warehouseStatisticsDialog.showModal();
+}
+
+elements.activityGrid?.addEventListener('pointerover', (event) => {
+  const cell = event.target.closest('.activity-cell');
+  if (cell) showActivityTooltip(cell, event.clientX, event.clientY);
+});
+elements.activityGrid?.addEventListener('pointermove', (event) => {
+  if (!elements.activityTooltip.hidden) positionActivityTooltip(event.clientX, event.clientY);
+});
+elements.activityGrid?.addEventListener('pointerout', (event) => {
+  if (!event.relatedTarget?.closest?.('.activity-cell')) hideActivityTooltip();
+});
+elements.activityGrid?.addEventListener('focusin', (event) => {
+  const cell = event.target.closest('.activity-cell');
+  if (!cell) return;
+  const rect = cell.getBoundingClientRect();
+  showActivityTooltip(cell, rect.left + rect.width / 2, rect.top);
+});
+elements.activityGrid?.addEventListener('focusout', hideActivityTooltip);
+elements.activityGrid?.addEventListener('click', (event) => {
+  const cell = event.target.closest('.activity-cell[data-activity-date]');
+  if (cell) void applyActivityDateFilter(cell.dataset.activityDate);
+});
+elements.activityGrid?.addEventListener('keydown', (event) => {
+  if (!['Enter', ' '].includes(event.key)) return;
+  const cell = event.target.closest('.activity-cell[data-activity-date]');
+  if (!cell) return;
+  event.preventDefault();
+  void applyActivityDateFilter(cell.dataset.activityDate);
+});
+elements.activityScroll?.addEventListener('scroll', () => {
+  activityPinnedToLatest = elements.activityScroll.scrollWidth - elements.activityScroll.clientWidth - elements.activityScroll.scrollLeft <= 2;
+}, { passive: true });
+if (elements.activityScroll && 'ResizeObserver' in window) {
+  const activityResizeObserver = new ResizeObserver(() => {
+    if (activityPinnedToLatest) requestAnimationFrame(scrollActivityToLatest);
+  });
+  activityResizeObserver.observe(elements.activityScroll);
 }
 
 async function refreshWarehouseInsights(force = false) {
@@ -619,11 +1124,14 @@ function renderDiscovery(title, description, records) {
   elements.warehouseDiscovery.hidden = false;
   elements.warehouseDiscovery.replaceChildren();
   if (records.length === 0) {
-    elements.warehouseDiscovery.append(make(
-      'p',
-      'muted',
-      description || (title === '随机漫步' ? '仓库还是空的，添加库存后这里会自动出现推荐。' : '没有找到符合这次回顾条件的库存。')
-    ));
+    const list = make('div', 'discovery-list');
+    const placeholder = make('div', 'discovery-hero no-cover discovery-hero-empty');
+    placeholder.append(make('span', 'discovery-label', title));
+    const info = make('span', 'discovery-hero-info');
+    info.append(make('strong', '', description || '仓库还是空的，添加库存后这里会自动出现推荐。'));
+    placeholder.append(info);
+    list.append(placeholder);
+    elements.warehouseDiscovery.append(list);
     return;
   }
   const list = make('div', 'discovery-list');
@@ -631,7 +1139,7 @@ function renderDiscovery(title, description, records) {
     const button = make('button', 'discovery-hero');
     button.type = 'button';
     button.dataset.discoveryRecord = record.id;
-    button.append(make('span', 'discovery-label', title === '随机漫步' ? '随机漫步 · 随机一项库存' : title));
+    button.append(make('span', 'discovery-label', title));
     if (record.coverThumbnailPath) {
       const backdrop = document.createElement('img');
       backdrop.className = 'discovery-hero-image discovery-hero-backdrop';
@@ -644,6 +1152,7 @@ function renderDiscovery(title, description, records) {
       void loadThumbnail(backdrop, record.id, record.coverThumbnailPath);
       void loadThumbnail(cover, record.id, record.coverThumbnailPath);
     } else {
+      button.classList.add('no-cover');
       button.append(make('span', 'discovery-hero-placeholder', '暂无封面'));
     }
     const info = make('span', 'discovery-hero-info');
@@ -721,7 +1230,8 @@ function readConfig() {
     similarityStrength: SIMILARITY_STRENGTH_ORDER[Number(elements.similarityStrength.value) - 1] || 'standard',
     autoTrashCompleted: elements.autoTrash.checked,
     recordBackupLocation: elements.recordBackupLocation.checked,
-    backupLocation: elements.backupLocation.value.trim()
+    backupLocation: elements.backupLocation.value.trim(),
+    suppressOnboarding: Boolean(currentState?.config?.suppressOnboarding)
   };
 }
 
@@ -1341,6 +1851,7 @@ async function refreshCatalog() {
     tag: elements.catalogTagFilter.value,
     backupLocation: elements.catalogBackupFilter.value,
     rating: ratingValue === '' ? null : Number(ratingValue),
+    inventoryDate: activeActivityDateFilter,
     sort: elements.catalogSort.value
   }));
   if (requestSequence !== catalogSearchSequence) return null;
@@ -2095,10 +2606,10 @@ function renderCatalogEditor(record) {
   ratingField.append(ratingButtons);
 
   const notesLabel = make('label', 'editor-field editor-notes');
-  notesLabel.append(make('span', '', record.recordType === 'manual' ? '备注（必填）' : '备注'));
+  notesLabel.append(make('span', '', record.recordType === 'manual' ? '备注（选填）' : '备注'));
   const notesInput = document.createElement('textarea');
   notesInput.name = 'notes';
-  notesInput.required = record.recordType === 'manual';
+  notesInput.required = false;
   notesInput.maxLength = 5000;
   notesInput.rows = 4;
   notesInput.placeholder = '记录来源、内容特点、后续处理计划等，支持直接粘贴图片';
@@ -2137,7 +2648,7 @@ function renderCatalogEditor(record) {
     }
   });
 
-  const submit = make('button', 'button primary editor-save', '保存整理信息');
+  const submit = make('button', 'button primary editor-save', '保存');
   submit.type = 'submit';
   const formActions = make('div', 'catalog-form-actions');
   const imagePickerButton = make('button', 'button ghost', '添加图片');
@@ -2236,7 +2747,7 @@ function renderSimilarProjects(record) {
       );
       button.type = 'button';
       button.dataset.similarRecord = similar.id;
-      button.title = (similar.reasons || []).join('；');
+      button.title = (similar.reasons || []).map((reason) => t(reason)).join(t('；'));
       item.append(button);
       if (similarityManageRecordId === record.id) {
         const remove = make('button', 'remove-similar-button', '×');
@@ -2282,7 +2793,7 @@ function renderCatalogDetail(record) {
       sourceLine.append(makeUserText('span', '', sourceLocation.text));
     }
     if (sourceLocation.canOpen && !isHttpUrl(sourceLocation.value)) {
-      const openSource = make('button', 'mini-copy-button', '打开');
+      const openSource = make('button', 'mini-copy-button source-open-button', '打开');
       openSource.type = 'button';
       openSource.dataset.openSource = record.id;
       openSource.title = sourceLocation.inTrash ? '从回收站复原到原位置' : '打开原文件当前位置';
@@ -2461,7 +2972,7 @@ function renderSummary(state) {
       ['name_match', 'similar_title', 'same_video_size'].includes(reason))));
   elements.undoCatalog.disabled = !state.undoDepth;
   elements.undoCatalog.textContent = t(state.undoDepth ? `撤回：${state.undoLabel}` : '撤回');
-  elements.undoCatalog.title = state.undoDepth ? `撤回：${state.undoLabel}` : t('撤回');
+  elements.undoCatalog.title = t(state.undoDepth ? `撤回：${state.undoLabel}` : '撤回');
 
   const canPause = state.running && !state.paused && ['inventorying', 'compressing', 'verifying'].includes(currentJob?.status);
   document.querySelector('#pause-queue').hidden = !canPause;
@@ -2508,7 +3019,9 @@ function render(state, includeConfig = false) {
   renderLogs(state.logs);
   updateCatalogSelectionControls();
   void refreshWarehouseInsights();
-  if ((discoveryMode === 'loading' || discoveryMode === 'empty') && state.catalog.length > 0) {
+  if (discoveryMode === 'loading') {
+    void showRandomWalk(false);
+  } else if (discoveryMode === 'empty' && state.catalog.length > 0) {
     void showRandomWalk(false);
   } else if (discoveryMode === 'random' && currentDiscoveryRecordIds.some((id) =>
     !state.catalog.some((record) => record.id === id))) {
@@ -2526,6 +3039,8 @@ function render(state, includeConfig = false) {
       if (currentCatalogResults.length === 0 && state.catalog.length > 0) void refreshCatalog();
   }
   i18n?.translateDom(document.body);
+  if (onboardingActive && state.catalog.length > 0) closeOnboarding();
+  else maybeStartOnboarding(state);
 }
 
 async function saveConfig() {
@@ -2551,8 +3066,9 @@ async function prepareQueueIntake() {
   return Boolean(await saveConfig());
 }
 
-document.querySelectorAll('.nav-button').forEach((button) => {
-  button.addEventListener('click', () => {
+function activatePage(pageId) {
+  const button = document.querySelector(`.nav-button[data-page="${pageId}"]`);
+  if (!button) return;
     document.querySelectorAll('.nav-button').forEach((item) => item.classList.toggle('active', item === button));
     document.querySelectorAll('.app-page').forEach((page) => { page.hidden = page.id !== button.dataset.page; });
     if (button.dataset.page === 'library-page' && currentState) {
@@ -2565,6 +3081,11 @@ document.querySelectorAll('.nav-button').forEach((button) => {
         if (!elements.queueSimilarityReportDialog.open) elements.queueSimilarityReportDialog.showModal();
       });
     }
+}
+
+document.querySelectorAll('.nav-button').forEach((button) => {
+  button.addEventListener('click', () => {
+    activatePage(button.dataset.page);
   });
 });
 document.querySelectorAll('.action-menu').forEach((menu) => {
@@ -2642,6 +3163,7 @@ elements.confirmDialogForm.addEventListener('submit', (event) => {
   closeConfirmDialog(true);
 });
 elements.cancelConfirmDialog.addEventListener('click', () => closeConfirmDialog(false));
+document.querySelector('#close-confirm-dialog').addEventListener('click', () => closeConfirmDialog(false));
 elements.confirmDialog.addEventListener('cancel', (event) => {
   event.preventDefault();
   closeConfirmDialog(false);
@@ -2720,7 +3242,7 @@ elements.smallItemFilter.addEventListener('change', () => { void saveConfig(); }
 elements.minimumTaskMb.addEventListener('change', () => { void saveConfig(); });
 elements.autoTrash.addEventListener('change', async () => {
   if (elements.autoTrash.checked) {
-    const accepted = await confirmUser('启用后，每个任务只有在验证并入库成功后，才会把对应源文件夹或视频移入 Windows 回收站。是否启用？', { title: '启用回收站自动处理', confirmLabel: '确认启用' });
+    const accepted = await confirmUser('启用后，每个任务只要验证并入库成功，就会把对应源文件夹或视频移入 Windows 回收站。是否启用？', { title: '启用回收站自动处理', confirmLabel: '确认启用' });
     if (!accepted) {
       elements.autoTrash.checked = false;
       return;
@@ -2781,12 +3303,50 @@ document.querySelector('#scan-source').addEventListener('click', async () => {
   if (state) render(state);
 });
 
+function friendlyIntakeError(error) {
+  return String(error?.message || error || '')
+    .replace(/^Error invoking remote method ['"][^'"]+['"]:\s*Error:\s*/i, '')
+    .replace(/^Error:\s*/i, '')
+    .trim();
+}
+
+function isSmallItemThresholdError(message) {
+  return /^该项目只有 [\d.]+ MB，低于当前 \d+ MB 的入库阈值。$/.test(message) ||
+    /^This item is only [\d.]+ MB, below the current \d+ MB intake threshold\.$/.test(message);
+}
+
+function revealSmallItemFilter(message) {
+  activatePage('workbench-page');
+  elements.intakePreviewSettings.open = true;
+  elements.smallItemFilterCard.classList.remove('attention-flash');
+  void elements.smallItemFilterCard.offsetWidth;
+  elements.smallItemFilterCard.classList.add('attention-flash');
+  elements.smallItemFilterCard.addEventListener('animationend', () => {
+    elements.smallItemFilterCard.classList.remove('attention-flash');
+  }, { once: true });
+  requestAnimationFrame(() => {
+    elements.smallItemFilterCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    elements.minimumTaskMb.focus({ preventScroll: true });
+  });
+  showToast(message, true);
+}
+
+async function tryAddSingle(sourcePath) {
+  try {
+    return { state: await window.archiveApp.addSingle(sourcePath), error: null };
+  } catch (error) {
+    return { state: null, error: friendlyIntakeError(error) };
+  }
+}
+
 async function addSingle(kind) {
   if (!await prepareQueueIntake()) return;
   const selected = await safely(() => window.archiveApp.chooseSingle(kind));
   if (!selected) return;
-  const state = await safely(() => window.archiveApp.addSingle(selected));
-  if (state) render(state);
+  const result = await tryAddSingle(selected);
+  if (result.state) render(result.state);
+  else if (isSmallItemThresholdError(result.error)) revealSmallItemFilter(result.error);
+  else showToast(result.error || '未能加入所选内容。', true);
 }
 
 document.querySelector('#add-folder').addEventListener('click', () => addSingle('directory'));
@@ -2807,13 +3367,18 @@ async function addPathsToQueue(paths, sourceLabel) {
   if (uniquePaths.length === 0) return;
   if (!await prepareQueueIntake()) return;
   let added = 0;
+  const errors = [];
   for (const sourcePath of uniquePaths) {
-    const state = await safely(() => window.archiveApp.addSingle(sourcePath));
-    if (state) {
+    const result = await tryAddSingle(sourcePath);
+    if (result.state) {
       added += 1;
-      render(state);
-    }
+      render(result.state);
+    } else if (result.error) errors.push(result.error);
   }
+  const smallItemError = errors.find(isSmallItemThresholdError);
+  if (smallItemError) revealSmallItemFilter(smallItemError);
+  else if (errors.length > 0) showToast(errors[0], true);
+  if (smallItemError || errors.length > 0) return;
   showToast(
     added > 0
       ? `已通过${sourceLabel}加入 ${added} 个任务`
@@ -2911,6 +3476,7 @@ elements.acknowledgeTrashSafety.addEventListener('click', async () => {
     showToast('安全警告已确认；队列保持停止，自动移入回收站已关闭', true);
   }
 });
+document.querySelector('#close-trash-safety').addEventListener('click', () => elements.acknowledgeTrashSafety.click());
 elements.trashSafetyDialog.addEventListener('cancel', (event) => event.preventDefault());
 
 elements.selectAllTasks.addEventListener('change', () => {
@@ -3115,6 +3681,7 @@ elements.catalogSearch.addEventListener('blur', () => {
 for (const filter of [elements.catalogTagFilter, elements.catalogBackupFilter, elements.catalogRatingFilter, elements.catalogSort]) {
   filter.addEventListener('change', () => { catalogPage = 1; void refreshCatalog(); });
 }
+elements.catalogDateFilter?.addEventListener('click', () => { void applyActivityDateFilter(''); });
 elements.catalogListView.addEventListener('click', () => setCatalogView('list'));
 elements.catalogGridView.addEventListener('click', () => setCatalogView('grid'));
 window.addEventListener('resize', () => {
@@ -3335,6 +3902,20 @@ document.querySelector('#random-walk').addEventListener('click', async () => {
   await showRandomWalk(true);
 });
 
+for (const selector of ['#open-inventory-statistics', '#open-storage-statistics']) {
+  document.querySelector(selector).addEventListener('click', openWarehouseStatistics);
+}
+document.querySelector('#close-warehouse-statistics').addEventListener('click', () => elements.warehouseStatisticsDialog.close());
+elements.warehouseStatisticsDialog.addEventListener('click', (event) => {
+  if (event.target === elements.warehouseStatisticsDialog) elements.warehouseStatisticsDialog.close();
+});
+elements.warehouseStatisticsDialog.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-statistics-mode]');
+  if (!button) return;
+  warehouseStatisticsMode = button.dataset.statisticsMode;
+  renderWarehouseStatistics();
+});
+
 elements.warehouseDiscovery.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-discovery-record]');
   if (button) void openDiscoveryRecord(button.dataset.discoveryRecord);
@@ -3482,7 +4063,31 @@ elements.updateBackupSelected.addEventListener('click', () => {
 });
 
 async function queueSelectedUncompressedRecords() {
-  const result = await safely(() => window.archiveApp.queueCatalogRecordsForCompression([...selectedCatalogIds]));
+  const configuredLocation = currentState?.config?.recordBackupLocation
+    ? String(currentState.config.backupLocation || '').trim()
+    : '';
+  const conflicts = configuredLocation
+    ? (currentState?.catalog || []).filter((record) =>
+      selectedCatalogIds.has(record.id) &&
+      record.archiveState === 'uncompressed' &&
+      String(record.backupLocation || '').trim() &&
+      String(record.backupLocation || '').trim() !== configuredLocation)
+    : [];
+  const updateExistingBackupLocation = conflicts.length > 0
+    ? await confirmUser(
+      `所选未压缩项目中有 ${conflicts.length} 项已经记录了不同的备份位置。本次压缩入库设置为「${configuredLocation}」。是否用本次设置更新这些项目的备份位置？`,
+      {
+        title: '更新备份位置',
+        confirmLabel: '更新并继续',
+        cancelLabel: '保留原位置并继续',
+        tone: 'warning'
+      }
+    )
+    : false;
+  const result = await safely(() => window.archiveApp.queueCatalogRecordsForCompression(
+    [...selectedCatalogIds],
+    { updateExistingBackupLocation }
+  ));
   if (!result) return;
   render(result.state);
   if (result.failedCount > 0) {
@@ -3560,7 +4165,7 @@ elements.deleteCatalogSelected.addEventListener('click', () => {
   if (archiveCount > 0) parts.push(`${archiveCount} 个普通归档的压缩包将移入 Windows 回收站`);
   if (uncompressedCount > 0) parts.push(`${uncompressedCount} 个未压缩库存只删除仓库记录，原文件保持不变`);
   if (manualCount > 0) parts.push(`${manualCount} 条手动库存记录将被移除`);
-  elements.deleteCatalogSummary.textContent = t(`所选 ${selectedRecords.length} 项：${parts.join('；')}。只有必要操作全部成功后，对应仓库记录才会删除。`);
+  elements.deleteCatalogSummary.textContent = `${t(`所选 ${selectedRecords.length} 项：`)}${parts.map((part) => t(part)).join(t('；'))}${t('。')} ${t('只有必要操作全部成功后，对应仓库记录才会删除。')}`;
   const restorableCount = selectedRecords.filter((record) => ['moved', 'trashed'].includes(record.sourceDisposition)).length;
   elements.restoreOriginalSources.disabled = restorableCount === 0;
   elements.restoreOriginalSources.closest('.restore-source-option').classList.toggle('disabled', restorableCount === 0);

@@ -109,7 +109,7 @@ async function extractVideoFrames(sourcePath, outputDirectory, outputStartIndex,
       '-i', sourcePath,
       '-map', '0:v:0',
       '-frames:v', '1',
-      '-vf', 'scale=360:240:force_original_aspect_ratio=decrease,pad=360:240:(ow-iw)/2:(oh-ih)/2:color=0x181715',
+      '-vf', 'scale=360:240:force_original_aspect_ratio=decrease:force_divisible_by=2',
       '-q:v', '3',
       '-y', thumbnailPath
     ], options);

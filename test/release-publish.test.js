@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { completeDraft, completePublishedRelease, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, planUploads, parseArgs, preflight, publishCompleteDraft, releaseState } = require('../scripts/release-publish');
+const { completeDraft, completePublishedRelease, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, planUploads, parseArgs, preflight, publishCompleteDraft, releaseArtifacts, releaseState, uploadAssetWithRecovery } = require('../scripts/release-publish');
 const { optionsFrom, findRequest } = require('../scripts/release');
 const { readReleaseNotes, assertDraftNotes } = require('../scripts/release-publish');
 const fs = require('node:fs/promises');
@@ -123,6 +123,38 @@ function completeRelease(tag, draft) {
   };
 }
 
+async function makeReleaseNotes(tag, body = '## 中文\n完整说明。\n## English\nComplete notes.') {
+  const sourceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-release-flow-'));
+  const notesDir = path.join(sourceRoot, 'docs', 'releases');
+  await fs.mkdir(notesDir, { recursive: true });
+  await fs.writeFile(path.join(notesDir, `release-notes-${tag}.md`), body);
+  return sourceRoot;
+}
+
+function localAssets(tag) {
+  return expectedReleaseAssetNames(tag).map((name, index) => ({
+    name,
+    path: path.join('C:\\release', name),
+    size: index + 1,
+    digest: `sha256:${String(index + 1).repeat(64)}`
+  }));
+}
+
+function releaseRunner(tag, getCurrentRelease, onReleaseCommand = () => {}) {
+  return (command, args, options) => {
+    if (command === 'git' && args[0] === 'status') return '';
+    if (command === 'git' && args[0] === 'rev-parse') return 'abc123';
+    if (command === 'gh' && args[0] === 'api' && args[1].includes('/commits/')) return JSON.stringify({ sha: 'abc123' });
+    if (command === 'gh' && args[0] === 'api' && args[1].includes('/releases/tags/')) return JSON.stringify(getCurrentRelease());
+    if (command === 'gh' && args[0] === 'api' && args[1].includes('/releases?')) {
+      const release = getCurrentRelease();
+      return JSON.stringify(release ? [release] : []);
+    }
+    if (command === 'gh' && args[0] === 'release') return onReleaseCommand(args, options);
+    throw new Error(`unexpected call: ${command} ${args.join(' ')}`);
+  };
+}
+
 test('complete means exactly four verified assets in either draft or published state', () => {
   const tag = 'v4.6.1';
   const draft = completeRelease(tag, true);
@@ -169,6 +201,140 @@ test('a complete draft publishes directly with notes read-back and no local arti
     assert.equal(published.draft, false);
     assert.equal(calls.filter(call => call[0] === 'gh' && call[1] === 'release').length, 1);
   } finally { await fs.rm(sourceRoot, { recursive: true, force: true }); }
+});
+
+test('a missing Release uses the GitHub CLI native create-with-assets transaction and finishes published', async () => {
+  const tag = `v${require('../package.json').version}`;
+  const sourceRoot = await makeReleaseNotes(tag);
+  const assets = localAssets(tag);
+  let release = null;
+  let createArgs;
+  const runner = releaseRunner(tag, () => release, args => {
+    if (args[1] !== 'create') throw new Error(`unexpected release command: ${args.join(' ')}`);
+    createArgs = args;
+    release = completeRelease(tag, false);
+    return 'https://github.test/release';
+  });
+  try {
+    const published = await releaseArtifacts('CarlosZ16420/hamster-archive', tag, {
+      commandRunner: runner, fileVerifier: async () => assets, sourceRoot, wait: async () => {}, waitMs: 0
+    });
+    assert.equal(published.draft, false);
+    assert.equal(createArgs.includes('--draft'), false);
+    assert.deepEqual(assets.map(asset => asset.path).filter(assetPath => createArgs.includes(assetPath)), assets.map(asset => asset.path));
+  } finally { await fs.rm(sourceRoot, { recursive: true, force: true }); }
+});
+
+test('a partial draft uploads only missing verified assets and publishes in the same operation', async () => {
+  const tag = `v${require('../package.json').version}`;
+  const sourceRoot = await makeReleaseNotes(tag);
+  const assets = localAssets(tag);
+  let release = { ...completeRelease(tag, true), assets: [completeRelease(tag, true).assets[0]] };
+  const uploaded = [];
+  const runner = releaseRunner(tag, () => release, args => {
+    if (args[1] === 'upload') {
+      const asset = assets.find(item => item.path === args[3]);
+      uploaded.push(asset.name);
+      release = { ...release, assets: [...release.assets, asset] };
+      return '';
+    }
+    if (args[1] === 'edit') {
+      release = { ...release, draft: false };
+      return '';
+    }
+    throw new Error(`unexpected release command: ${args.join(' ')}`);
+  });
+  try {
+    const published = await releaseArtifacts('CarlosZ16420/hamster-archive', tag, {
+      commandRunner: runner, fileVerifier: async () => assets, sourceRoot, wait: async () => {}, waitMs: 0
+    });
+    assert.equal(published.draft, false);
+    assert.deepEqual(uploaded, assets.slice(1).map(asset => asset.name));
+  } finally { await fs.rm(sourceRoot, { recursive: true, force: true }); }
+});
+
+test('a failed native create resumes the draft it left behind instead of creating another Release', async () => {
+  const tag = `v${require('../package.json').version}`;
+  const sourceRoot = await makeReleaseNotes(tag);
+  const assets = localAssets(tag);
+  let release = null;
+  let creates = 0;
+  let waits = 0;
+  const runner = releaseRunner(tag, () => release, args => {
+    if (args[1] === 'create') {
+      creates += 1;
+      release = { ...completeRelease(tag, true), assets: [assets[0]] };
+      const error = new Error('connection closed');
+      error.stderr = 'Post https://uploads.github.com/: EOF';
+      throw error;
+    }
+    if (args[1] === 'upload') {
+      const asset = assets.find(item => item.path === args[3]);
+      release = { ...release, assets: [...release.assets, asset] };
+      return '';
+    }
+    if (args[1] === 'edit') {
+      release = { ...release, draft: false };
+      return '';
+    }
+    throw new Error(`unexpected release command: ${args.join(' ')}`);
+  });
+  try {
+    const published = await releaseArtifacts('CarlosZ16420/hamster-archive', tag, {
+      commandRunner: runner, fileVerifier: async () => assets, sourceRoot,
+      wait: async () => { waits += 1; }, waitMs: 0
+    });
+    assert.equal(published.draft, false);
+    assert.equal(creates, 1);
+    assert.equal(waits, 1);
+  } finally { await fs.rm(sourceRoot, { recursive: true, force: true }); }
+});
+
+test('an ambiguous EOF upload performs one delayed read-back and does not upload an asset twice', async () => {
+  const tag = `v${require('../package.json').version}`;
+  const asset = localAssets(tag)[0];
+  const body = '## 中文\n完整说明。\n## English\nComplete notes.';
+  let release = { ...completeRelease(tag, true), body, assets: [] };
+  let uploads = 0;
+  let waits = 0;
+  const runner = releaseRunner(tag, () => release, args => {
+    if (args[1] !== 'upload') throw new Error(`unexpected release command: ${args.join(' ')}`);
+    uploads += 1;
+    release = { ...release, assets: [asset] };
+    const error = new Error('upload failed');
+    error.stderr = 'Post https://uploads.github.com/: EOF';
+    throw error;
+  });
+  const observed = await uploadAssetWithRecovery('CarlosZ16420/hamster-archive', tag, asset, body, runner, async () => { waits += 1; }, 0);
+  assert.equal(observed.assets[0].name, asset.name);
+  assert.equal(uploads, 1);
+  assert.equal(waits, 1);
+  assert.equal(isTransientUploadError({ stderr: 'HTTP 503 Service Unavailable' }), true);
+  assert.equal(isTransientUploadError(new Error('permission denied')), false);
+});
+
+test('a transient upload failure retries exactly once when delayed read-back confirms the asset is absent', async () => {
+  const tag = `v${require('../package.json').version}`;
+  const asset = localAssets(tag)[0];
+  const body = '## 中文\n完整说明。\n## English\nComplete notes.';
+  let release = { ...completeRelease(tag, true), body, assets: [] };
+  let uploads = 0;
+  let waits = 0;
+  const runner = releaseRunner(tag, () => release, args => {
+    if (args[1] !== 'upload') throw new Error(`unexpected release command: ${args.join(' ')}`);
+    uploads += 1;
+    if (uploads === 1) {
+      const error = new Error('read ECONNRESET');
+      error.stderr = 'read ECONNRESET';
+      throw error;
+    }
+    release = { ...release, assets: [asset] };
+    return '';
+  });
+  const observed = await uploadAssetWithRecovery('CarlosZ16420/hamster-archive', tag, asset, body, runner, async () => { waits += 1; }, 0);
+  assert.equal(observed, null);
+  assert.equal(uploads, 2);
+  assert.equal(waits, 1);
 });
 
 test('draft resume refuses conflicting or unverifiable files without overwriting', () => {

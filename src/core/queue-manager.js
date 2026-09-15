@@ -178,6 +178,18 @@ function deferJobUntilNextRun(job, deferred) {
   return job;
 }
 
+function resolveCatalogCompressionBackupLocation(record, config, updateExistingBackupLocation = false) {
+  const existingLocation = String(record?.backupLocation || '').trim();
+  const configuredLocation = config?.recordBackupLocation === true
+    ? String(config?.backupLocation || '').trim()
+    : '';
+  if (!configuredLocation) return existingLocation;
+  if (!existingLocation || existingLocation === configuredLocation || updateExistingBackupLocation) {
+    return configuredLocation;
+  }
+  return existingLocation;
+}
+
 function hasCompleteMd5Manifest(manifest) {
   return Array.isArray(manifest) && manifest.length > 0 &&
     manifest.every((file) => /^[a-f0-9]{32}$/i.test(String(file?.md5 || '')));
@@ -368,7 +380,6 @@ function validateCatalogMetadata(record, metadata = {}) {
 
   const notes = String(metadata.notes ?? record.notes ?? '');
   if (notes.length > 5000) throw new Error('备注不能超过 5000 个字符。');
-  if (record.recordType === 'manual' && !notes.trim()) throw new Error('手动库存的备注不能为空。');
   const backupLocation = String(metadata.backupLocation ?? record.backupLocation ?? '').trim();
   if (backupLocation.length > 200) throw new Error('备份位置不能超过 200 个字符。');
   const requestedPassword = String(metadata.archivePassword ?? record.archivePassword ?? '');
@@ -539,6 +550,7 @@ class QueueManager extends EventEmitter {
       recordArchivePassword: true,
       suppressInventoryOnlyRisk: false,
       suppressCatalogCompressionRisk: false,
+      suppressOnboarding: false,
       suppressSimilarityWhitelistHint: false,
       compressionHistory: [],
       ...normalizedConfig
@@ -730,11 +742,17 @@ class QueueManager extends EventEmitter {
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
       await fs.mkdir(path.dirname(filePath), { recursive: true });
-      const header = [
-        '# 相似度排除词表（每行一个词）',
-        '# 保存后回到软件，点击“重新载入词表”。',
-        ''
-      ];
+      const header = this.config.language === 'en-US'
+        ? [
+            '# Similarity ignore list (one term per line)',
+            '# Save this file, return to the app, and select “Reload”.',
+            ''
+          ]
+        : [
+            '# 相似度排除词表（每行一个词）',
+            '# 保存后回到软件，点击“重新载入词表”。',
+            ''
+          ];
       await fs.writeFile(filePath, [...header, ...DEFAULT_SIMILARITY_IGNORE_TERMS, ''].join('\r\n'), 'utf8');
     }
     return filePath;
@@ -1147,6 +1165,7 @@ class QueueManager extends EventEmitter {
     const tagFilter = String(filters.tag || '').trim().toLowerCase();
     const possibleDuplicateFilter = tagFilter === '__possible_duplicate__';
     const backupLocationFilter = String(filters.backupLocation || '').trim().toLowerCase();
+    const inventoryDateFilter = String(filters.inventoryDate || '').trim();
     const hasRatingFilter = filters.rating !== undefined && filters.rating !== null && filters.rating !== '';
     const ratingFilter = hasRatingFilter ? Number(filters.rating) : null;
     const sortMode = String(filters.sort || 'inventory_desc');
@@ -1174,6 +1193,7 @@ class QueueManager extends EventEmitter {
         if (tagFilter && !possibleDuplicateFilter &&
             !(record.tags || []).some((tag) => tag.toLowerCase() === tagFilter)) return false;
         if (backupLocationFilter && (record.backupLocation || '').toLowerCase() !== backupLocationFilter) return false;
+        if (inventoryDateFilter && localDateKey(record.inventoryDate || record.completedAt || record.verifiedAt) !== inventoryDateFilter) return false;
         if (hasRatingFilter && record.rating !== ratingFilter) return false;
         if (!needle) return true;
         const recordText = catalogSearchText(record);
@@ -1249,7 +1269,7 @@ class QueueManager extends EventEmitter {
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const mondayIndex = (today.getDay() + 6) % 7;
     const activityStart = new Date(today);
-    activityStart.setDate(today.getDate() - mondayIndex - (15 * 7));
+    activityStart.setDate(today.getDate() - mondayIndex - (19 * 7));
 
     const byDate = new Map();
     for (const record of this.catalog) {
@@ -1262,7 +1282,7 @@ class QueueManager extends EventEmitter {
     }
 
     const activity = [];
-    for (let offset = 0; offset < 16 * 7; offset += 1) {
+    for (let offset = 0; offset < 20 * 7; offset += 1) {
       const date = new Date(activityStart);
       date.setDate(activityStart.getDate() + offset);
       const key = localDateKey(date);
@@ -1495,7 +1515,6 @@ class QueueManager extends EventEmitter {
     const sourcePath = String(input.sourcePath ?? input.originalLocation ?? '').trim();
     const backupLocation = String(input.backupLocation ?? '').trim();
     if (!title) throw new Error('名称不能为空。');
-    if (!notes) throw new Error('备注不能为空。');
     if (title.length > 200) throw new Error('名称不能超过 200 个字符。');
     if (notes.length > 5000) throw new Error('备注不能超过 5000 个字符。');
     if (sourcePath.length > 2000 || /[\u0000-\u001f\u007f]/.test(sourcePath)) {
@@ -3036,7 +3055,7 @@ class QueueManager extends EventEmitter {
     return this.getState();
   }
 
-  async queueCatalogRecordsForCompression(recordIds) {
+  async queueCatalogRecordsForCompression(recordIds, options = {}) {
     const runningWhenAddStarted = this.running;
     const ids = [...new Set(recordIds || [])];
     if (ids.length === 0) throw new Error('请先选择仓库内容。');
@@ -3071,7 +3090,12 @@ class QueueManager extends EventEmitter {
           totalBytes: Number(record.originalBytes) || record.manifest.reduce((sum, file) => sum + (Number(file.size) || 0), 0),
           skippedFiles: record.skippedFiles || [],
           processingMode: 'archive_existing',
-          sourceCatalogRecordId: record.id
+          sourceCatalogRecordId: record.id,
+          catalogCompressionBackupLocation: resolveCatalogCompressionBackupLocation(
+            record,
+            this.config,
+            options.updateExistingBackupLocation === true
+          )
         }), runningWhenAddStarted || this.running);
         this.jobs.push(job);
         existingCatalogJobs.add(record.id);
@@ -3913,7 +3937,7 @@ class QueueManager extends EventEmitter {
         rating: Number(existingRecord?.rating) || 0,
         notes: existingRecord?.notes || '',
         backupLocation: existingRecord
-          ? String(existingRecord.backupLocation || '')
+          ? String(job.catalogCompressionBackupLocation ?? existingRecord.backupLocation ?? '')
           : this.config.recordBackupLocation ? String(this.config.backupLocation || '').trim() : '',
         coverRelativePath: existingRecord?.coverRelativePath || null,
         coverThumbnailRef: existingRecord?.coverThumbnailRef || null,
@@ -4159,4 +4183,4 @@ class QueueManager extends EventEmitter {
   }
 }
 
-module.exports = { QueueManager };
+module.exports = { QueueManager, resolveCatalogCompressionBackupLocation };

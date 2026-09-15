@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.4",
+  "notes": {
+    "zh-CN": [
+      "仓库活跃度补齐未来日期灰底，支持日期与仓储数量提示，并可点击按入库日期精确筛选。",
+      "空仓库引导扩展为六步，支持双区域框选与完成后的轻量 emoji 庆祝效果。",
+      "小项目过滤错误会统一显示并自动展开、定位、闪烁对应设置；同步优化工作台、回收站和使用说明文案。"
+    ],
+    "en-US": [
+      "Future activity cells keep a neutral background, show date and item-count tooltips, and filter the warehouse by exact inventory date.",
+      "Empty-warehouse onboarding now has six steps with dual-area highlighting and a lightweight emoji completion celebration.",
+      "Small-item filter errors now reveal and highlight the relevant setting, with clearer Workbench, Recycle Bin and quick-start copy."
+    ]
+  }
+}

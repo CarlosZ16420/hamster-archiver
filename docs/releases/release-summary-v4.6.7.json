@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.7",
+  "notes": {
+    "zh-CN": [
+      "补齐队列状态、处理阶段、提示、主进程原生弹窗与启动错误的中英文文案，并统一仓库和归档模式术语。",
+      "英文界面保留用户标题、路径等原文；清理陈旧词条并补正英文忽略词文件说明。",
+      "增加动态翻译、用户文本保护、主进程弹窗与队列术语回归测试；数据格式和用户资料位置不变，无需迁移。"
+    ],
+    "en-US": [
+      "Complete bilingual copy for queue states, processing stages, notices, native dialogs and startup errors, with consistent Warehouse and archive-mode terminology.",
+      "Preserve user-entered titles and paths in the English UI; remove obsolete strings and correct the English ignore-word file header.",
+      "Add regression coverage for dynamic translation, user-content protection, main-process dialogs and queue terminology; no data migration is required."
+    ]
+  }
+}

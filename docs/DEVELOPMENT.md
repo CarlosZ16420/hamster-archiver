@@ -38,13 +38,15 @@ npm run electron:prepare   # 仅从校验通过的本机缓存准备 Electron �
 npm run preview:current    # 启动仓库外 current，而不是根目录 EXE
 ```
 
+需要人工绕过启动缓存并重新执行完整发行包校验时，可用 `HamsterArchiver.exe --verify-integrity` 启动；成功后会刷新当前用户数据区的缓存。
+
 `npm run check:layout` 会拒绝根目录中的用户数据、发行版、运行时副本和未登记目录。临时源码、测试和发行隔离目录必须使用系统 temp 或 `HamsterArchiver-Local/development/`，不要在根目录创建固定名称的试验目录，也不要创建同级 `Hamster*` 副本。
 
 开发和 `npm run release:local` 都直接使用当前本机受支持的 Node.js/npm。项目不会额外下载 Node.js，也不会因为支持范围内的补丁版本不同而阻止 Git 操作或本地发行；发行清单记录实际使用版本。
 
 ## 提交与本地 Current
 
-每次代码维护完成后，必须在干净的已提交 `main` 上推送私有 `origin/main`，再运行 `npm run release:local` 刷新 `HamsterArchiver-Local/builds/current`，供 `npm run preview:current` 手动测试。该入口会先校验 Electron 运行时，缺失时仅尝试从已验证的本机缓存恢复，不会暗中下载。云端正式发行可避免重复构建，但不能因此默默省略本轮明确要求的 Current；Current、ZIP/SHA 和正式 Release 必须分别报告。
+每次代码维护完成后，必须在干净的已提交 `main` 上推送私有 `origin/main`，再运行 `npm run release:local` 刷新 `HamsterArchiver-Local/builds/current`，并同步生成便携 ZIP、安装 EXE 和两份 SHA-256。使用 `npm run preview:current` 检查便携版，并直接运行 `builds/installers/` 中对应版本的 Setup EXE 检查安装版。该入口会先校验 Electron 运行时，缺失时仅尝试从已验证的本机缓存恢复，不会暗中下载。云端正式发行仍优先在 GitHub runner 构建并直接上传，不复用或上传本机产物；但不能因此默默省略本轮明确要求的 Current。本地测试发行与正式 Release 必须分别报告。
 
 ## 提交要求
 

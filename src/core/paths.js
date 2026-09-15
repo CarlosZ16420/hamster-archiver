@@ -149,7 +149,8 @@ function makeDefaultConfig(workspaceRoot, userDataLayout = {}) {
     backupLocation: '',
     recordArchivePassword: true,
     suppressInventoryOnlyRisk: false,
-    suppressCatalogCompressionRisk: false
+    suppressCatalogCompressionRisk: false,
+    suppressOnboarding: false
   };
 }
 

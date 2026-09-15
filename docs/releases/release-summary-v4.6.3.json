@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.3",
+  "notes": {
+    "zh-CN": [
+      "统一应用内弹窗的小圆角、“×”关闭控件和检查更新窗口的 Logo、底部区域及按钮样式。",
+      "仓库活跃度图恢复 GitHub 式层级：无活动格使用中性色，只有实际活动格显示绿色。",
+      "本地 Current 同步生成便携版与安装版测试产物；正式 Release 继续优先云端构建和上传。"
+    ],
+    "en-US": [
+      "Dialogs now share compact corners, icon-only close controls, and refined update-dialog branding and actions.",
+      "The warehouse activity chart uses GitHub-like levels: empty cells are neutral and only recorded activity is green.",
+      "Local Current refreshes now build both portable and installer test artifacts while formal Releases remain cloud-first."
+    ]
+  }
+}

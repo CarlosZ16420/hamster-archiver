@@ -125,11 +125,14 @@ test('source disposition chip uses danger colors only for the trash state', () =
 test('queue scan actions stay grouped and right-aligned', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
-  const actionGroup = html.match(/<div class="button-row queue-actions">([\s\S]*?)<span class="queue-action-break"/);
+  const actionGroup = html.match(/<div class="queue-actions">([\s\S]*?)<\/div>\s*<\/div>/);
 
   assert.ok(actionGroup, 'queue scan action group should exist');
   assert.match(actionGroup[1], /id="add-folder"[\s\S]*id="add-video"[\s\S]*id="scan-source"/);
-  assert.match(styles, /\.queue-title \.queue-actions\s*\{[^}]*justify-content:\s*flex-end;/s);
+  assert.match(actionGroup[1], /queue-action-row queue-scan-actions/);
+  assert.match(actionGroup[1], /queue-action-row queue-run-actions/);
+  assert.match(styles, /\.queue-title \.queue-actions\s*\{[^}]*justify-items:\s*end;/s);
+  assert.match(styles, /\.queue-title \.queue-action-row\s*\{[^}]*justify-content:\s*flex-end;/s);
 });
 
 test('maintenance paths are selectable and usage guide is the final footer action', () => {
@@ -317,6 +320,29 @@ test('manual package update is offered from check for updates instead of a separ
   assert.match(updateDialog, /button\('手动更新',[^\n]+window\.archiveApp\.installUpdatePackage\(\)/);
 });
 
+test('application dialogs use compact Windows-like corners and icon-only close controls', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const renderer = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const updateDialog = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'update-dialog.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+  const staticDialogs = [...html.matchAll(/<dialog\b[\s\S]*?<\/dialog>/g)].map((match) => match[0]);
+
+  assert.ok(staticDialogs.length > 0);
+  for (const dialog of staticDialogs) assert.match(dialog, /aria-label="关闭">×<\/button>/);
+  assert.match(updateDialog, /logo\.src = '\.\.\/\.\.\/assets\/app-icon\.png'/);
+  assert.match(updateDialog, /button\('×', 'dialog-close update-dialog-close'/);
+  assert.doesNotMatch(updateDialog, /button\('关闭', 'update-dialog-close'/);
+  assert.match(renderer, /#close-confirm-dialog'\)\.addEventListener/);
+  assert.match(renderer, /#close-trash-safety'\)\.addEventListener/);
+  assert.match(styles, /\.update-dialog\s*\{[^}]*border-radius:\s*8px;/s);
+  assert.match(styles, /\.manual-dialog\s*\{[^}]*border-radius:\s*8px;/s);
+  assert.match(styles, /\.usage-guide-dialog\s*\{[^}]*border-radius:\s*8px;/s);
+  assert.match(styles, /\.thumbnail-lightbox\s*\{[^}]*border-radius:\s*8px;/s);
+  assert.match(styles, /\.dialog-close\s*\{[^}]*border:\s*0;[^}]*border-radius:\s*5px;/s);
+  assert.match(styles, /\.update-dialog-footer\s*\{[^}]*background:\s*var\(--dialog-footer-bg\)/s);
+  assert.match(styles, /\.update-dialog-footer \.button\.primary\s*\{[^}]*linear-gradient/s);
+});
+
 test('manual update checks and successful restarts both surface release notes', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   const checker = fs.readFileSync(path.join(__dirname, '..', 'src', 'core', 'update-checker.js'), 'utf8');
@@ -403,16 +429,19 @@ test('compact settings copy and activity colors follow the current UI specificat
   assert.match(app, /const host = mark\.closest\('dialog\[open\]'\) \|\| document\.body/);
   assert.match(styles, /\.queue-similarity-directory \.virtual-directory-tree\s*\{[^}]*height:\s*240px/s);
   assert.match(styles, /\.location-panel \.help-tip::after\s*\{[^}]*left:\s*-72px;[^}]*width:\s*min\(300px,/s);
-  const activityBlocks = [...styles.matchAll(/--activity-1:\s*(#[0-9a-f]{6})[\s\S]*?--activity-4:\s*(#[0-9a-f]{6})/gi)];
+  const activityBlocks = [...styles.matchAll(/--activity-0:\s*(#[0-9a-f]{6})[\s\S]*?--activity-1:\s*(#[0-9a-f]{6})[\s\S]*?--activity-4:\s*(#[0-9a-f]{6})/gi)];
   assert.equal(activityBlocks.length, 5);
-  for (const [, low, high] of activityBlocks) {
-    const greenDominates = (hex) => {
+  for (const [, empty, low, high] of activityBlocks) {
+    const channels = (hex) => {
       const value = Number.parseInt(hex.slice(1), 16);
-      const red = value >> 16;
-      const green = (value >> 8) & 255;
-      const blue = value & 255;
+      return [value >> 16, (value >> 8) & 255, value & 255];
+    };
+    const greenDominates = (hex) => {
+      const [red, green, blue] = channels(hex);
       return green > red && green > blue;
     };
+    const [emptyRed, emptyGreen, emptyBlue] = channels(empty);
+    assert.ok(emptyGreen <= Math.max(emptyRed, emptyBlue) + 2, `${empty} should remain neutral, not pale green`);
     assert.equal(greenDominates(low), true, `${low} should be green-led`);
     assert.equal(greenDominates(high), true, `${high} should be green-led`);
   }
@@ -475,9 +504,9 @@ test('recent native dialogs follow the selected interface language', () => {
   for (const englishLabel of [
     'Archive tasks are still running',
     'Choose the 7-Zip program',
-    'Choose warehouse location (saves)',
-    'Export warehouse as an archive',
-    'Choose an external warehouse archive',
+    'Choose a Warehouse folder',
+    'Export Warehouse as an archive',
+    'Choose an external Warehouse archive',
     'Video files'
   ]) {
     assert.match(main, new RegExp(`english \\? '${englishLabel.replace(/[()]/g, '\\$&')}'`));
@@ -504,6 +533,7 @@ test('name-similarity highlights expose a guarded one-click whitelist action', (
 });
 
 test('warehouse browsing keeps compact controls, root folders, backup locations and keyboard paging visible', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
 
@@ -512,7 +542,67 @@ test('warehouse browsing keeps compact controls, root folders, backup locations 
   assert.match(app, /'标签', '备份位置', '入库时间'/);
   assert.match(app, /backupCell\.textContent = record\.backupLocation \|\| '—'/);
   assert.match(app, /\['ArrowLeft', 'ArrowRight'\]\.includes\(event\.key\)/);
-  assert.match(styles, /\.activity-cell\[data-level="0"\][^\{]*\{[^}]*background:\s*#fff;/s);
+  assert.match(styles, /\.activity-cell\[data-level="0"\][^\{]*\{[^}]*background:\s*var\(--activity-0\);/s);
+  assert.match(styles, /\.activity-cell\[data-level="-1"\][^\{]*\{[^}]*background:\s*var\(--activity-0\);/s);
+  assert.match(app, /inventoryDate:\s*activeActivityDateFilter/);
+  assert.match(app, /applyActivityDateFilter\(cell\.dataset\.activityDate\)/);
+  assert.match(app, /activityTooltipText\(cell\)/);
+  assert.match(html, /id="open-inventory-statistics"[^>]*type="button"/);
+  assert.match(html, /id="open-storage-statistics"[^>]*type="button"/);
+  assert.match(html, /id="warehouse-statistics-dialog"/);
+  assert.match(app, /const weekCount = Math\.ceil\(insights\.activity\.length \/ 7\)/);
+  assert.match(app, /function renderWarehouseStatistics\(\)/);
+  assert.match(styles, /\.activity-scroll\s*\{[^}]*overflow-x:\s*auto;/s);
+  assert.match(styles, /\.activity-grid, \.activity-months\s*\{[^}]*width:\s*max-content;/s);
+  assert.match(app, /activityPinnedToLatest/);
+  assert.match(styles, /body\[data-theme="day"\] \.discovery-hero\.no-cover\s*\{/);
+  assert.match(styles, /\.app-bar\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto minmax\(0, 1fr\);/s);
+  assert.match(app, /if \(discoveryMode === 'loading'\) \{\s*void showRandomWalk\(false\);/s);
+});
+
+test('warehouse is the default page and empty warehouses offer a dismissible onboarding tour', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+
+  assert.match(html, /class="nav-button active" data-page="library-page">仓库<\/button>/);
+  assert.match(html, /id="workbench-page" class="app-page" hidden/);
+  assert.match(html, /id="library-page" class="app-page"(?![^>]*hidden)/);
+  assert.match(html, /id="onboarding-tour"[^>]*hidden/);
+  assert.match(html, /id="suppress-onboarding"/);
+  assert.match(app, /state\?\.config\?\.suppressOnboarding/);
+  assert.match(app, /activatePage\('workbench-page'\)/);
+  assert.match(app, /target:\s*'\.location-panel',[\s\S]*?placement:\s*'right'/);
+  assert.match(app, /progress:\s*'新手引导 · 6\/6'/);
+  assert.match(app, /target:\s*\['#source-disposition-options', '#source-safety-chip'\]/);
+  assert.match(app, /target:\s*'#drop-zone'/);
+  assert.match(app, /celebration-burst/);
+  assert.match(app, /celebration-spark/);
+  assert.match(app, /celebrateOnboardingCompletion/);
+});
+
+test('warehouse copy and controls use the concise labels and clarified recycle-bin warning', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+
+  assert.match(app, /make\('button', 'button primary editor-save', '保存'\)/);
+  assert.match(styles, /\.editor-save\s*\{[^}]*font-size:\s*12px;/s);
+  assert.doesNotMatch(app, /随机一项库存/);
+  assert.match(app, /只要验证并入库成功，就会把对应源文件夹或视频移入 Windows 回收站/);
+  assert.doesNotMatch(app, /每个任务只有在验证并入库成功后/);
+});
+
+test('small-item intake errors reveal and highlight the matching setting for picker and drop flows', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+
+  assert.match(html, /id="intake-preview-settings"/);
+  assert.match(html, /id="small-item-filter-card"/);
+  assert.match(app, /friendlyIntakeError/);
+  assert.match(app, /elements\.intakePreviewSettings\.open = true/);
+  assert.match(app, /smallItemFilterCard\.scrollIntoView/);
+  assert.match(app, /const smallItemError = errors\.find\(isSmallItemThresholdError\)/);
+  assert.match(styles, /\.option-card\.attention-flash/);
 });
 
 test('warehouse view, ratings and image pickers expose native keyboard controls', () => {
@@ -527,6 +617,9 @@ test('warehouse view, ratings and image pickers expose native keyboard controls'
   assert.match(app, /button\.type = 'button';[\s\S]*button\.dataset\.rating = String\(value\)/);
   assert.match(app, /button\.setAttribute\('aria-pressed', String\(value === selectedRating\)\)/);
   assert.match(html, /id="manual-catalog-images"[^>]*type="file"[^>]*hidden/);
+  assert.match(html, /备注（选填）/);
+  assert.doesNotMatch(html, /id="manual-catalog-notes"[^>]*required/);
+  assert.doesNotMatch(html, /适合记录暂时没有压缩包或文件清单的内容/);
   assert.match(html, /id="manual-catalog-images-button"[^>]*type="button"/);
   assert.match(app, /manualCatalogImagesButton\.addEventListener\('click', \(\) => elements\.manualCatalogImages\.click\(\)\)/);
   assert.match(app, /imageInput\.hidden = true/);

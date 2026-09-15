@@ -24,8 +24,8 @@
       <button id="check-for-updates" class="update-status-chip" data-state="current" type="button"><span class="update-status-dot" aria-hidden="true"></span><strong id="update-status-label">检查更新</strong></button>
     </div>
     <nav class="top-nav" aria-label="页面导航">
-      <button class="nav-button active" data-page="workbench-page">归档工作台</button>
-      <button class="nav-button" data-page="library-page">仓库</button>
+      <button class="nav-button active" data-page="library-page">仓库</button>
+      <button class="nav-button" data-page="workbench-page">归档工作台</button>
     </nav>
     <div class="hero-actions app-bar-actions">
       <div id="source-safety-chip" class="safety-chip" data-state="keep"><span></span><strong id="source-safety-label">归档后不移动原文件</strong></div>
@@ -35,12 +35,12 @@
   </header>
 
   <main>
-    <div id="workbench-page" class="app-page">
+    <div id="workbench-page" class="app-page" hidden>
       <div class="workbench-grid">
         <div class="settings-col">
           <section class="panel settings-panel location-panel">
             <header class="panel-head location-heading">
-              <p class="step">01 · 收存位置</p>
+              <p class="step">01 · 收纳设置</p>
               <h2>这次从哪里收，存到哪里</h2>
             </header>
 
@@ -49,8 +49,8 @@
                 <span>需备份目录 <span class="help-tip" tabindex="0" aria-label="扫描时会把所选目录下的每个文件夹或视频分别加入队列，跳过其他根级文件；启用小项目过滤时，低于当前阈值的项目也不会入队（默认 100 MB）" data-tooltip="扫描时会把所选目录下的每个文件夹或视频分别加入队列，跳过其他根级文件；启用小项目过滤时，低于当前阈值的项目也不会入队（默认 100 MB）">!</span></span>
                 <div><input id="intake-directory" type="text" placeholder="选填"><button data-pick="intake-directory">选择</button></div>
               </label>
-              <label class="path-field">
-                <span>压缩后保存在</span>
+              <label id="archive-output-directory-field" class="path-field">
+                <span>压缩包保存在</span>
                 <div><input id="archive-output-directory" type="text" placeholder="必填"><button data-pick="archive-output-directory">选择</button></div>
               </label>
             </div>
@@ -62,7 +62,8 @@
                 <span class="group-chevron" aria-hidden="true">⌄</span>
               </summary>
               <div class="group-body">
-                <div class="post-option-card move-option-card">
+                <div id="source-disposition-options" class="source-disposition-options">
+                  <div class="post-option-card move-option-card">
                   <label class="post-option-heading">
                     <input id="move-completed" type="checkbox">
                     <span>
@@ -73,14 +74,15 @@
                   <label id="processed-source-directory-field" class="path-field embedded-path-field">
                     <div><input id="processed-source-directory" type="text" aria-label="归档后移动位置"><button data-pick="processed-source-directory">选择</button></div>
                   </label>
-                </div>
-                <label class="post-option-card post-option-heading danger-option">
+                  </div>
+                  <label class="post-option-card post-option-heading danger-option">
                   <input id="auto-trash-completed" type="checkbox">
                   <span>
                     <strong>完成后移入 Windows 回收站</strong>
                     <small>可从回收站恢复；异常时安全停止</small>
                   </span>
-                </label>
+                  </label>
+                </div>
                 <div class="post-option-card backup-option-card">
                   <label class="post-option-heading backup-location-toggle">
                     <input id="record-backup-location" type="checkbox">
@@ -151,7 +153,7 @@
           </section>
 
           <section class="panel settings-panel compact-settings-panel">
-            <details class="settings-group">
+            <details id="intake-preview-settings" class="settings-group">
               <summary class="group-head">
                 <span class="group-title">入库与预览</span>
                 <span id="digest-intake" class="group-digest">视频抽帧 3 帧/视频 · 缩略图上限 30 张 · 过滤 &lt;100 MB</span>
@@ -160,7 +162,7 @@
               <div class="group-body">
                 <div class="intake-options advanced-intake-options">
                   <label class="option-card"><input id="video-frame-backup" type="checkbox"><span><strong>视频帧备份</strong><small>按总时长平均抽取画面，并在仓库中按视频成组显示</small></span><input id="video-frame-count" type="number" min="1" max="20" step="1" value="3" aria-label="每个视频保存的帧数"><em>帧/视频</em></label>
-                  <label class="option-card"><input id="small-item-filter" type="checkbox"><span><strong>小项目过滤</strong><small>扫描和拖入时跳过低于阈值的视频或文件夹</small></span><input id="minimum-task-mb" type="number" min="1" max="102400" step="1" value="100" aria-label="最小项目大小"><em>MB</em></label>
+                  <label id="small-item-filter-card" class="option-card"><input id="small-item-filter" type="checkbox"><span><strong>小项目过滤</strong><small>扫描和拖入时跳过低于阈值的视频或文件夹</small></span><input id="minimum-task-mb" type="number" min="1" max="102400" step="1" value="100" aria-label="最小项目大小"><em>MB</em></label>
                 </div>
                 <label class="compact-number-setting"><span><strong>单个项目缩略图上限</strong><small>包括图片缩略图与视频抽帧，避免超大项目生成过多预览。</small></span><input id="thumbnail-limit" type="number" min="1" max="500" step="1" value="30" aria-label="单个项目缩略图上限"><em>张</em></label>
               </div>
@@ -231,13 +233,16 @@
                 <p class="step">02 · 扫描与队列</p>
                 <h2>先预览，再开始归档</h2>
               </div>
-              <div class="button-row queue-actions">
-                <button id="add-folder" class="button ghost">添加单个文件夹</button>
-                <button id="add-video" class="button ghost">添加单个视频</button>
-                <button id="scan-source" class="button secondary">扫描目录</button>
-                <span class="queue-action-break" aria-hidden="true"></span>
-                <button id="start-inventory-only" class="button ghost">不压缩直接入库</button>
-                <button id="start-queue" class="button primary">开始压缩入库</button>
+              <div class="queue-actions">
+                <div class="queue-action-row queue-scan-actions">
+                  <button id="add-folder" class="button ghost">添加单个文件夹</button>
+                  <button id="add-video" class="button ghost">添加单个视频</button>
+                  <button id="scan-source" class="button secondary">扫描目录</button>
+                </div>
+                <div class="queue-action-row queue-run-actions">
+                  <button id="start-inventory-only" class="button ghost">不压缩直接入库</button>
+                  <button id="start-queue" class="button primary">开始压缩入库</button>
+                </div>
               </div>
             </header>
             <div id="notice" class="notice" hidden></div>
@@ -285,7 +290,7 @@
       </div>
     </div>
 
-    <div id="library-page" class="app-page" hidden>
+    <div id="library-page" class="app-page">
       <section class="library-shell">
         <section class="warehouse-overview" aria-labelledby="warehouse-overview-title">
           <div class="warehouse-overview-body">
@@ -299,23 +304,23 @@
                 </div>
               </div>
               <div class="warehouse-metrics">
-                <div><strong id="metric-inventory">0</strong><span>库存</span></div>
-                <div><strong id="metric-tags">0</strong><span>标签</span></div>
-                <div><strong id="metric-gb">0</strong><span>GB</span></div>
-                <div><strong id="metric-week">0</strong><span>本周入库</span></div>
+                <button id="open-inventory-statistics" class="warehouse-metric interactive" type="button" aria-label="查看库存记录统计"><strong id="metric-inventory">0</strong><span>库存</span></button>
+                <div class="warehouse-metric"><strong id="metric-tags">0</strong><span>标签</span></div>
+                <button id="open-storage-statistics" class="warehouse-metric interactive" type="button" aria-label="查看仓库容量统计"><strong id="metric-gb">0</strong><span>GB</span></button>
+                <div class="warehouse-metric"><strong id="metric-week">0</strong><span>本周入库</span></div>
               </div>
               <section class="activity-panel">
                 <div class="activity-panel-head">
                   <div>
-                    <strong>最近 16 周</strong>
-                    <span>按入库日期与容量显示活跃度</span>
+                    <strong id="activity-title">最近 20 周</strong>
                   </div>
                   <div class="activity-legend"><span>少</span><i data-level="0"></i><i data-level="1"></i><i data-level="2"></i><i data-level="3"></i><i data-level="4"></i><span>多</span></div>
                 </div>
-                <div class="activity-scroll" aria-label="最近十六周入库活跃度">
+                <div class="activity-scroll" aria-label="最近二十周入库活跃度">
                   <div id="activity-grid" class="activity-grid"></div>
                   <div id="activity-months" class="activity-months"></div>
                 </div>
+                <div id="activity-tooltip" class="activity-tooltip" role="tooltip" hidden></div>
               </section>
             </section>
             <section class="random-panel">
@@ -337,6 +342,7 @@
           <select id="catalog-rating-filter" class="filter-select" aria-label="按星级筛选">
             <option value="">全部星级</option><option value="5">★★★★★</option><option value="4">★★★★</option><option value="3">★★★</option><option value="2">★★</option><option value="1">★</option><option value="0">未评分</option>
           </select>
+          <button id="catalog-date-filter" class="activity-date-filter" type="button" aria-label="清除入库日期筛选" hidden></button>
           <span class="toolbar-spacer"></span>
           <select id="catalog-sort" class="filter-select" aria-label="仓库排序">
             <option value="inventory_desc">入库时间：新到旧</option><option value="inventory_asc">入库时间：旧到新</option><option value="name_asc">文件名：正序</option><option value="name_desc">文件名：倒序</option>
@@ -403,6 +409,43 @@
     </span>
   </footer>
 
+  <div id="onboarding-tour" class="onboarding-tour" hidden>
+    <div id="onboarding-backdrop" class="onboarding-backdrop" aria-hidden="true"></div>
+    <div id="onboarding-spotlight" class="onboarding-spotlight" aria-hidden="true"></div>
+    <div id="onboarding-spotlight-secondary" class="onboarding-spotlight secondary" aria-hidden="true" hidden></div>
+    <section id="onboarding-card" class="onboarding-card" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+      <button id="close-onboarding" class="dialog-close" type="button" aria-label="关闭">×</button>
+      <p id="onboarding-progress" class="step">新手引导 · 1/6</p>
+      <div id="onboarding-language-choice" class="onboarding-language-choice" role="group" aria-label="Language / 语言">
+        <span>Language / 语言</span>
+        <div class="onboarding-language-options">
+          <button type="button" data-onboarding-locale="zh-CN" lang="zh-CN" aria-pressed="true">中文</button>
+          <button type="button" data-onboarding-locale="en-US" lang="en" aria-pressed="false">English</button>
+        </div>
+      </div>
+      <h2 id="onboarding-title">仓库还是空的</h2>
+      <p id="onboarding-copy">先到归档工作台选择文件夹或视频，完成第一次入库后，这里就会显示可以搜索和整理的内容。</p>
+      <label class="onboarding-never-show"><input id="suppress-onboarding" type="checkbox"><span>不再提示此引导</span></label>
+      <div class="dialog-actions">
+        <button id="skip-onboarding" class="button ghost" type="button">跳过引导</button>
+        <button id="next-onboarding" class="button primary" type="button">进入归档工作台</button>
+      </div>
+    </section>
+  </div>
+  <div id="onboarding-celebration" class="onboarding-celebration" aria-hidden="true" hidden></div>
+
+  <dialog id="warehouse-statistics-dialog" class="warehouse-statistics-dialog">
+    <div class="warehouse-statistics-heading">
+      <h2>记录统计</h2>
+      <button id="close-warehouse-statistics" class="dialog-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="statistics-switch" role="group" aria-label="统计周期">
+      <button class="active" data-statistics-mode="month" type="button">月</button>
+      <button data-statistics-mode="year" type="button">年</button>
+    </div>
+    <div id="warehouse-statistics-content" class="warehouse-statistics-content"></div>
+  </dialog>
+
   <dialog id="manual-catalog-dialog" class="manual-dialog">
     <form id="manual-catalog-form">
       <div class="dialog-heading">
@@ -412,14 +455,13 @@
         </div>
         <button id="close-manual-dialog" class="dialog-close" type="button" aria-label="关闭">×</button>
       </div>
-      <p class="dialog-help">适合记录暂时没有压缩包或文件清单的内容。只有名称和备注必填，也可以直接补充位置、标签与图片。</p>
       <label class="editor-field">
         <span>名称（必填）</span>
         <input id="manual-catalog-name" type="text" maxlength="200" required autofocus>
       </label>
       <label class="editor-field">
-        <span>备注（必填）</span>
-        <textarea id="manual-catalog-notes" maxlength="5000" rows="7" required placeholder="说明这项库存是什么、在哪里，或之后准备如何处理…"></textarea>
+        <span>备注（选填）</span>
+        <textarea id="manual-catalog-notes" maxlength="5000" rows="7" placeholder="说明这项库存是什么、在哪里，或之后准备如何处理…"></textarea>
       </label>
       <label class="editor-field">
         <span>标签（选填，逗号分隔）</span>
@@ -512,9 +554,9 @@
   </dialog>
 
   <dialog id="usage-guide-dialog" class="manual-dialog usage-guide-dialog">
-    <div class="dialog-heading"><div><p class="step">使用说明 / QUICK START</p><h2>把资源变成可检索的安全归档</h2></div><button id="close-usage-guide" class="dialog-close" type="button" aria-label="关闭">×</button></div>
+    <div class="dialog-heading"><div><p class="step">使用说明 / QUICK START</p></div><button id="close-usage-guide" class="dialog-close" type="button" aria-label="关闭">×</button></div>
     <div class="usage-guide-copy">
-      <section><b>01</b><div><strong>选择资源主目录</strong><p>扫描只把每个大文件夹与视频加入队列；随后由您选择压缩入库或不压缩直接入库。</p></div></section>
+      <section><b>01</b><div><strong>把资源添加到仓库</strong><p>在归档工作台中，扫描需要备份的目录，按需选择入库方式，建立本地仓库。</p></div></section>
       <section><b>02</b><div><strong>手动云备份压缩包</strong><p>本工具只负责本地记录，您可以将压缩包存放点设置为云盘自动同步的目录，或自行上传压缩包。</p></div></section>
       <section><b>03</b><div><strong>按需处理单个资源</strong><p>也可以把单个文件夹或视频直接拖入应用，单独加入任务列表。</p></div></section>
       <p class="usage-guide-note">本应用会跳过主目录中的零散图片和其他文件。如需处理，请先把它们收纳到文件夹中。</p>
@@ -545,7 +587,7 @@
 
   <dialog id="confirm-dialog" class="manual-dialog compact-dialog confirm-dialog">
     <form id="confirm-dialog-form">
-      <div class="confirm-dialog-hero"><span class="confirm-dialog-icon" aria-hidden="true">?</span><div><p class="step">操作确认 / CONFIRM</p><h2 id="confirm-dialog-title">请确认操作</h2></div></div>
+      <div class="confirm-dialog-hero"><span class="confirm-dialog-icon" aria-hidden="true">?</span><div><p class="step">操作确认 / CONFIRM</p><h2 id="confirm-dialog-title">请确认操作</h2></div><button id="close-confirm-dialog" class="dialog-close" type="button" aria-label="关闭">×</button></div>
       <p id="confirm-dialog-message" class="confirm-dialog-message"></p>
       <div class="dialog-actions"><button id="cancel-confirm-dialog" class="button ghost" type="button">取消</button><button id="accept-confirm-dialog" class="button primary" type="submit">继续</button></div>
     </form>
@@ -555,6 +597,7 @@
     <div class="safety-dialog-hero">
       <span class="safety-dialog-icon" aria-hidden="true">!</span>
       <div><p class="step">安全熔断 / SAFETY HALT</p><h2>已保护其余原文件</h2><p>队列已立即停止，后续任务没有启动。</p></div>
+      <button id="close-trash-safety" class="dialog-close" type="button" aria-label="关闭">×</button>
     </div>
     <div class="safety-dialog-reason"><span>触发原因</span><p id="trash-safety-message"></p></div>
     <div class="safety-dialog-checklist">

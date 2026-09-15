@@ -61,7 +61,7 @@ contextBridge.exposeInMainWorld('archiveApp', {
   addCatalogImage: (recordId, input) => ipcRenderer.invoke('catalog:add-image', recordId, input),
   addTagsToCatalogRecords: (recordIds, tags) => ipcRenderer.invoke('catalog:add-tags', recordIds, tags),
   updateBackupLocationForCatalogRecords: (recordIds, location) => ipcRenderer.invoke('catalog:update-backup-location', recordIds, location),
-  queueCatalogRecordsForCompression: (recordIds) => ipcRenderer.invoke('catalog:queue-compression', recordIds),
+  queueCatalogRecordsForCompression: (recordIds, options) => ipcRenderer.invoke('catalog:queue-compression', recordIds, options),
   undoCatalogAction: () => ipcRenderer.invoke('catalog:undo'),
   deleteCatalogRecords: (recordIds, options) => ipcRenderer.invoke('catalog:delete', recordIds, options),
   getThumbnail: (recordId, relativePath) => ipcRenderer.invoke('catalog:thumbnail', recordId, relativePath),

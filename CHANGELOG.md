@@ -1,55 +1,60 @@
 # Changelog
 
-## Unreleased
+## 4.6.8
 
-- Release automation now publishes complete drafts immediately, treats an already complete published Release as success, and keeps local formal builds as an explicit fallback after a stopped cloud failure.
-- The app now falls back to the public CNB latest redirect and tokenless release downloads, with the matching SHA-256 sidecar, when GitHub update checks are unavailable.
-
-## 4.6.1
-
-# Hamster Archiver 4.6.1
+# Hamster Archiver 4.6.8
 
 ## 中文
 
-本版本汇总公开正式版 4.6.0 → 4.6.1 的变化。
+本版本汇总公开正式版 4.6.1 → 4.6.8 的变化。
 
-### AI 接入与资源整理
+### AI 接入与自动化
 
-- 新增使用内置运行时的 HamsterArchiver-MCP.cmd 启动器，无需单独安装 Node.js；可连接已有实例或后台启动，并支持单次命令调用。
-- MCP 提供能力发现、参数查询和统一调用入口，扩展设置、仓库整理、队列控制和用户数据迁移等应用操作。旧客户端应按新版接入文档更新配置和工具调用。
-- AI 入库会先读取已保存的备份偏好；缺少必要偏好时先提示。移动或回收源文件等高风险操作需要与具体操作绑定的一次性确认。
-- 用户数据迁移增加独立执行与启动确认，迁移失败保留原资料；迁移时排除临时 MCP 连接凭据。
-- 补充双语 AI 快速上手、能力发现和连接验收说明，简化项目主页。
+- 收紧常用 MCP 操作的字段与结果边界，并采用紧凑分页和最新状态令牌保护队列操作；仓库概览默认只返回汇总，非空活动日期仅在明确请求时提供。
 
-### 更新与发行
+### 首次使用与仓库浏览
 
-- 加入可配置的 CNB 更新来源回退和发行镜像基础设施。GitHub 查询成功时不请求 CNB；本版内置 CNB 端点仍为空，尚不能直接使用 CNB 下载回退。
-- 修复发行草稿分页查找，完善 Electron 本地缓存校验恢复、打包启动器验收和公开导出安全检查。
+- 应用默认进入仓库，空仓库提供可跳过的六步引导；第一步可选择中文或 English。首次启动会按 Windows 界面语言选择默认值：中文 Windows 使用中文，其他界面语言使用 English；之后始终保留已保存选择。
+- 仓库概览的库存数量和 GB 容量可打开历史统计，按日浏览月度记录或查看年度汇总；活跃度可悬停查看日期与数量，也能按日期精确筛选。日期格展示最近 20 周，空白和未来日期使用主题对应的中性色。
+- 空仓库与没有封面的随机漫步使用主题默认背景。手动新增库存的备注改为选填，也可在后续编辑时清空。
+- 归档工作台的扫描和入库操作在不同窗口宽度下保持清晰分行；低于小项目过滤阈值的单项、拖放或粘贴输入会显示一致的可读提示并定位相关设置。
+
+### 归档、更新与数据安全
+
+- 横屏和竖屏视频抽帧保留原始比例，不再补入黑边。压缩已有未压缩项目时，如果仓库和当前设置中的备份位置不同，会先让用户选择，并把选择固定到队列任务。
+- GitHub 不可用时，应用可通过公开 latest 地址发现更新，并从公开发行附件下载；下载内容必须通过对应 SHA-256 校验。
+- 已验证且未变化的打包发行版可复用完整性缓存；首次启动、升级、移动程序或关键文件变化仍会全量核验。仓库和业务操作只会在核验及初始化成功后开放，下载、更新和发行验收仍始终全量核验。
+- 中英文动态界面、状态和原生弹窗文案得到补齐与统一。切换英文时，用户自行填写的标题、路径等内容保持原文。
 
 ### 升级与数据
 
-保留完整程序目录并通过应用更新或安装程序升级。仓库格式和用户数据位置保持兼容；AI 整理和源文件后处理仍遵守应用确认与校验流程。MCP 工具入口已调整，请依据本版文档重新发现能力。
+本次范围为公开正式版 4.6.1 → 4.6.8。应用继续通过完整程序目录或安装程序升级；本次变化不更改 SQLite 仓库格式、用户资料位置或现有记录，无需迁移或重建数据。
 
 ## English
 
-This release covers changes from public stable 4.6.0 to 4.6.1.
+This release covers changes from public stable 4.6.1 to 4.6.8.
 
-### AI connection and resource organization
+### AI connection and automation
 
-- Added HamsterArchiver-MCP.cmd using the bundled runtime, without a separate Node.js installation. It connects to an existing instance or starts in the background and supports one-shot calls.
-- MCP now provides capability discovery, schema lookup and a unified call entry point, with expanded settings, catalog editing, queue control and user-data migration operations. Existing clients should update configuration and tool calls using the new connection guide.
-- AI intake reads saved backup preferences first and requests missing required choices. Higher-risk operations such as moving or recycling sources require a one-time confirmation bound to the specific operation.
-- User-data migration uses a separate worker and startup acknowledgement, retains original data on failure and excludes temporary MCP connection credentials.
-- Added bilingual AI onboarding, capability discovery and connection verification guidance, and simplified the project pages.
+- Tightened common MCP field and result boundaries, with compact pagination and current-state tokens protecting queue actions. Warehouse insights return a compact summary by default and include non-empty activity dates only on request.
 
-### Updates and releases
+### First run and warehouse browsing
 
-- Added infrastructure for configurable CNB update fallback and release mirroring. Successful GitHub checks do not contact CNB. Bundled CNB endpoints remain empty, so CNB download fallback is not active out of the box.
-- Fixed paginated draft-release lookup and improved verified Electron cache recovery, packaged-launcher acceptance and public-export safety checks.
+- The app opens the Warehouse by default and provides a skippable six-step guide for an empty warehouse. The first step lets you choose Chinese or English. On first launch, Chinese Windows defaults to Chinese and other Windows interface languages to English; later launches keep the saved choice.
+- Inventory and GB totals open historical statistics with daily monthly records and yearly summaries. The activity chart shows dates and counts on hover and can filter by an exact date. It displays the latest 20 weeks, with theme-neutral colors for empty and future dates.
+- Empty warehouses and Random Walk items without covers use the theme's default background. Notes for manually created inventory items are optional and can be cleared later.
+- Workbench scan and intake actions stay in separate, clearly aligned rows at different window widths. Items below the small-item threshold show a consistent readable message whether added through the picker, drag and drop or paste, and the app points to the relevant setting.
+
+### Archiving, updates and data safety
+
+- Landscape and portrait video frames retain their original aspect ratio without black padding. When compressing an existing uncompressed item with a different saved and configured backup location, the app asks which location to use and stores the choice with the queued task.
+- If GitHub is unavailable, the app can discover updates through the public latest endpoint and download public release assets. Downloads must pass the matching SHA-256 check.
+- An unchanged packaged distribution that was already verified can reuse its integrity cache. First launch, upgrades, moving the app or changing a critical file still trigger full verification. The Warehouse and business operations remain closed until verification and initialization succeed; downloads, updates and release acceptance always perform full checks.
+- Chinese and English dynamic interface, status and native-dialog copy is more complete and consistent. User-entered titles, paths and similar content remain unchanged when switching to English.
 
 ### Upgrade and data
 
-Keep the complete application directory and upgrade through the application or installer. Warehouse format and user-data location remain compatible; AI editing and source post-processing retain application confirmation and verification gates. MCP tool entry points have changed; rediscover capabilities using this version's guide.
+This release covers public stable 4.6.1 → 4.6.8. Upgrade through the complete application directory or installer. The warehouse format, user-data locations and existing records remain unchanged; no migration or rebuild is required.
 
 
 本文件是公开快照仓库使用的版本记录，只保留面向用户的正式发行节点。开发过程中的内部补丁与提交记录不进入公开仓库。

@@ -9,6 +9,7 @@
 - `data/archive-staging/`：归档暂存。
 - `development/test-artifacts/`：可丢弃但暂时保留的测试产物。
 - `quarantine/`：来源不明或旧布局资料，等待人工确认。
+- `data/production/cache/`：可删除并自动重建的启动完整性缓存，不包含仓库记录或用户媒体。
 
 ## 迁移规则
 

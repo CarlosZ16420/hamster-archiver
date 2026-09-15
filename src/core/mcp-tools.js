@@ -1,7 +1,6 @@
 'use strict';
 
-const crypto = require('node:crypto');
-const { createCapabilityService, intakePreferences, redact } = require('./mcp-capabilities');
+const { createCapabilityService, intakePreferences, jobSummary } = require('./mcp-capabilities');
 
 const text = { type: 'string', minLength: 1, maxLength: 4096 };
 const pagination = { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 100 } };
@@ -51,22 +50,6 @@ function projectSummary(record) {
   return Object.fromEntries(['id', 'title', 'displayName', 'recordType', 'fileCount', 'originalBytes', 'archiveState', 'inventoryDate', 'rating', 'tags', 'backupLocation'].map((key) => [key, record[key]]));
 }
 
-function decisionToken(job) {
-  return crypto.createHash('sha256').update(JSON.stringify([job.id, job.status, job.duplicateReviewFingerprint, job.errorCode, job.errorMessage, job.startedAt, job.confirmedAt])).digest('hex');
-}
-
-function jobSummary(job) {
-  const possibleActions = !job.mcpRequestId ? [] : ['awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status) ? ['continue', 'skip'] : ['failed', 'cancelled'].includes(job.status) ? ['retry'] : job.status === 'queued' ? ['skip'] : [];
-  return { ...redact({
-    id: job.id, requestId: job.mcpRequestId, displayName: job.displayName, status: job.status, progress: job.progress,
-    stageText: job.stageText, errorCode: job.errorCode, errorMessage: job.errorMessage, confirmationReasons: job.confirmationReasons,
-    duplicateReviewKind: job.duplicateReviewKind, similarMatches: (job.similarMatches || []).slice(0, 20),
-    exactProjectMatches: (job.exactProjectMatches || []).slice(0, 20), exactDuplicateMatches: (job.exactDuplicateMatches || []).slice(0, 20),
-    nameDuplicateMatches: (job.nameDuplicateMatches || []).slice(0, 20), possibleActions,
-    needsDesktop: String(job.status).includes('confirmation') && possibleActions.length === 0
-  }), decisionToken: decisionToken(job) };
-}
-
 function createMcpTools(manager, services = {}) {
   let mutating = false;
   const capabilityService = createCapabilityService(manager, services);
@@ -79,15 +62,22 @@ function createMcpTools(manager, services = {}) {
       const definition = definitions.find((tool) => tool.name === name) || legacyDefinitions.find((tool) => tool.name === name);
       if (!definition) throw new Error('Unknown tool');
       validate(args, definition.inputSchema);
-      const readOnly = ['hamster_discover', 'hamster_describe', 'hamster_search', 'hamster_project', 'hamster_jobs'].includes(name);
+      let described = null;
+      if (name === 'hamster_call') {
+        described = capabilityService.describe(args.capability);
+        validate(args.input || {}, described.inputSchema, 'input');
+      }
+      const readOnly = ['hamster_discover', 'hamster_describe', 'hamster_search', 'hamster_project', 'hamster_jobs'].includes(name) || described?.readOnly === true;
       if (!readOnly && mutating) throw new Error('BUSY: another AI operation is running. Poll state before retrying.');
       if (!readOnly) mutating = true;
       try {
         if (name === 'hamster_discover') return capabilityService.discover(args);
         if (name === 'hamster_describe') return capabilityService.describe(args.capability);
         if (name === 'hamster_call') {
-          const described = capabilityService.describe(args.capability);
-          validate(args.input || {}, described.inputSchema, 'input');
+          if (args.capability === 'intake.add_batch') {
+            if (manager.running) throw new Error('QUEUE_RUNNING: wait until the queue is idle before adding an AI batch.');
+            noUnrelatedWork();
+          }
           return await capabilityService.call(args.capability, args.input || {}, args.confirmationToken || '');
         }
         if (name === 'hamster_search') return page(manager.searchCatalog({ query: args.query || '', tag: args.tag || '' }).map(projectSummary), args);
@@ -105,7 +95,7 @@ function createMcpTools(manager, services = {}) {
         }
         const job = manager.findJob(args.jobId);
         if (!job.mcpRequestId) throw new Error('AI decisions are limited to AI-created jobs');
-        if (decisionToken(job) !== args.decisionToken) throw new Error('STALE_DECISION: read hamster_jobs again');
+        if (jobSummary(job).decisionToken !== args.decisionToken) throw new Error('STALE_DECISION: read hamster_jobs again');
         if (!jobSummary(job).possibleActions.includes(args.action)) throw new Error('Action is not valid for this job state');
         if (manager.running) throw new Error('QUEUE_RUNNING: wait until the queue is idle before deciding');
         noUnrelatedWork();

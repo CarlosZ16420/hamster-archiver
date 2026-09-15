@@ -231,6 +231,43 @@ async function main() {
     await fsp.rm(smokeRoot, { recursive: true, force: true });
   }
 
+  const startupIntegrityRoot = path.join(
+    layout.root,
+    'development',
+    'smoke',
+    `startup-integrity-${Date.now()}`
+  );
+  await fsp.mkdir(startupIntegrityRoot, { recursive: true });
+  try {
+    const startupOutputs = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      startupOutputs.push(run(path.join(stagingBuild, 'HamsterArchiver.exe'), [], {
+        env: {
+          ...process.env,
+          HAMSTER_STARTUP_INTEGRITY_TEST: '1',
+          HAMSTER_SMOKE_USER_DATA_DIR: startupIntegrityRoot
+        },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 120000
+      }));
+    }
+    if (!startupOutputs.every((output) => output.includes('HAMSTER_STARTUP_INTEGRITY_TEST_OK'))) {
+      throw new Error('打包启动完整性验收没有返回成功标记。');
+    }
+    if (!startupOutputs[0].includes('"cacheHit":false') || !startupOutputs[1].includes('"cacheHit":true')) {
+      throw new Error('打包启动完整性缓存未按预期完成首次校验和后续命中。');
+    }
+  } finally {
+    await fsp.rm(startupIntegrityRoot, { recursive: true, force: true });
+  }
+
+  // A local test release is only complete when both desktop distributions are
+  // available: the portable Current executable and the NSIS installer.
+  run(process.execPath, [path.join('scripts', 'build-installer.js')], {
+    timeout: 1800000
+  });
+
   await fsp.writeFile(
     path.join(stagingBuild, 'user-data-location.json'),
     JSON.stringify({ userDataDirectory: '../../data/production' }, null, 2) + '\n',
@@ -255,7 +292,9 @@ async function main() {
   console.log('');
   console.log(`发行模式：${fullChecks ? '完整验证' : '日常快速提升'}`);
   console.log(`当前构建：${layout.currentBuild}`);
+  console.log(`便携版程序：${path.join(layout.currentBuild, 'HamsterArchiver.exe')}`);
   console.log(`发行压缩包：${finalZip}`);
+  console.log(`安装程序：${path.join(layout.installerRoot, `HamsterArchiver-Setup-v${packageJson.version}-win-x64.exe`)}`);
   console.log(`SHA-256：${digest}`);
 }
 
