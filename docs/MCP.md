@@ -24,7 +24,7 @@ Hamster Archiver 提供可选的本机 MCP 接口：查询项目、分页读取�
 
 ### 启用和连接
 
-1. 发行包根目录包含 `HamsterArchiver-MCP.cmd`。它使用 Hamster Archiver 自带的 Electron/Node 运行时，用户无需另装 Node.js。默认命令是 stdio MCP 服务，后台启动且不显示窗口；添加 `--show-ui` 才显示界面。
+1. 发行包根目录包含 `HamsterArchiver-MCP.cmd`。它使用 Hamster Archiver 自带的 Electron/Node 运行时，用户无需另装 Node.js。默认命令是 stdio MCP 服务，后台启动且不显示窗口；添加 `--show-ui` 才显示界面。Windows 发行包通过一次性启动请求交给桌面 Explorer 拉起应用，避免继承 AI shell 的受限进程环境；请求限定当前程序路径、临时目录与一分钟时效，消费后立即删除。桌面代理不可用时的直接启动会关闭该 MCP 链路中的崩溃上报组件，但不会关闭 Chromium 渲染沙箱。
 2. 启动器会自动启动应用或连接现有实例。普通桌面实例已经运行时会直接为该实例启用 MCP，不启动第二个仓库写入者；后台实例在最后一个客户端断开后退出，运行中的归档任务会先安全完成。意外退出留下的旧连接文件不会被继续使用。
    空仓库的新手引导只覆盖桌面界面，不参与 MCP 能力调用或队列状态机；后台模式无需完成引导，连接到已显示引导的桌面实例也可继续调用。AI 可读取或按用户要求修改 `suppressOnboarding`，但不应把关闭引导当作入库前置条件。
 3. 程序在**实际用户数据目录**生成短期 `mcp/connection.json`。便携版通常是 EXE 旁的 `userdata/mcp/connection.json`；存在 `user-data-location.json` 时，以它指向的用户数据目录为准。该文件包含本次启动的本机地址和随机令牌，退出后失效，不要提交 Git 或分享。
@@ -83,7 +83,7 @@ Hamster Archiver exposes optional local MCP tools for project search, paginated 
 
 ### Setup
 
-Configure the client to run `HamsterArchiver-MCP.cmd` from the release root. It uses the Electron-bundled Node runtime, so no external Node.js installation is required. It starts headlessly by default; add `--show-ui` when a visible window is needed.
+Configure the client to run `HamsterArchiver-MCP.cmd` from the release root. It uses the Electron-bundled Node runtime, so no external Node.js installation is required. It starts headlessly by default; add `--show-ui` when a visible window is needed. Windows packages use a one-time request bound to the current executable and let desktop Explorer launch the app, so restricted AI-shell process rules are not inherited. The request expires within one minute and is deleted when consumed. Direct fallback launches disable crash reporting only for that MCP launch chain; Chromium's renderer sandbox remains enabled.
 
 The launcher starts the app or enables MCP on an existing desktop instance, preserving a single warehouse writer. A headless instance exits after the final client disconnects, after any active archive job finishes. Stale connection files from crashes are replaced during the next launch. The app writes a rotating local URL and secret token to `mcp/connection.json` under its effective user-data root; do not share or commit it.
 

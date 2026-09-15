@@ -3,7 +3,6 @@
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const crypto = require('node:crypto');
-const os = require('node:os');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, shell } = require('electron');
 const { AppStore, writeJsonAtomic } = require('./core/store');
 const { QueueManager } = require('./core/queue-manager');
@@ -43,6 +42,7 @@ const { formatReleaseNotes } = require('./core/release-notes');
 const { findTrashItems, isTrashItemPresent, restoreTrashItem } = require('./core/recycle-bin');
 const { verifyReleaseManifestAtStartup } = require('./core/startup-integrity');
 const { resolveDevelopmentUserDataRoot } = require('./core/development-paths');
+const { isValidMcpReadyFile, takeDesktopLaunchRequest } = require('./core/mcp-launch');
 const rendererI18n = require('./renderer/i18n');
 
 // Let Windows choose the nearest native-size frame from the multi-resolution
@@ -115,6 +115,9 @@ if (isSmokeTest) {
   app.commandLine.appendSwitch('disable-gpu-compositing');
 }
 const hasSingleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
+const startupDesktopMcpRequest = hasSingleInstanceLock && !isSmokeTest
+  ? takeDesktopLaunchRequest({ applicationExecutable: process.execPath })
+  : null;
 app.setAppUserModelId('com.carlosz.hamsterarchiver');
 
 function usesEnglishUi() {
@@ -160,9 +163,13 @@ if (!hasSingleInstanceLock) {
 }
 
 app.on('second-instance', (_event, argv) => {
-  if (argv.includes('--enable-mcp')) {
-    void enableMcpForArguments(argv).catch((error) => console.error(`MCP_START_FAILED ${error.stack || error.message}`));
-    if (!argv.includes('--show-ui')) return;
+  const desktopRequest = takeDesktopLaunchRequest({ applicationExecutable: process.execPath });
+  const effectiveArgs = desktopRequest
+    ? ['--enable-mcp', '--background', `--mcp-ready-file=${desktopRequest.readyFile}`, ...(desktopRequest.showUi ? ['--show-ui'] : [])]
+    : argv;
+  if (effectiveArgs.includes('--enable-mcp')) {
+    void enableMcpForArguments(effectiveArgs).catch((error) => console.error(`MCP_START_FAILED ${error.stack || error.message}`));
+    if (!effectiveArgs.includes('--show-ui')) return;
   }
   showMainWindow();
 });
@@ -174,11 +181,7 @@ function argumentValue(argv, name) {
 
 function validatedMcpReadyFile(argv) {
   const value = argumentValue(argv, '--mcp-ready-file');
-  if (!value || !path.isAbsolute(value)) return null;
-  const resolved = path.resolve(value);
-  if (normalizeForComparison(path.dirname(resolved)) !== normalizeForComparison(os.tmpdir()) ||
-      !/^hamster-mcp-ready-\d+-[a-f0-9]{32}\.json$/i.test(path.basename(resolved))) return null;
-  return resolved;
+  return isValidMcpReadyFile(value) ? path.resolve(value) : null;
 }
 
 async function writeMcpReadyFile(argv) {
@@ -908,6 +911,17 @@ function createWindow() {
         archiveVolumeEnabled: state?.config?.archiveVolumeEnabled === true,
         archiveVolumeBytes: Number(state?.config?.archiveVolumeBytes)
       }))`);
+      if (process.env.HAMSTER_SMOKE_MODE === 'minimal') {
+        if (!ipcStatus.hasConfig || !ipcStatus.hasJobs || !ipcStatus.hasCatalog) {
+          await writeSmokeResult(false, 'ipc', { bridgeStatus, ipcStatus });
+          app.exitCode = 1;
+        } else {
+          await writeSmokeResult(true, 'complete', { bridgeStatus, ipcStatus });
+          console.log(`HAMSTER_SMOKE_TEST_OK ${JSON.stringify({ bridgeStatus, ipcStatus })}`);
+        }
+        app.quit();
+        return;
+      }
       const expectedSourceState = ['trash', 'move', 'keep'].includes(process.env.HAMSTER_SMOKE_SOURCE_DISPOSITION)
         ? process.env.HAMSTER_SMOKE_SOURCE_DISPOSITION
         : 'keep';
@@ -1812,8 +1826,11 @@ function registerIpc() {
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const workspaceRoot = applicationRoot;
   logStartupTiming('electron-ready');
-  const mcpRequested = !isSmokeTest && (process.argv.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1');
-  startedAsMcpBackground = mcpRequested && process.argv.includes('--background') && !process.argv.includes('--show-ui');
+  const startupMcpArgs = startupDesktopMcpRequest
+    ? ['--enable-mcp', '--background', `--mcp-ready-file=${startupDesktopMcpRequest.readyFile}`, ...(startupDesktopMcpRequest.showUi ? ['--show-ui'] : [])]
+    : process.argv;
+  const mcpRequested = !isSmokeTest && (startupMcpArgs.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1');
+  startedAsMcpBackground = mcpRequested && startupMcpArgs.includes('--background') && !startupMcpArgs.includes('--show-ui');
   if (app.isPackaged && !isSmokeTest) {
     if (!startedAsMcpBackground) await createStartupWindow();
     updateStartupWindow('verify-cache');
@@ -2116,7 +2133,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   });
   queueManager.on('automation-error', (error) => console.error('MCP_QUEUE_ERROR', error.message));
   resolveApplicationInitialized();
-  if (mcpRequested) await enableMcpForArguments(process.argv);
+  if (mcpRequested) await enableMcpForArguments(startupMcpArgs);
 
   if (process.env.HAMSTER_UPDATE_VALIDATION_FILE) {
     await fs.writeFile(process.env.HAMSTER_UPDATE_VALIDATION_FILE, JSON.stringify({

@@ -590,7 +590,7 @@ function maybeStartOnboarding(state) {
 }
 
 function celebrateOnboardingCompletion() {
-  const emojis = ['🎉', '✨', '🎊', '⭐', '🌟', '🐹'];
+  const emojis = ['🎉', '✨', '🎊', '⭐', '🌟'];
   const colors = ['#d45a32', '#e2ad3b', '#58b787', '#6b8fe8', '#dc6fa7'];
   elements.onboardingCelebration.replaceChildren();
   elements.onboardingCelebration.hidden = false;

@@ -8,7 +8,7 @@
 
 Turn scattered local files into your own visual resource library.
 
-![Version](https://img.shields.io/badge/version-4.6.8-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.9-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -110,34 +110,37 @@ Choose 7z/ZIP, passwords and custom split volumes. Queue batches, pause or sched
 
 </details>
 
-## Let your AI client use the library
+## Let AI organize it for you
 
-**Give your AI assistant the project URL, let it help with setup, then organize your collection in plain language.** The local MCP launcher starts or connects to the app using the bundled runtime, without a separate Node.js installation. AI can discover only the capabilities it needs, query the warehouse, run compressed or inventory-only intake, update common password, naming, preview, filtering and exact-skip settings, organize records, and confirm warehouse import, export or location changes. Queue results are paginated by task and password text is never returned. The running application determines the available capabilities.
+This works with an AI assistant that can access your computer and connect to MCP. The AI can handle setup, connection checks and task tracking; you only need to describe what you want.
 
-### Send this to your AI assistant
+### Download
 
-> Help me install and connect Hamster Archiver: https://github.com/CarlosZ16420/hamster-archiver . Read README, llms.txt and docs/AI-QUICKSTART.md first. Check the downloadable version and actual tools, reuse any existing installation and settings, configure MCP for this client, and verify the connection with read-only queries. Do not start intake yet. If you need my help, tell me only the next missing step.
+Send this to your AI assistant:
 
-This needs an assistant with local-computer access and MCP support. A chat-only client needs a tool connection first. If the app is not installed, the assistant should check the release and checksum before setup, and follow the current client's own configuration instructions.
+> Please download this project for me: https://github.com/CarlosZ16420/hamster-archiver
 
-Once connected, ask: “Check whether I have saved these titles” or “Catalog these folders without compression, keep the originals, and summarize the results.” When the newer editing capabilities are available, try: “Add a ‘To organize’ tag to my selected projects.”
+### First intake
 
-**Version note:** Public 4.6.0 supports AI search, batch intake, progress and similarity decisions. The bundled-runtime launcher and expanded editing capabilities landed in source afterward. Use the [4.6.0 connection instructions](https://github.com/CarlosZ16420/hamster-archiver/blob/v4.6.0/docs/MCP.md) for that package; a matching version number alone does not prove that the new launcher is included.
+After the download finishes, say:
 
-<details>
-<summary>For AI assistants: invocation order and documentation</summary>
+> Please use Hamster Archiver to organize my D:\Downloads folder.
 
-Read the **[AI quick start](docs/AI-QUICKSTART.md)**, then follow the **[full MCP guide](docs/MCP.md)**. [llms.txt](llms.txt) is the machine-readable documentation index. For the current interface:
+The AI reads existing settings first. On the first run, it asks only for missing choices:
 
-1. `hamster_discover`: find relevant capabilities and check `available`.
-2. `hamster_describe`: read the exact input schema and confirmation requirements.
-3. `hamster_call`: invoke the capability; start with read-only `settings.get` and `catalog.insights` checks.
+1. Where compressed archives should be saved;
+2. The intake mode (compressed or inventory-only) and what to do with original files afterward;
+3. Whether to set an extraction password.
 
-Reuse saved backup preferences; ask only for missing destinations, source-handling choices or other necessary information. Poll intake through its final state and report actual outputs, catalog records, verification and failures. Explain the impact and obtain confirmation before deletion, migration, upgrades or source moves. Submission is not completion.
+Once confirmed, you can wait for completion. The AI connects to the app, runs the intake, tracks progress and summarizes archive locations, warehouse records and results.
 
-</details>
+### Later use
 
-The application itself does not upload media. Metadata returned through MCP, such as titles and paths, enters your chosen AI client's context. AI integration is optional.
+At any time, say:
+
+> Please use Hamster Archiver to organize everything in E:\Downloads.
+
+The AI reuses saved preferences and asks again only when this task differs or required information is missing. The app itself does not upload media; metadata returned through MCP enters your chosen AI client's context. Full operating instructions for AI assistants are in the [AI quick start](docs/AI-QUICKSTART.md).
 
 ## Start with your first batch
 
@@ -145,7 +148,7 @@ The application itself does not upload media. Metadata returned through MCP, suc
 2. In the archive workbench, scan a directory or drop folders and videos, then review the pending resources.
 3. For **local organization**, choose uncompressed intake. To **prepare backups**, set the archive output directory and start compressed intake. Open the library afterward to browse and organize the results.
 
-Keep the full portable directory, such as `HamsterArchiver-v4.6.8-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included.
+Keep the full portable directory, such as `HamsterArchiver-v4.6.9-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included.
 
 ## Frequently asked questions
 

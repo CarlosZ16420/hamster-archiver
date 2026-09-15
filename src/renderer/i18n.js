@@ -337,7 +337,6 @@ const exactSections = [
     ['本周入库', 'Added this week'],
     ['导出仓库', 'Export Warehouse'],
     ['并入外部仓库', 'Import Warehouse'],
-    ['随机漫步 · 换一个', 'Surprise Me · Again'],
     ['随机漫步', 'Surprise Me'],
     ['库存', 'Inventory'],
     ['标签', 'Tags'],

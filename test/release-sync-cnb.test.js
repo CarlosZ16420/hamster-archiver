@@ -94,13 +94,13 @@ test('transient CNB upload failure retries without rebuilding and a complete rer
       release.assets.push(remoteAsset(asset));
     }
   };
-  const first = await syncReleaseBundle(source, client, { attempts: 3, delay: async () => {}, enabled: true });
+  const first = await syncReleaseBundle(source, client, { attempts: 2, delay: async () => {}, enabled: true });
   assert.equal(first.created, true);
   assert.equal(first.release.draft, false);
   assert.equal(first.release.make_latest, 'false');
   assert.equal(first.uploaded.length, 4);
   assert.equal(firstAssetAttempts, 2);
-  const second = await syncReleaseBundle(source, client, { attempts: 3, delay: async () => {}, enabled: true });
+  const second = await syncReleaseBundle(source, client, { attempts: 2, delay: async () => {}, enabled: true });
   assert.equal(second.created, false);
   assert.deepEqual(second.uploaded, []);
   assert.equal(second.skipped.length, 4);
@@ -139,12 +139,12 @@ test('retry helper retries only explicitly retryable failures', async () => {
   let calls = 0;
   const value = await withRetry(async () => {
     calls += 1;
-    if (calls < 3) { const error = new Error('retry'); error.status = 503; throw error; }
+    if (calls < 2) { const error = new Error('retry'); error.status = 503; throw error; }
     return 'ok';
-  }, { attempts: 3, delay: async () => {} });
+  }, { attempts: 2, delay: async () => {} });
   assert.equal(value, 'ok');
-  assert.equal(calls, 3);
-  await assert.rejects(() => withRetry(async () => { throw new Error('conflict'); }, { attempts: 3 }), /conflict/);
+  assert.equal(calls, 2);
+  await assert.rejects(() => withRetry(async () => { throw new Error('conflict'); }, { attempts: 2 }), /conflict/);
 });
 
 test('ambiguous create, upload and publish responses are read back and are not repeated after verified success', async () => {
@@ -184,7 +184,7 @@ test('ambiguous create, upload and publish responses are read back and are not r
       throw error;
     }
   };
-  const result = await syncReleaseBundle(source, client, { attempts: 3, delay: async () => {}, enabled: true });
+  const result = await syncReleaseBundle(source, client, { attempts: 2, delay: async () => {}, enabled: true });
   assert.equal(result.release.draft, false);
   assert.equal(creates, 1);
   assert.equal(uploads, 4);

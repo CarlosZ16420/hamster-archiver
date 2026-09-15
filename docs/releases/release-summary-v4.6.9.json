@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.9",
+  "notes": {
+    "zh-CN": [
+      "随机漫步按钮改为简短文案并同步英文；新手引导第一步统一为“语言/Language”，完成庆祝烟花移除仓鼠 emoji。",
+      "修复受限 AI 沙箱中 MCP 启动器拉起应用的兼容性，同时保留渲染沙箱并提供明确失败诊断。",
+      "仓库格式与用户资料保持兼容，无需迁移。"
+    ],
+    "en-US": [
+      "Shortened the Random Walk label with synchronized English copy; standardized the onboarding language heading and removed the hamster emoji from its fireworks.",
+      "Improved MCP app-launch compatibility in restricted AI sandboxes while retaining the renderer sandbox and clear failure diagnostics.",
+      "Warehouse format and user data remain compatible; no migration is required."
+    ]
+  }
+}

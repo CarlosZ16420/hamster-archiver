@@ -46,7 +46,7 @@ npm run preview:current    # 启动仓库外 current，而不是根目录 EXE
 
 ## 提交与本地 Current
 
-每次代码维护完成后，必须在干净的已提交 `main` 上推送私有 `origin/main`，再运行 `npm run release:local` 刷新 `HamsterArchiver-Local/builds/current`，并同步生成便携 ZIP、安装 EXE 和两份 SHA-256。使用 `npm run preview:current` 检查便携版，并直接运行 `builds/installers/` 中对应版本的 Setup EXE 检查安装版。该入口会先校验 Electron 运行时，缺失时仅尝试从已验证的本机缓存恢复，不会暗中下载。云端正式发行仍优先在 GitHub runner 构建并直接上传，不复用或上传本机产物；但不能因此默默省略本轮明确要求的 Current。本地测试发行与正式 Release 必须分别报告。
+每次修改按 `QA_RELEASE_ARCHITECTURE.md` 选择一次 QA，然后在干净的 `main` 上推送私有 `origin/main`。只有明确需要手动测试时才运行 `npm run release:local` 刷新 Current；ZIP 和安装版通过 `--outputs` 单独选择。构建时才校验或恢复 Electron，普通业务 QA 不准备 Electron。云端构建、公开镜像和 CNB 镜像复用阶段凭据及同一附件；本地 Current 与正式 Release 分别报告。
 
 ## 提交要求
 

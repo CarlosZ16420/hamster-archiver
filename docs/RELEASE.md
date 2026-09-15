@@ -2,17 +2,15 @@
 
 ## 云端优先与本地回退
 
-正式发行选择一次构建方式：默认 `npm run release`，或 `npm run release -- --mode local`。在需要发布的仓库工作树中执行；默认从该仓库的 origin 识别目标，也可明确指定 `--repo CarlosZ16420/hamster-archive` 或 `--repo CarlosZ16420/hamster-archiver`。目标远端标签必须与当前已提交 HEAD 完全一致，版本必须匹配 package.json；禁止移动历史标签。
+测试选择、按需产物、检查点和失败续跑统一遵循 `docs/QA_RELEASE_ARCHITECTURE.md`。正式发行默认 `npm run release`，也可明确选择 `npm run release -- --mode local`。标签必须指向当前已提交版本，禁止移动历史标签。
 
-- 云端：显式触发 `package.yml`，在 GitHub runner 上执行完整检查、便携 ZIP/隔离启动验收、安装 EXE 构建以及两份 SHA-256 校验。目标版本尚无 Release 时，一次调用 GitHub CLI 并同时传入四个附件；GitHub CLI 按其官方流程在内部创建临时草稿、上传全部附件并发布，项目脚本不再手工创建草稿后立即反查。产物不会先下载到本机，也不依赖 Actions artifact 存储；正式云端 Release 不上传本机刚生成的 Current 产物，避免占用维护机上行流量。
-- 本地：只在云端任务已经停止且确实失败，或用户明确选择本地方式时，运行 `npm run release -- --mode local`。入口先校验当前提交是否已有完整的本地发行清单、ZIP、安装 EXE 和两份 SHA-256；完全一致时直接复用并上传，不重复执行测试或构建。只有产物缺失或提交不一致时才执行一次完整构建和校验。缺少 npm 依赖时按锁文件安装；缺少发行工具时从固定来源恢复并校验；Electron 运行时仍只从校验通过的本机缓存恢复，不会隐式下载。该命令用于正式发行；日常维护后的手动测试 Current 使用 `npm run release:local`。
-- 云端任务最长运行 25 分钟；启动器连同排队默认最多等 30 分钟。启动后只用 15、30、60 秒三个有界等待窗口定位本次唯一请求，随后交给一次 `gh run watch` 阻塞等待，不再每 10 秒自行查询；超时请求取消并退出，提供明确的本地命令。不会无限查找运行、自动重复提交或暗中启动本地构建。切换前必须确认同版本云端任务已结束；本地入口会拒绝与活动云端任务同时发行。
-- Actions 分钟数/执行额度不足时，可直接选本地模式；仅 artifact 存储不足不妨碍直接上传 Release。GitHub 本身或登录不可用时，上传仍会失败，此时先保留本地产物并修复连接。
-- 任务成功必须具备 EXE、ZIP 及对应的两份校验文件。GitHub CLI 在首次发布中负责保证附件上传完成后才公开；任何上传中断最多留下内部草稿，不把缺文件的版本公开。已发布且完整的 Release 视为幂等成功，一律不重建或覆盖；已发布但不完整或为预发行时安全停止。草稿已有同名同摘要文件则跳过，冲突则停止并提示检查，绝不覆盖不明文件。
-- 上传中断后可保留现有构建，执行 `node scripts/release-publish.js release --repo OWNER/REPO --tag vX.Y.Z` 继续上传并在完整核验后发布，不必重新打包。对 EOF、连接重置、超时及可重试的 GitHub 服务错误，每个附件最多等待 30 秒回读一次并重试一次；若失败响应前远端其实已收到同名同大小同摘要附件，则视为成功而不重复上传。若从云端部分草稿切换到本地新构建，应先检查并删除该未发布草稿中冲突的附件，再重试上传；不得删除历史正式 Release。
-- 若发布入口发现完整草稿，先确认标签/提交、双语正文以及远端恰好四个非空且带 GitHub SHA-256 摘要的预期附件，然后直接发布，不重新构建、不读取本地产物、不重复上传；发布后的立即回读未达到预期时只固定等待 30 秒再回读一次，不进行高频轮询。部分草稿才进入构建、续传和冲突核验。云端任务成功后，本地启动器接受“完整正式 Release”为成功状态。应用的自动更新只读取正式 Release，安装版和便携版历史附件不受 Actions 清理影响。
-
-Git 标签推送不再触发打包；两个仓库不会因同步同一版本而自动各打一次。普通 CI 仍自动运行。私有与公开 GitHub Release 的 Windows 附件来自同一私有版本时，使用 `node scripts/release-publish.js mirror --from-repo CarlosZ16420/hamster-archive --repo CarlosZ16420/hamster-archiver --tag vX.Y.Z`：它核对公开标签的快照提交映射、私有正式 Release、四个本地文件及远端大小/SHA-256，再以公开累积双语正文发布相同附件。公开仓库无需再为同一版本重复构建。
+- 云端 `package.yml` 分为预检、QA、构建和发布四个作业。精确提交已有成功 CI 时直接复用；没有凭据时补丁/次版本只执行受影响 QA，主版本自动使用完整矩阵，也可用 `--qa` 明确覆盖。查找凭据不等待，打包不再因查询失败自动回退全量测试。
+- 构建只生成一次 ZIP、安装 EXE 和两份 SHA-256，并做一次最小隔离启动。验证后的文件以短期 Actions 产物保存一天，供发布失败后的作业级续跑。
+- 上传失败时优先在 Actions 里“重新运行失败的作业”。必须新开运行时使用 `npm run release -- --resume-run RUN_ID` 复用原产物；不得重跑 QA 或构建。完整草稿直接发布，部分草稿只续传缺失附件，完整正式 Release 是幂等成功。
+- 启动器用一次 `gh run watch` 等待，不进行高频 AI 轮询。等待超时时远端任务继续运行，不自动取消、不另起任务。
+- 本地回退先复用同提交产物；确需构建时默认 `targeted`，不再强制完整测试。`--qa full` 只用于主版本、明确重大变更或用户明确要求。
+- Electron 只在打包或相关 QA 中准备。发行入口验证 `electron.exe`，优先使用校验缓存；确实缺失时按锁定版本下载并复验。普通业务测试不准备 Electron。
+- 私有 Release 是二进制权威源。公开发布执行 `release-publish.js mirror`，直接下载、校验并上传私有四附件；CNB 再从公开 GitHub Release 镜像。两个目标均为零测试、零构建。
 
 ## CNB 发行镜像
 
@@ -24,7 +22,7 @@ GitHub Release 是唯一权威发行源。CNB 只镜像同一正式版本的公�
 
 手动重试同一标签时优先从公开仓库 Actions 运行 `Sync published release to CNB`；它会先补齐缺失的公开源码标签，再执行附件镜像。单独调试附件同步时，在环境中显式设置 `CNB_SYNC_ENABLED=true`、`CNB_REPO_SLUG`、`CNB_TOKEN` 和精确的 `CNB_UPLOAD_HOSTS`，再运行 `npm run release:sync:cnb -- --tag vX.Y.Z --github-repo CarlosZ16420/hamster-archiver --cnb-repo GROUP/REPO --make-latest false`；此命令仍要求 CNB 已有同名标签。`CNB_API_BASE`、`CNB_WEB_BASE` 可覆盖经核实的 SaaS 基址。历史版本手动补同步默认 `makeLatest=false`，不会改变 CNB latest；只有确认目标就是当前最新正式版本时才显式传 `--make-latest true`，发布事件 workflow 会明确传入该值。脚本先创建或接续隐藏草稿，创建阶段始终保持 `make_latest=false`，只读取已发布 GitHub 正文和四附件并逐项校验名称、大小和 SHA-256；完整回读通过后才按显式 latest 选择发布 CNB Release。同名同摘要附件会跳过，正文、标题、大小或摘要冲突会停止且不覆盖。网络、上传或确认响应不明时先回读远端状态，再决定是否重试，不重新构建或盲目补传。公开客户端的匿名下载回退与同步 workflow 的写权限彼此独立：前者不使用 Token，后者的 Token 仍不得进入源码或发行包。
 
-Actions 页面也可手动运行：`tag` 填现有版本标签，`publish=true` 构建并通过 GitHub CLI 原生事务上传、发布；若目标已有完整草稿则直接发布，若已有完整正式 Release 则幂等成功，两种情况都跳过构建。`publish=false` 只构建验证，允许 `tag=main`，不创建 Release。`retain_artifact` 默认关闭，确有临时下载需要才开启，保留 3 天；其上传失败不阻断已完成的正式 Release。不要用验证模式绕过正式发布的标签核验。
+Actions 页面也可手动运行：`tag` 填现有标签。`publish=false` 是快速测试通道，只生成便携 ZIP、摘要和清单并保留一天；`publish=true` 才生成安装版并发布。`qa_level` 只在没有精确提交 CI 凭据时生效。上传阶段失败可重新运行失败作业；新运行填写原 `resume_run_id`，复用保留一天的验证产物。
 
 ## 版本文件
 
@@ -43,19 +41,18 @@ Actions 页面也可手动运行：`tag` 填现有版本标签，`publish=true` 
 
 ## 本地维护版
 
-1. 完成日常修复或优化；只有到达版本边界时才推进 SemVer 与版本文件。
-2. 审查差异和仓库安全，提交到本地 `main` 并推送私人 `origin/main`，确保本地主干、远端主干一致且工作树干净。
-3. 每次代码维护完成都运行 `npm run release:local`，将当前已提交且已推送的 `main` 刷新到外部 `HamsterArchiver-Local/builds/current`，并在同一次本地测试发行中生成便携 ZIP、安装 EXE 与各自 SHA-256。手动测试至少覆盖 `builds/current/HamsterArchiver.exe` 和 `builds/installers/HamsterArchiver-Setup-vX.Y.Z-win-x64.exe`；该入口默认不重复执行完整源码测试矩阵。云端正式发行避免无条件重复本地打包或上传本地产物，但不得以云端成功为由默默遗漏本轮明确要求的 Current。
-4. 用户明确要求测试、SemVer 主版本或被指定为重大/正式发布、上传私有 GitHub Release、或推送公开仓库时，改用 `npm run release:local -- --full-checks`。
-5. 两种模式都直接使用当前受支持的本机 Node.js 22.12+（22.x）或 24.x，以及 npm 10.x/11.x；不下载第二套 Node，也不限制支持范围内的补丁版本。`electron.exe` 是锁定 npm 依赖生成的运行时文件，不进入 Git；公开快照重建或全新检出后由发行入口按锁文件恢复 npm 包，再从 SHA-256 校验通过的本机缓存恢复 Electron 运行时。没有可用缓存时停止并明确说明未下载，只有人工确认后显式运行 `npm run electron:prepare -- --allow-download` 才允许联网。发行清单记录实际使用版本。随后从当前提交构建到仓库外 staging，并强制验证锁定工具、发行清单、ZIP、SHA-256、隔离数据烟雾启动，以及打包应用首次全量校验和第二次缓存命中。烟雾验收使用隔离目录中的结果文件，不依赖 Windows GUI 进程在 runner 上不稳定的标准输出。完整模式还执行依赖、语法、单元测试、目录/版本/发布安全检查。
-6. 验收成功后旧 current 进入 history，新构建提升为 `builds/current`，便携压缩包写入 `builds/packages`，安装 EXE 写入 `builds/installers`。`release:local` 成功必须同时报告 Current 中的便携 EXE、便携 ZIP、安装 EXE 和两份 SHA-256；缺少任一发行形态时不得宣称本地测试发行完成。
-7. 使用 `npm run preview:current` 启动；不要在源码根目录复制或运行 EXE。
+1. 完成修改后生成一次 QA 计划并只运行选中的测试。文档可为 `none`，普通修复默认 `targeted`。
+2. 审查差异和仓库安全，提交私有 `main`；只有明确需要本机手动测试时才运行 `npm run release:local` 刷新 Current。
+3. `release:local` 默认只生成 Current；用 `--outputs zip`、`--outputs installer` 或组合值生成其他产物。任何组合只执行一次便携构建和一次最小烟雾，安装版仅在选择时构建。
+4. 两次启动完整性缓存验收改为 `--startup-integrity` 显式选项。完整 QA 使用 `--qa full`，不与同提交的成功 CI 重复。
+5. 各阶段写入仓库外 `builds/release-runs`。重跑同一命令会校验并复用成功阶段，只重试失败处。
+6. 使用 `npm run preview:current` 启动；不要在源码根目录复制或运行 EXE。
 
-ZIP 在写入维护机专用数据指针之前生成，因此对外解压后仍保持普通便携数据行为。
+ZIP、Current 与安装版只在选中时报告；未请求的产物不构成失败。
 
 ## Windows 安装版与商店准备
 
-- `npm run release:local` 会在提升 Current 前调用安装版构建，确保每次 Current 更新都同步得到可测试的 NSIS 安装程序。需要单独重建安装版时仍可使用 `npm run build:installer`；产物和 SHA-256 位于仓库外 `HamsterArchiver-Local/builds/installers/`。
+- 安装版仅在 `--outputs` 包含 `installer` 时构建。需要单独重建时也可使用 `npm run build:installer`；产物和 SHA-256 位于仓库外 `HamsterArchiver-Local/builds/installers/`。
 - 安装版与便携版是两种独立发行形态：便携版默认使用程序旁 `userdata`；安装版默认使用 Windows 用户数据目录，安装目录不保存运行数据。卸载程序默认保留用户数据。
 - 安装版使用稳定的 `com.carlosz.hamsterarchiver` 应用标识和当前用户安装注册信息识别已有版本；运行更高版本安装程序时会升级已有安装，而不是并排创建第二份。安装目录始终规范为用户所选父目录下的 `Hamster Archiver` 子目录；安装选项可决定是否创建桌面快捷方式，完成页直接启动已安装 EXE，不依赖快捷方式。
 - 当前 NSIS 安装程序用于普通桌面分发和安装流程验收。进入 Microsoft Store 前，优先从同一 installed 布局生成 MSIX，并在 Partner Center 预留名称、取得 Store identity 后补齐清单。MSIX 商店提交由 Microsoft 签名；在商店外分发的安装程序仍应使用可信代码签名证书。
@@ -71,11 +68,11 @@ ZIP 在写入维护机专用数据指针之前生成，因此对外解压后仍�
 
 ## 私有提交与公开发行
 
-私有代码提交、版本标签、公开源码快照和 GitHub Release 是独立状态，必须分别确认。每次代码维护及时提交到 `main`、推送私人 `origin/main`，并刷新外部 `HamsterArchiver-Local/builds/current` 供手动测试；云端正式发行避免重复构建，但若本轮明确要求 Current，必须完成对应刷新并单独报告，不能静默跳过。普通未升版提交不强制创建标签；用户明确要求推进版本号时，在版本提交上创建并推送对应 `vX.Y.Z` 私人标签，再显式选择发布方式。只有用户明确要求公开时，才读取 `docs/REPOSITORY_MAINTENANCE.md` 并执行公开快照流程；已存在正式 Release 时不要重复上传附件。
+私有代码提交、版本标签、Current、公开源码快照和 Release 是独立状态，必须分别确认。每次代码维护及时提交到 `main`、推送私人 `origin/main`；只有明确要求才刷新 Current。普通未升版提交不强制创建标签；用户明确要求推进版本号时，在版本提交上创建并推送对应私人标签，再显式选择发布方式。只有用户明确要求公开时才执行公开快照或 Release；已存在正式附件时直接复用。
 
 ## 失败处理
 
-构建或烟雾验证失败时保留 current，不提升 staging。公开快照失败时恢复公开工作树，不修改私有提交。任何失败都先记录实际提交、版本、产物路径和数据路径，再决定重试。
+构建或烟雾验证失败时保留 current，不提升 staging。每个阶段把提交、版本、尝试次数、错误和产物写入外部检查点；修复后重跑失败阶段。公开快照失败时恢复公开工作树，不修改私有提交。禁止因单个失败重新开始整个发行。
 
 ## 公开发行必做：累积双语更新说明
 

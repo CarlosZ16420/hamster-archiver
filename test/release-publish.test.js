@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { assertMatchingReleaseAssets, completeDraft, completePublishedRelease, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, planUploads, parseArgs, preflight, publishCompleteDraft, releaseArtifacts, releaseState, uploadAssetWithRecovery, validateMirrorTarget } = require('../scripts/release-publish');
+const { assertMatchingReleaseAssets, completeDraft, completePublishedRelease, downloadVerifiedReleaseAssets, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, planUploads, parseArgs, preflight, publishCompleteDraft, releaseArtifacts, releaseState, uploadAssetWithRecovery, validateMirrorTarget } = require('../scripts/release-publish');
 const { optionsFrom, findRequest } = require('../scripts/release');
 const { readReleaseNotes, assertDraftNotes } = require('../scripts/release-publish');
 const fs = require('node:fs/promises');
@@ -166,6 +166,30 @@ test('public mirroring accepts only the four byte-identical private Release asse
   const assets = localAssets(tag);
   assert.doesNotThrow(() => assertMatchingReleaseAssets(assets, completeRelease(tag, false), tag));
   assert.throws(() => assertMatchingReleaseAssets(assets, { ...completeRelease(tag, false), assets: [] }, tag), /complete published/);
+});
+
+test('public mirroring downloads the private bundle without invoking a build', async () => {
+  const tag = 'v4.6.8';
+  const calls = [];
+  const runner = (_command, args) => {
+    calls.push(args);
+    const directory = args[args.indexOf('--dir') + 1];
+    for (const name of expectedReleaseAssetNames(tag).filter(name => !name.endsWith('.sha256'))) {
+      require('node:fs').writeFileSync(path.join(directory, name), name);
+      const digest = require('node:crypto').createHash('sha256').update(name).digest('hex');
+      require('node:fs').writeFileSync(path.join(directory, `${name}.sha256`), `${digest} *${name}\r\n`);
+    }
+    return '';
+  };
+  const downloaded = await downloadVerifiedReleaseAssets('CarlosZ16420/hamster-archive', tag, runner);
+  try {
+    assert.equal(downloaded.assets.length, 4);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].slice(0, 3), ['release', 'download', tag]);
+    assert.ok(!calls[0].includes('build'));
+  } finally {
+    await downloaded.cleanup();
+  }
 });
 
 function releaseRunner(tag, getCurrentRelease, onReleaseCommand = () => {}) {
@@ -380,7 +404,13 @@ test('cloud launcher uses exact request identity rather than another run of the 
 
 test('release mode and polling are explicit and bounded', () => {
   assert.equal(optionsFrom([]).mode, 'cloud');
+  assert.equal(optionsFrom([]).channel, 'stable');
+  assert.equal(optionsFrom([]).qa, 'auto');
+  assert.equal(optionsFrom([]).releaseKind, 'patch');
   assert.equal(optionsFrom(['--mode', 'local']).mode, 'local');
+  assert.equal(optionsFrom(['--release-kind', 'major']).releaseKind, 'major');
+  assert.equal(optionsFrom(['--channel', 'validation']).channel, 'validation');
+  assert.equal(optionsFrom(['--retry-test', 'test/release-local.test.js']).retryTest, 'test/release-local.test.js');
   for (const value of ['NaN', '0', '1000']) assert.throws(() => optionsFrom(['--wait-minutes', value]));
   assert.throws(() => optionsFrom(['--mode', 'auto']));
   assert.throws(() => parseArgs(['upload', '--repo']));

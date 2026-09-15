@@ -1,11 +1,13 @@
 'use strict';
 
 const fsp = require('node:fs/promises');
+const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const packageJson = require('../package.json');
 const { hashFile } = require('../src/core/tool-integrity');
 const { assertPathInsideLocalRoot, makeLocalLayout } = require('../src/core/local-paths');
+const { openCheckpoint, runStage } = require('./release-checkpoint');
 
 const projectRoot = path.resolve(__dirname, '..');
 const layout = makeLocalLayout(projectRoot);
@@ -14,6 +16,38 @@ const stagingBuild = path.join(layout.stagingRoot, releaseName);
 const stagedZip = path.join(layout.stagingRoot, `${releaseName}.staging.zip`);
 const finalZip = path.join(layout.packageRoot, `${releaseName}.zip`);
 const finalSha = `${finalZip}.sha256`;
+const installerPath = path.join(layout.installerRoot, `HamsterArchiver-Setup-v${packageJson.version}-win-x64.exe`);
+const installerSha = `${installerPath}.sha256`;
+
+function parseOptions(argv) {
+  const options = { qa: 'none', outputs: new Set(['current']), startupIntegrity: false };
+  for (let index = 0; index < argv.length; index += 1) {
+    const name = argv[index];
+    if (name === '--full-checks') options.qa = 'full';
+    else if (name === '--startup-integrity') options.startupIntegrity = true;
+    else if (name === '--qa' || name === '--outputs') {
+      const value = argv[++index];
+      if (!value) throw new Error(`参数 ${name} 缺少值。`);
+      if (name === '--qa') options.qa = value;
+      else options.outputs = new Set(value.split(',').map(item => item.trim()).filter(Boolean));
+    } else throw new Error(`未知本地发行参数：${name}`);
+  }
+  if (!['none', 'targeted', 'full'].includes(options.qa)) throw new Error('QA 级别必须是 none、targeted 或 full。');
+  const unknownOutputs = [...options.outputs].filter(item => !['current', 'zip', 'installer'].includes(item));
+  if (options.outputs.size === 0 || unknownOutputs.length > 0) {
+    throw new Error(`发行输出必须从 current、zip、installer 中选择：${unknownOutputs.join(', ')}`);
+  }
+  return options;
+}
+
+function manifestMatches(target, commit) {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(target, 'release-manifest.json'), 'utf8'));
+    return manifest.version === packageJson.version && manifest.commit === commit;
+  } catch {
+    return false;
+  }
+}
 
 function run(command, args, options = {}) {
   return execFileSync(command, args, {
@@ -43,7 +77,7 @@ async function readJson(targetPath, label) {
   }
 }
 
-async function prepareReleasePrerequisites(npmCli) {
+async function prepareNpmDependencies(npmCli) {
   const electronPackage = path.join(projectRoot, 'node_modules', 'electron', 'package.json');
   const electronExtractorPackage = path.join(
     projectRoot,
@@ -56,6 +90,10 @@ async function prepareReleasePrerequisites(npmCli) {
     console.log('缺少本地 npm 依赖，正在按锁文件安装一次。');
     run(process.execPath, [npmCli, 'ci'], { timeout: 600000 });
   }
+}
+
+async function prepareReleasePrerequisites(npmCli) {
+  await prepareNpmDependencies(npmCli);
 
   const sevenZipPath = path.join(projectRoot, 'tools', '7zip', '7z.exe');
   const ffmpegPath = path.join(projectRoot, 'tools', 'ffmpeg', 'ffmpeg.exe');
@@ -180,21 +218,17 @@ async function replacePackage(digest, suffix) {
 }
 
 async function main() {
-  const argumentsSet = new Set(process.argv.slice(2));
-  const fullChecks = argumentsSet.delete('--full-checks');
-  if (argumentsSet.size > 0) {
-    throw new Error(`未知本地发行参数：${[...argumentsSet].join(', ')}`);
-  }
+  const options = parseOptions(process.argv.slice(2));
   if (process.platform !== 'win32' || process.arch !== 'x64') {
     throw new Error('本地发行只支持 Windows x64。');
   }
   for (const target of [
     stagingBuild, stagedZip, layout.currentBuild, layout.packageRoot,
-    layout.historyRoot, layout.productionData
+    layout.historyRoot, layout.productionData, layout.releaseRunsRoot
   ]) {
     assertPathInsideLocalRoot(target, layout.root);
   }
-  assertApplicationStopped();
+  if (options.outputs.has('current')) assertApplicationStopped();
 
   const status = run('git', ['status', '--porcelain=v1', '--untracked-files=normal'], {
     encoding: 'utf8',
@@ -204,31 +238,55 @@ async function main() {
     throw new Error('发行前工作树必须干净；请先提交本轮修改。');
   }
 
-  const npmCli = String(process.env.npm_execpath || '').trim();
-  if (!npmCli) throw new Error('无法定位当前 npm CLI。请通过 npm run release:local 启动。');
-  await prepareReleasePrerequisites(npmCli);
-  run(process.execPath, [path.join('scripts', 'prepare-electron-runtime.js')]);
-
-  console.log(fullChecks
-    ? '本地发行模式：完整验证'
-    : '本地发行模式：日常快速提升（跳过完整源码测试矩阵）');
-  if (fullChecks) {
-    for (const script of [
-      'verify:dependencies', 'check', 'test', 'publish:check', 'verify:tools'
-    ]) {
-      run(process.execPath, [npmCli, 'run', script]);
-    }
-  }
-
   const commit = run('git', ['rev-parse', 'HEAD'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'inherit']
   }).trim();
-  await fsp.mkdir(layout.stagingRoot, { recursive: true });
-  await fsp.rm(stagedZip, { force: true });
-  run(process.execPath, [path.join('scripts', 'build-release.js')], {
-    env: { ...process.env, HAMSTER_RELEASE_COMMIT: commit }
+  const checkpoint = await openCheckpoint({
+    version: packageJson.version,
+    commit,
+    request: { qa: options.qa, outputs: [...options.outputs].sort(), startupIntegrity: options.startupIntegrity }
   });
+  await runStage(checkpoint, 'source', async () => ({ clean: true }));
+  if (options.qa === 'none' && options.outputs.size === 1 && options.outputs.has('current') &&
+      manifestMatches(layout.currentBuild, commit) && checkpoint.state.stages.smoke?.status === 'success') {
+    console.log(`Current 已对应 ${commit}，复用既有构建和烟雾凭据：${layout.currentBuild}`);
+    return;
+  }
+
+  const npmCli = String(process.env.npm_execpath || '').trim();
+  if (!npmCli) throw new Error('无法定位当前 npm CLI。请通过 npm run release:local 启动。');
+  const qaStrength = { none: 0, targeted: 1, full: 2 };
+  if (options.qa !== 'none') await prepareNpmDependencies(npmCli);
+  await runStage(checkpoint, 'qa', async () => {
+    if (options.qa === 'full') {
+      for (const script of ['publish:check', 'check', 'test:full']) {
+        run(process.execPath, [npmCli, 'run', script]);
+      }
+    } else if (options.qa === 'targeted') {
+      run(process.execPath, [path.join('scripts', 'qa-plan.js'), '--execute', '--base', 'HEAD^']);
+    }
+    return { level: options.qa };
+  }, { reusable: receipt => qaStrength[receipt.result?.level] >= qaStrength[options.qa] });
+  await runStage(checkpoint, 'dependencies', async () => {
+    await prepareReleasePrerequisites(npmCli);
+    run(process.execPath, [path.join('scripts', 'prepare-electron-runtime.js'), '--allow-download']);
+    if (options.qa === 'full') run(process.execPath, [npmCli, 'run', 'verify:tools']);
+    return { electron: packageJson.devDependencies.electron, toolsVerified: options.qa === 'full' };
+  }, { reusable: receipt => [
+    path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe'),
+    path.join(projectRoot, 'tools', '7zip', '7z.exe'),
+    path.join(projectRoot, 'tools', 'ffmpeg', 'ffmpeg.exe')
+  ].every(fs.existsSync) && (options.qa !== 'full' || receipt.result?.toolsVerified === true) });
+
+  console.log(`本地构建：QA=${options.qa}，输出=${[...options.outputs].join(',')}`);
+  await fsp.mkdir(layout.stagingRoot, { recursive: true });
+  await runStage(checkpoint, 'build', async () => {
+    run(process.execPath, [path.join('scripts', 'build-release.js')], {
+      env: { ...process.env, HAMSTER_RELEASE_COMMIT: commit }
+    });
+    return { directory: stagingBuild };
+  }, { reusable: () => manifestMatches(stagingBuild, commit) });
 
   const manifest = JSON.parse(await fsp.readFile(
     path.join(stagingBuild, 'release-manifest.json'),
@@ -238,44 +296,39 @@ async function main() {
     throw new Error('发行清单与当前版本或提交不一致。');
   }
 
-  const sevenZip = path.join(projectRoot, 'tools', '7zip', '7z.exe');
-  run(sevenZip, ['a', '-tzip', '-mx=9', stagedZip, releaseName], {
-    cwd: layout.stagingRoot
-  });
-  run(sevenZip, ['t', stagedZip]);
-  const digest = await hashFile(stagedZip);
-
   const smokeRoot = path.join(
     layout.root,
     'development',
     'smoke',
     `release-${Date.now()}`
   );
-  await fsp.mkdir(smokeRoot, { recursive: true });
-  try {
-    const smokeResultPath = path.join(smokeRoot, 'smoke-result.json');
-    run(path.join(stagingBuild, 'HamsterArchiver.exe'), [], {
-      env: {
-        ...process.env,
-        HAMSTER_SMOKE_TEST: '1',
-        HAMSTER_SMOKE_USER_DATA_DIR: smokeRoot,
-        // Hosted Windows runners do not reliably preserve stdout from a GUI
-        // executable. The app writes this only after every smoke assertion.
-        HAMSTER_SMOKE_RESULT_FILE: smokeResultPath
-      },
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 120000
-    });
-    const smokeResult = await readJson(smokeResultPath, '发行包烟雾测试结果');
-    if (!smokeResult.ok || smokeResult.stage !== 'complete' ||
-        smokeResult.version !== packageJson.version || !smokeResult.completedAt) {
-      const details = smokeResult.details ? ` ${JSON.stringify(smokeResult.details)}` : '';
-      throw new Error(`发行包烟雾测试失败：${smokeResult.stage || '未知阶段'}。${details}`);
+  await runStage(checkpoint, 'smoke', async () => {
+    await fsp.mkdir(smokeRoot, { recursive: true });
+    try {
+      const smokeResultPath = path.join(smokeRoot, 'smoke-result.json');
+      run(path.join(stagingBuild, 'HamsterArchiver.exe'), [], {
+        env: {
+          ...process.env,
+          HAMSTER_SMOKE_TEST: '1',
+          HAMSTER_SMOKE_MODE: 'minimal',
+          HAMSTER_SMOKE_USER_DATA_DIR: smokeRoot,
+          HAMSTER_SMOKE_RESULT_FILE: smokeResultPath
+        },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 120000
+      });
+      const smokeResult = await readJson(smokeResultPath, '发行包烟雾测试结果');
+      if (!smokeResult.ok || smokeResult.stage !== 'complete' ||
+          smokeResult.version !== packageJson.version || !smokeResult.completedAt) {
+        const details = smokeResult.details ? ` ${JSON.stringify(smokeResult.details)}` : '';
+        throw new Error(`发行包烟雾测试失败：${smokeResult.stage || '未知阶段'}。${details}`);
+      }
+      return smokeResult;
+    } finally {
+      await fsp.rm(smokeRoot, { recursive: true, force: true });
     }
-  } finally {
-    await fsp.rm(smokeRoot, { recursive: true, force: true });
-  }
+  });
 
   const startupIntegrityRoot = path.join(
     layout.root,
@@ -283,8 +336,9 @@ async function main() {
     'smoke',
     `startup-integrity-${Date.now()}`
   );
-  await fsp.mkdir(startupIntegrityRoot, { recursive: true });
-  try {
+  if (options.startupIntegrity) await runStage(checkpoint, 'startup-integrity', async () => {
+    await fsp.mkdir(startupIntegrityRoot, { recursive: true });
+    try {
     const cachePath = path.join(startupIntegrityRoot, 'cache', 'release-integrity-v1.json');
     const cacheReceipts = [];
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -312,44 +366,52 @@ async function main() {
         cacheReceipts[0].modifiedMs !== cacheReceipts[1].modifiedMs) {
       throw new Error('打包启动完整性缓存在第二次启动时被重写，未按预期命中。');
     }
-  } finally {
-    await fsp.rm(startupIntegrityRoot, { recursive: true, force: true });
-  }
+    } finally {
+      await fsp.rm(startupIntegrityRoot, { recursive: true, force: true });
+    }
+    return { startupIntegrity: true };
+  }, { reusable: receipt => receipt.result?.startupIntegrity === true });
 
-  // A local test release is only complete when both desktop distributions are
-  // available: the portable Current executable and the NSIS installer.
-  run(process.execPath, [path.join('scripts', 'build-installer.js')], {
-    timeout: 1800000
-  });
-
-  await fsp.writeFile(
-    path.join(stagingBuild, 'user-data-location.json'),
-    JSON.stringify({ userDataDirectory: '../../data/production' }, null, 2) + '\n',
-    'utf8'
-  );
   await fsp.mkdir(layout.productionData, { recursive: true });
   await fsp.mkdir(layout.historyRoot, { recursive: true });
   await fsp.mkdir(layout.packageRoot, { recursive: true });
 
   const suffix = new Date().toISOString().replace(/[:.]/g, '-');
-  const previousCurrent = await promoteCurrent(suffix);
-  try {
-    await replacePackage(digest, suffix);
-  } catch (error) {
-    if (await exists(layout.currentBuild)) {
-      await renameWithRetry(layout.currentBuild, stagingBuild);
-    }
-    if (previousCurrent) await renameWithRetry(previousCurrent, layout.currentBuild);
-    throw error;
-  }
+  let digest = null;
+  if (options.outputs.has('zip')) digest = await runStage(checkpoint, 'zip', async () => {
+    await fsp.rm(stagedZip, { force: true });
+    const sevenZip = path.join(projectRoot, 'tools', '7zip', '7z.exe');
+    run(sevenZip, ['a', '-tzip', '-mx=5', stagedZip, releaseName], { cwd: layout.stagingRoot });
+    run(sevenZip, ['t', stagedZip]);
+    const zipDigest = await hashFile(stagedZip);
+    await replacePackage(zipDigest, suffix);
+    return zipDigest;
+  }, { reusable: receipt => fs.existsSync(finalZip) && fs.existsSync(finalSha) && receipt.result && fs.readFileSync(finalSha, 'ascii').startsWith(receipt.result) });
+
+  if (options.outputs.has('installer')) await runStage(checkpoint, 'installer', async () => {
+    run(process.execPath, [path.join('scripts', 'build-installer.js')], { timeout: 1800000 });
+    const digestText = (await fsp.readFile(installerSha, 'ascii')).trim();
+    return { path: installerPath, digest: digestText.split(/\s+/)[0] };
+  }, { reusable: async receipt => fs.existsSync(installerPath) && fs.existsSync(installerSha) &&
+    Boolean(receipt.result?.digest) && await hashFile(installerPath) === receipt.result.digest &&
+    fs.readFileSync(installerSha, 'ascii').startsWith(receipt.result.digest) });
+
+  if (options.outputs.has('current')) await runStage(checkpoint, 'promote-current', async () => {
+    await fsp.writeFile(
+      path.join(stagingBuild, 'user-data-location.json'),
+      JSON.stringify({ userDataDirectory: '../../data/production' }, null, 2) + '\n',
+      'utf8'
+    );
+    await promoteCurrent(suffix);
+    return { directory: layout.currentBuild };
+  }, { reusable: () => manifestMatches(layout.currentBuild, commit) });
 
   console.log('');
-  console.log(`发行模式：${fullChecks ? '完整验证' : '日常快速提升'}`);
-  console.log(`当前构建：${layout.currentBuild}`);
-  console.log(`便携版程序：${path.join(layout.currentBuild, 'HamsterArchiver.exe')}`);
-  console.log(`发行压缩包：${finalZip}`);
-  console.log(`安装程序：${path.join(layout.installerRoot, `HamsterArchiver-Setup-v${packageJson.version}-win-x64.exe`)}`);
-  console.log(`SHA-256：${digest}`);
+  console.log(`QA 级别：${options.qa}`);
+  console.log(`检查点：${checkpoint.target}`);
+  if (options.outputs.has('current')) console.log(`当前构建：${layout.currentBuild}`);
+  if (options.outputs.has('zip')) console.log(`发行压缩包：${finalZip}\nSHA-256：${digest}`);
+  if (options.outputs.has('installer')) console.log(`安装程序：${installerPath}`);
 }
 
 main().catch((error) => {

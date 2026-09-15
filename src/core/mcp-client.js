@@ -8,8 +8,15 @@ const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
 const { spawn } = require('node:child_process');
+const { createDesktopLaunchRequest } = require('./mcp-launch');
 
 const MAX_MESSAGE_BYTES = 1024 * 1024;
+const MCP_ELECTRON_COMPATIBILITY_SWITCHES = ['--disable-crash-reporter', '--disable-breakpad'];
+const WINDOWS_DESKTOP_BROKER_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  '$shell = New-Object -ComObject Shell.Application',
+  "$shell.ShellExecute($env:HAMSTER_MCP_APPLICATION, '', $env:HAMSTER_MCP_WORKING_DIRECTORY, 'open', 0)"
+].join('; ');
 
 function parseCli(argv) {
   const args = [...argv];
@@ -23,6 +30,7 @@ function parseCli(argv) {
     if (args[index] === '--app-executable') { appExecutable = args[index + 1] || ''; args.splice(index, 2); continue; }
     if (args[index] === '--connection') { connectionFile = args[index + 1] || ''; args.splice(index, 2); continue; }
     if (args[index] === '--json') { json = args[index + 1] || ''; args.splice(index, 2); continue; }
+    if (MCP_ELECTRON_COMPATIBILITY_SWITCHES.includes(args[index])) { args.splice(index, 1); continue; }
     index += 1;
   }
   return { command, args, showUi, appExecutable, connectionFile, json };
@@ -38,19 +46,22 @@ function resolveApplicationLaunch(appExecutable) {
   return { executable: electron, prefixArgs: [path.resolve(__dirname, '..', '..')] };
 }
 
-async function waitForReady(readyFile, timeoutMs = 20_000, getLaunchError = () => null) {
+async function waitForReady(readyFile, timeoutMs = 20_000, getLaunchFailure = () => null) {
   const deadline = Date.now() + timeoutMs;
-  let lastError;
   while (Date.now() < deadline) {
-    const launchError = getLaunchError();
-    if (launchError) throw new Error(`Could not start Hamster Archiver: ${launchError.message}`);
+    const launchFailure = getLaunchFailure();
+    if (launchFailure) throw launchFailure;
     try {
       const ready = JSON.parse(await fs.readFile(readyFile, 'utf8'));
       if (typeof ready.connectionFile === 'string' && path.isAbsolute(ready.connectionFile)) return ready.connectionFile;
-    } catch (error) { lastError = error; }
+    } catch { /* The ready file is created only after application initialization. */ }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error(`Hamster Archiver MCP did not become ready${lastError ? `: ${lastError.message}` : ''}`);
+  throw new Error(
+    `Hamster Archiver MCP did not become ready within ${Math.ceil(timeoutMs / 1000)} seconds. ` +
+    'The AI client may be blocking local desktop processes; allow application launches and retry, ' +
+    'or open HamsterArchiver.exe once and reconnect.'
+  );
 }
 
 async function startOrConnect(options) {
@@ -58,14 +69,80 @@ async function startOrConnect(options) {
   const launch = resolveApplicationLaunch(options.appExecutable);
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
-  const args = [...launch.prefixArgs, '--enable-mcp', '--background', `--mcp-ready-file=${readyFile}`];
-  if (options.showUi) args.push('--show-ui');
-  const child = spawn(launch.executable, args, { cwd: path.dirname(launch.executable), detached: true, stdio: 'ignore', windowsHide: !options.showUi, env });
-  let launchError = null;
-  child.once('error', (error) => { launchError = error; });
-  child.unref();
-  try { return await waitForReady(readyFile, 20_000, () => launchError); }
-  finally { await fs.rm(readyFile, { force: true }).catch(() => {}); }
+  let requestFile = '';
+  async function startDirectly() {
+    const args = [
+      ...launch.prefixArgs,
+      ...MCP_ELECTRON_COMPATIBILITY_SWITCHES,
+      '--enable-mcp',
+      '--background',
+      `--mcp-ready-file=${readyFile}`
+    ];
+    if (options.showUi) args.push('--show-ui');
+    const child = spawn(launch.executable, args, { cwd: path.dirname(launch.executable), detached: true, stdio: 'ignore', windowsHide: !options.showUi, env });
+    let launchFailure = null;
+    child.once('error', (error) => {
+      launchFailure = new Error(`Could not start Hamster Archiver: ${error.message}`);
+    });
+    child.once('exit', (code, signal) => {
+      if (code === 0) return;
+      const outcome = signal ? `signal ${signal}` : `exit code ${code}`;
+      launchFailure = new Error(
+        `Hamster Archiver exited before MCP was ready (${outcome}). ` +
+        'The AI client may be blocking local Electron processes.'
+      );
+    });
+    child.unref();
+    return waitForReady(readyFile, 20_000, () => launchFailure);
+  }
+  try {
+    if (process.platform === 'win32' && launch.prefixArgs.length === 0) {
+      requestFile = await createDesktopLaunchRequest({
+        applicationExecutable: launch.executable,
+        readyFile,
+        showUi: options.showUi
+      });
+      const windowsRoot = env.SystemRoot || env.WINDIR || 'C:\\Windows';
+      const powerShell = path.join(windowsRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      const encodedBrokerScript = Buffer.from(WINDOWS_DESKTOP_BROKER_SCRIPT, 'utf16le').toString('base64');
+      const broker = spawn(powerShell, [
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encodedBrokerScript
+      ], {
+        cwd: path.dirname(launch.executable),
+        detached: false,
+        stdio: 'ignore',
+        windowsHide: true,
+        env: {
+          ...env,
+          HAMSTER_MCP_APPLICATION: launch.executable,
+          HAMSTER_MCP_WORKING_DIRECTORY: path.dirname(launch.executable)
+        }
+      });
+      let brokerFailure = null;
+      broker.once('error', (error) => {
+        brokerFailure = new Error(`Could not ask the Windows desktop to start Hamster Archiver: ${error.message}`);
+      });
+      broker.once('exit', (code, signal) => {
+        if (code === 0) return;
+        const outcome = signal ? `signal ${signal}` : `exit code ${code}`;
+        brokerFailure = new Error(`The Windows desktop could not start Hamster Archiver (${outcome}).`);
+      });
+      broker.unref();
+      try {
+        return await waitForReady(readyFile, 20_000, () => brokerFailure);
+      } catch {
+        await fs.rm(requestFile, { force: true }).catch(() => {});
+        requestFile = '';
+        return await startDirectly();
+      }
+    }
+    return await startDirectly();
+  } finally {
+    await Promise.all([
+      fs.rm(readyFile, { force: true }).catch(() => {}),
+      requestFile ? fs.rm(requestFile, { force: true }).catch(() => {}) : Promise.resolve()
+    ]);
+  }
 }
 
 async function request(connectionFile, message) {
@@ -156,4 +233,12 @@ async function main(argv = process.argv.slice(2)) {
 }
 
 if (require.main === module) main().catch((error) => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
-module.exports = { main, parseCli, request, resolveApplicationLaunch, startOrConnect, waitForReady };
+module.exports = {
+  MCP_ELECTRON_COMPATIBILITY_SWITCHES,
+  main,
+  parseCli,
+  request,
+  resolveApplicationLaunch,
+  startOrConnect,
+  waitForReady
+};

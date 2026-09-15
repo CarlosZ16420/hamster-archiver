@@ -171,6 +171,7 @@ async function main() {
     'resources/app/src/core/mcp-server.js',
     'resources/app/src/core/mcp-tools.js',
     'resources/app/src/core/mcp-client.js',
+    'resources/app/src/core/mcp-launch.js',
     'resources/app/src/core/mcp-capabilities.js',
     'resources/app/src/core/mcp-application-services.js',
     'resources/app/src/core/mcp-user-data-migration-worker.js',

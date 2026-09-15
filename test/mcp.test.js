@@ -12,6 +12,15 @@ const { createRpcHandler, startMcpServer } = require('../src/core/mcp-server');
 const { QueueManager } = require('../src/core/queue-manager');
 const { AppStore } = require('../src/core/store');
 const { createArchivePublicationReceipt } = require('../src/core/archive-engine');
+const {
+  MCP_ELECTRON_COMPATIBILITY_SWITCHES,
+  parseCli,
+  waitForReady
+} = require('../src/core/mcp-client');
+const {
+  createDesktopLaunchRequest,
+  takeDesktopLaunchRequest
+} = require('../src/core/mcp-launch');
 
 function fakeManager() {
   return {
@@ -31,6 +40,31 @@ function fakeManager() {
     emit() {}
   };
 }
+
+test('MCP launcher compatibility switch is accepted and launch failures do not wait for timeout', async () => {
+  assert.deepEqual(MCP_ELECTRON_COMPATIBILITY_SWITCHES, ['--disable-crash-reporter', '--disable-breakpad']);
+  assert.equal(parseCli(['describe', ...MCP_ELECTRON_COMPATIBILITY_SWITCHES]).command, 'describe');
+  const startedAt = Date.now();
+  await assert.rejects(
+    waitForReady(path.join(os.tmpdir(), 'hamster-mcp-ready-missing.json'), 1_000, () => new Error('restricted child process')),
+    /restricted child process/
+  );
+  assert.ok(Date.now() - startedAt < 500, 'known launch failures should be reported immediately');
+});
+
+test('desktop launch requests are bound to the intended executable and consumed once', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-mcp-launch-test-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const executable = path.join(root, 'HamsterArchiver.exe');
+  const readyFile = path.join(root, `hamster-mcp-ready-${process.pid}-${crypto.randomBytes(16).toString('hex')}.json`);
+  await createDesktopLaunchRequest({ applicationExecutable: executable, readyFile, showUi: true, tempDirectory: root });
+  assert.equal(takeDesktopLaunchRequest({ applicationExecutable: path.join(root, 'Other.exe'), tempDirectory: root }), null);
+  assert.deepEqual(takeDesktopLaunchRequest({ applicationExecutable: executable, tempDirectory: root }), {
+    readyFile,
+    showUi: true
+  });
+  assert.equal(takeDesktopLaunchRequest({ applicationExecutable: executable, tempDirectory: root }), null);
+});
 
 test('MCP reads are paginated and do not expose passwords or thumbnail paths', async () => {
   const service = createMcpTools(fakeManager());

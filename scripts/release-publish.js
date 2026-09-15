@@ -1,10 +1,12 @@
 'use strict';
 
 const fs = require('node:fs/promises');
+const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { hashFile } = require('../src/core/tool-integrity');
 const { makeLocalLayout } = require('../src/core/local-paths');
+const { openCheckpoint, runStage } = require('./release-checkpoint');
 const version = require('../package.json').version;
 const root = path.resolve(__dirname, '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -94,8 +96,12 @@ function preflight(repo, tag, commandRunner = run) {
 
 async function verifyFiles(expectedCommit = run('git', ['rev-parse', 'HEAD'])) {
   const layout = makeLocalLayout(root);
+  const portableStaging = path.join(layout.stagingRoot, `HamsterArchiver-v${version}-win-x64`);
+  const portableManifest = await fs.access(path.join(portableStaging, 'release-manifest.json'))
+    .then(() => path.join(portableStaging, 'release-manifest.json'))
+    .catch(() => path.join(layout.currentBuild, 'release-manifest.json'));
   for (const manifestPath of [
-    path.join(layout.currentBuild, 'release-manifest.json'),
+    portableManifest,
     path.join(layout.stagingRoot, `HamsterArchiver-v${version}-win-x64-installed`, 'release-manifest.json')
   ]) {
     const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
@@ -113,11 +119,11 @@ async function verifyFiles(expectedCommit = run('git', ['rev-parse', 'HEAD'])) {
     const checksum = (await fs.readFile(checksumFile, 'ascii')).trim();
     const digest = await hashFile(file);
     if (checksum !== `${digest} *${path.basename(file)}`) throw new Error(`Checksum mismatch: ${path.basename(file)}`);
-    for (const target of [file, checksumFile]) {
-      const stat = await fs.stat(target);
-      if (!stat.size) throw new Error(`Empty release file: ${target}`);
-      assets.push({ path: target, name: path.basename(target), size: stat.size, digest: `sha256:${await hashFile(target)}` });
-    }
+    const fileStat = await fs.stat(file);
+    const checksumStat = await fs.stat(checksumFile);
+    if (!fileStat.size || !checksumStat.size) throw new Error(`Empty release file: ${file}`);
+    assets.push({ path: file, name: path.basename(file), size: fileStat.size, digest: `sha256:${digest}` });
+    assets.push({ path: checksumFile, name: path.basename(checksumFile), size: checksumStat.size, digest: `sha256:${await hashFile(checksumFile)}` });
   }
   return assets;
 }
@@ -131,6 +137,35 @@ function planUploads(local, remote) {
     }
     return false;
   });
+}
+
+async function downloadVerifiedReleaseAssets(repo, tag, commandRunner = run) {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), `hamster-release-mirror-${tag}-`));
+  const names = expectedReleaseAssetNames(tag);
+  try {
+    commandRunner('gh', [
+      'release', 'download', tag, '--repo', repo, '--dir', directory, '--clobber',
+      ...names.flatMap(name => ['--pattern', name])
+    ], { timeout: 1800000 });
+    const assets = [];
+    for (const name of names) {
+      const target = path.join(directory, name);
+      const stat = await fs.stat(target);
+      if (!stat.isFile() || !stat.size) throw new Error(`Downloaded Release asset is empty: ${name}`);
+      assets.push({ path: target, name, size: stat.size, digest: `sha256:${await hashFile(target)}` });
+    }
+    for (const binary of assets.filter(asset => !asset.name.endsWith('.sha256'))) {
+      const sidecar = assets.find(asset => asset.name === `${binary.name}.sha256`);
+      const text = await fs.readFile(sidecar.path, 'ascii');
+      if (text.trim() !== `${binary.digest.slice(7)} *${binary.name}`) {
+        throw new Error(`Downloaded Release checksum does not match: ${binary.name}`);
+      }
+    }
+    return { assets, cleanup: () => fs.rm(directory, { recursive: true, force: true }) };
+  } catch (error) {
+    await fs.rm(directory, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function validateMirrorTarget(sourceRepo, targetRepo, tag, commandRunner = run) {
@@ -315,24 +350,34 @@ async function mirrorReleaseArtifacts(sourceRepo, targetRepo, tag, dependencies 
   const wait = dependencies.wait || delay;
   const waitMs = dependencies.waitMs ?? RELEASE_READ_BACK_DELAY_MS;
   const sourceCommit = validateMirrorTarget(sourceRepo, targetRepo, tag, commandRunner);
-  const fileVerifier = dependencies.fileVerifier || verifyFiles;
-  const assets = await fileVerifier(sourceCommit);
-  assertMatchingReleaseAssets(assets, getReleaseByTag(sourceRepo, tag, commandRunner), tag);
-  return releaseArtifacts(targetRepo, tag, {
-    commandRunner,
-    fileVerifier: async () => assets,
-    sourceRoot,
-    wait,
-    waitMs,
-    preflightRelease: () => {
-      const release = getReleaseByTag(targetRepo, tag, commandRunner);
-      if (release && !release.draft) {
-        if (completePublishedRelease(release, tag)) return release;
-        throw new Error('The public Release exists but is incomplete or marked as a prerelease.');
-      }
-      return release;
+  const existingTarget = getReleaseByTag(targetRepo, tag, commandRunner);
+  if (completePublishedRelease(existingTarget, tag)) return existingTarget;
+  const checkpoint = await openCheckpoint({ version, commit: sourceCommit, request: { sourceRepo, targetRepo, tag } });
+  return runStage(checkpoint, 'publish-public', async () => {
+    const downloaded = dependencies.fileVerifier
+      ? { assets: await dependencies.fileVerifier(sourceCommit), cleanup: async () => {} }
+      : await downloadVerifiedReleaseAssets(sourceRepo, tag, commandRunner);
+    try {
+      assertMatchingReleaseAssets(downloaded.assets, getReleaseByTag(sourceRepo, tag, commandRunner), tag);
+      return await releaseArtifacts(targetRepo, tag, {
+        commandRunner,
+        fileVerifier: async () => downloaded.assets,
+        sourceRoot,
+        wait,
+        waitMs,
+        preflightRelease: () => {
+          const release = getReleaseByTag(targetRepo, tag, commandRunner);
+          if (release && !release.draft) {
+            if (completePublishedRelease(release, tag)) return release;
+            throw new Error('The public Release exists but is incomplete or marked as a prerelease.');
+          }
+          return release;
+        }
+      });
+    } finally {
+      await downloaded.cleanup();
     }
-  });
+  }, { reusable: () => completePublishedRelease(getReleaseByTag(targetRepo, tag, commandRunner), tag) });
 }
 
 async function main() {
@@ -357,4 +402,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { assertDraftNotes, assertMatchingReleaseAssets, readReleaseNotes, completeDraft, completePublishedRelease, errorText, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, mirrorReleaseArtifacts, parseArgs, planUploads, preflight, publishCompleteDraft, readReleaseWithOneDelayedRetry, releaseArtifacts, releaseState, run, uploadAssetWithRecovery, validateMirrorTarget, validateTarget, verifyFiles };
+module.exports = { assertDraftNotes, assertMatchingReleaseAssets, readReleaseNotes, completeDraft, completePublishedRelease, downloadVerifiedReleaseAssets, errorText, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, mirrorReleaseArtifacts, parseArgs, planUploads, preflight, publishCompleteDraft, readReleaseWithOneDelayedRetry, releaseArtifacts, releaseState, run, uploadAssetWithRecovery, validateMirrorTarget, validateTarget, verifyFiles };

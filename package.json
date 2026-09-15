@@ -1,6 +1,6 @@
 {
   "name": "hamster-archiver",
-  "version": "4.6.8",
+  "version": "4.6.9",
   "private": true,
   "author": "CarlosZ16420",
   "license": "MIT",
@@ -18,6 +18,9 @@
     "start": "electron .",
     "mcp": "node src/core/mcp-client.js",
     "test": "node --test \"test/**/*.test.js\"",
+    "test:full": "node --test \"test/**/*.test.js\"",
+    "test:changed": "node scripts/qa-plan.js --execute",
+    "test:group": "node scripts/qa-plan.js --execute --group",
     "check": "node scripts/check-syntax.js",
     "verify:dependencies": "node scripts/verify-toolchain.js --dependencies-only",
     "verify:tools": "node scripts/verify-toolchain.js --installed",

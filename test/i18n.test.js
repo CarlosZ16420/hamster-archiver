@@ -55,6 +55,7 @@ if (!rendererDir) {
     assert.equal(i18n.translate('保存设置'), 'Save settings');
     assert.equal(i18n.translate('一键加入白名单'), 'Ignore Term');
     assert.equal(i18n.translate('未评分'), 'Unrated');
+    assert.equal(i18n.translate('随机漫步'), 'Surprise Me');
     assert.equal(i18n.translate('所选目录已经不存在。'), 'Selected folder no longer exists.');
     assert.equal(i18n.translate('入库'), 'Added');
     assert.equal(
@@ -390,7 +391,7 @@ if (!rendererDir) {
       // Symbols and layout-only text nodes never need entries.
       '!', '⇄', '·', '⌄', '×', '＋', '--:--', '1',
       // The onboarding language picker keeps its bilingual labels fixed.
-      'Language / 语言', '中文'
+      '语言/Language', '中文'
     ]);
     const uncovered = [];
     const consider = (raw) => {
@@ -404,5 +405,13 @@ if (!rendererDir) {
       consider(match[1]);
     }
     assert.deepEqual(uncovered, [], 'index.html strings missing from the i18n dictionary');
+  });
+
+  test('onboarding and discovery labels keep the intended compact copy', () => {
+    const app = fs.readFileSync(path.join(rendererDir, 'app.js'), 'utf8');
+    assert.match(html, /id="random-walk"[^>]*>随机漫步<\/button>/);
+    assert.doesNotMatch(html, /随机漫步\s*·\s*换一个/);
+    assert.match(html, /aria-label="语言\/Language"[\s\S]*?<span>语言\/Language<\/span>/);
+    assert.doesNotMatch(app, /🐹/, 'onboarding celebration must not include a hamster emoji');
   });
 }

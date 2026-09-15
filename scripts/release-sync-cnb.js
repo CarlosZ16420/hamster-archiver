@@ -23,7 +23,7 @@ function parseArgs(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 2) {
     if (!['--tag', '--github-repo', '--cnb-repo', '--attempts', '--make-latest'].includes(argv[index]) || !argv[index + 1]) {
-      throw new Error('Use --tag vX.Y.Z --github-repo OWNER/REPO --cnb-repo GROUP/REPO [--attempts 3] [--make-latest false].');
+      throw new Error('Use --tag vX.Y.Z --github-repo OWNER/REPO --cnb-repo GROUP/REPO [--attempts 2] [--make-latest false].');
     }
     const key = argv[index].slice(2).replace(/-([a-z])/g, (_match, letter) => letter.toUpperCase());
     options[key] = argv[index + 1];
@@ -56,7 +56,7 @@ function validateConfig(options, environment = process.env) {
   const githubRepo = options.githubRepo || environment.GITHUB_REPOSITORY || '';
   const cnbRepo = options.cnbRepo || environment.CNB_REPO_SLUG || '';
   const token = environment.CNB_TOKEN || '';
-  const attempts = Number(options.attempts || environment.CNB_SYNC_ATTEMPTS || 3);
+  const attempts = Number(options.attempts || environment.CNB_SYNC_ATTEMPTS || 2);
   const requestTimeoutMs = Number(environment.CNB_REQUEST_TIMEOUT_MS || DEFAULT_REQUEST_TIMEOUT_MS);
   const makeLatestValue = String(options.makeLatest ?? environment.CNB_MAKE_LATEST ?? 'false');
   if (!enabled) throw new Error(disabledMessage());
@@ -64,7 +64,7 @@ function validateConfig(options, environment = process.env) {
   if (githubRepo !== 'CarlosZ16420/hamster-archiver') throw new Error('GitHub source must be the authoritative CarlosZ16420/hamster-archiver repository.');
   if (!/^[^\s/]+(?:\/[^\s/]+)+$/.test(cnbRepo)) throw new Error('CNB_REPO_SLUG or --cnb-repo must identify the existing public CNB repository. No default is guessed.');
   if (!token) throw new Error('CNB_TOKEN is required. Configure its permissions against the current official CNB contract; this script cannot verify authorization from a declaration string. No synchronization was attempted.');
-  if (!Number.isInteger(attempts) || attempts < 1 || attempts > 5) throw new Error('CNB_SYNC_ATTEMPTS must be an integer from 1 to 5.');
+  if (!Number.isInteger(attempts) || attempts < 1 || attempts > 2) throw new Error('CNB_SYNC_ATTEMPTS must be 1 or 2.');
   if (!Number.isInteger(requestTimeoutMs) || requestTimeoutMs < 1_000 || requestTimeoutMs > 120_000) {
     throw new Error('CNB_REQUEST_TIMEOUT_MS must be an integer from 1000 to 120000.');
   }
@@ -87,7 +87,7 @@ function retryableError(error) {
     error?.status === 408 || error?.status === 429 || error?.status >= 500);
 }
 
-async function withRetry(operation, { attempts = 3, delay = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+async function withRetry(operation, { attempts = 2, delay = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try { return await operation(attempt); } catch (error) {
@@ -276,7 +276,7 @@ function assertCnbRelease(release, bundle) {
   return pending;
 }
 
-async function syncReleaseBundle(bundle, cnbClient, { attempts = 3, delay, enabled = false, makeLatest = false } = {}) {
+async function syncReleaseBundle(bundle, cnbClient, { attempts = 2, delay, enabled = false, makeLatest = false } = {}) {
   if (!enabled) {
     return { disabled: true, created: false, uploaded: [], skipped: [], reason: disabledMessage() };
   }
