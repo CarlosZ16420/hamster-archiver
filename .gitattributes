@@ -17,6 +17,7 @@ docs/private/ export-ignore
 docs/public-release-coverage-*.md export-ignore
 CHANGELOG.md export-ignore
 scripts/sync-public-snapshot.js export-ignore
+test/public-snapshot.test.js export-ignore
 docs/REPOSITORY_MAINTENANCE.md export-ignore
 ReadmeGlmversion.md export-ignore
 
