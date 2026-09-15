@@ -333,13 +333,16 @@ test('sync redirects are validated before the next host is contacted and network
   assert.equal(networkError.retryable, true);
 });
 
-test('workflow is default-disabled, repository-guarded, checks out github.sha, and scopes CNB_TOKEN to the sync step', async () => {
+test('workflow is default-disabled, repository-guarded, checks out github.sha, and scopes CNB_TOKEN to the two CNB write steps', async () => {
   const workflow = await fs.readFile(path.resolve(__dirname, '..', '.github', 'workflows', 'sync-cnb-release.yml'), 'utf8');
   assert.match(workflow, /if: github\.repository == 'CarlosZ16420\/hamster-archiver' && vars\.CNB_SYNC_ENABLED == 'true'/);
   assert.match(workflow, /vars\.CNB_SYNC_ENABLED != 'true'/);
   assert.match(workflow, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(workflow, /fetch-depth: 0/);
   assert.doesNotMatch(workflow, /ref: \$\{\{ github\.event\.release\.tag_name/);
-  assert.doesNotMatch(workflow.slice(0, workflow.indexOf('- name: Mirror')), /CNB_TOKEN:/);
+  assert.doesNotMatch(workflow.slice(0, workflow.indexOf('- name: Ensure')), /CNB_TOKEN:/);
+  assert.equal((workflow.match(/CNB_TOKEN: \$\{\{ secrets\.CNB \}\}/g) || []).length, 2);
+  assert.match(workflow.slice(workflow.indexOf('- name: Ensure'), workflow.indexOf('- name: Mirror')), /CNB_TOKEN: \$\{\{ secrets\.CNB \}\}/);
   assert.match(workflow.slice(workflow.indexOf('- name: Mirror')), /CNB_TOKEN: \$\{\{ secrets\.CNB \}\}/);
   assert.match(workflow, /CNB_SYNC_ENABLED: 'true'/);
   assert.match(workflow, /CNB_MAKE_LATEST: \$\{\{ github\.event_name == 'release' \|\| inputs\.make_latest \}\}/);

@@ -38,10 +38,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 1
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+      - name: Ensure the public source tag exists on CNB
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+          CNB_SYNC_ENABLED: 'true'
+          CNB_REPO_SLUG: ${{ vars.CNB_REPO_SLUG }}
+          CNB_TOKEN: ${{ secrets.CNB }}
+        run: node scripts/sync-cnb-source-tag.js --tag "$RELEASE_TAG" --github-repo "$GITHUB_REPOSITORY" --cnb-repo "$CNB_REPO_SLUG"
       - name: Mirror the published body and four existing attachments
         if: github.repository == 'CarlosZ16420/hamster-archiver' && vars.CNB_SYNC_ENABLED == 'true'
         env:
