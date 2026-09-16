@@ -8,6 +8,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const {
   assertEnoughDiskSpace,
+  assertUsableConfiguration,
   buildCompressArgs,
   buildVerifyArgs,
   createArchivePublicationReceipt,
@@ -95,6 +96,29 @@ test('disk-space guard rejects an impossibly large task instead of silently cont
     (error) => error.code === 'INSUFFICIENT_DISK_SPACE'
   );
   assert.ok(await fs.stat(os.tmpdir()));
+});
+
+test('archive configuration refuses to recreate a missing output folder', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-missing-output-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const executable = path.join(root, '7z.exe');
+  const source = path.join(root, 'source');
+  const output = path.join(root, 'deleted-output');
+  await fs.writeFile(executable, 'stub');
+  await fs.mkdir(source);
+
+  await assert.rejects(
+    assertUsableConfiguration({
+      sevenZipPath: executable,
+      archiveStagingDirectory: path.join(root, 'staging'),
+      archiveOutputDirectory: output,
+      repositoryDirectory: path.join(root, 'warehouse'),
+      processedSourceDirectory: '',
+      moveCompleted: false
+    }, source),
+    (error) => error.code === 'ARCHIVE_OUTPUT_DIRECTORY_MISSING'
+  );
+  await assert.rejects(fs.stat(output), (error) => error.code === 'ENOENT');
 });
 
 test('EXDEV publication fallback checks target space and reports the actual copy mode', async (t) => {

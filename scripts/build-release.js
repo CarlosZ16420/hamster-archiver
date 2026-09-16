@@ -7,6 +7,7 @@ const packageJson = require('../package.json');
 const { embedWindowsIcon } = require('./embed-windows-icon');
 const { createFileIntegrityEntries, hashFile } = require('../src/core/tool-integrity');
 const { compactReleaseNotesPayload } = require('../src/core/release-notes');
+const { capabilities } = require('../src/core/mcp-capabilities');
 const { dependencyLock, verifyToolchain } = require('./verify-toolchain');
 const { assertPathInsideLocalRoot, makeLocalLayout } = require('../src/core/local-paths');
 
@@ -121,6 +122,16 @@ async function main() {
   await fs.copyFile(path.join(projectRoot, 'docs', 'MCP.md'), path.join(outputRoot, 'docs', 'MCP.md'));
   await fs.copyFile(path.join(projectRoot, 'docs', 'AI-QUICKSTART.md'), path.join(outputRoot, 'docs', 'AI-QUICKSTART.md'));
   await fs.copyFile(path.join(projectRoot, 'llms.txt'), path.join(outputRoot, 'llms.txt'));
+  await fs.writeFile(path.join(outputRoot, 'ai-capabilities.json'), `${JSON.stringify({
+    schemaVersion: 2,
+    version: packageJson.version,
+    platform: 'win32-x64',
+    launcher: 'HamsterArchiver-MCP.cmd',
+    defaultMode: 'stdio',
+    cliCommands: ['doctor', 'describe', 'call'],
+    tools: ['hamster_discover', 'hamster_describe', 'hamster_call'],
+    capabilities: capabilities.map(({ name, domain, description, readOnly, risk }) => ({ name, domain, description, readOnly, risk }))
+  }, null, 2)}\n`, 'utf8');
   await fs.writeFile(path.join(appDirectory, 'package.json'), `${JSON.stringify({
     name: packageJson.name,
     productName: 'Hamster Archiver',
@@ -176,6 +187,10 @@ async function main() {
     'resources/app/src/core/mcp-application-services.js',
     'resources/app/src/core/mcp-user-data-migration-worker.js',
     'HamsterArchiver-MCP.cmd',
+    'ai-capabilities.json',
+    'llms.txt',
+    'docs/MCP.md',
+    'docs/AI-QUICKSTART.md',
     'resources/app/src/core/archive-engine.js',
     'resources/app/src/core/media-service.js',
     'resources/app/src/core/paths.js',

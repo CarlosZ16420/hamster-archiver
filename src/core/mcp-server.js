@@ -55,6 +55,8 @@ function createRpcHandler(toolService, version, lifecycle = {}) {
 
 async function startMcpServer(manager, userDataRoot, version, options = {}) {
   const token = crypto.randomBytes(32).toString('hex');
+  const instanceId = crypto.randomUUID();
+  const startedAt = new Date().toISOString();
   const authorization = Buffer.from(`Bearer ${token}`);
   const sessions = new Map();
   const expireSession = (sessionId) => {
@@ -83,7 +85,7 @@ async function startMcpServer(manager, userDataRoot, version, options = {}) {
     release(sessionId) {
       if (typeof sessionId === 'string') expireSession(sessionId);
     },
-    status() { return options.getRuntimeStatus?.() || {}; }
+    status() { return { instanceId, startedAt, version, ...(options.getRuntimeStatus?.() || {}) }; }
   };
   const dispatch = createRpcHandler(createMcpTools(manager, options.services || {}), version, lifecycle);
   const server = http.createServer(async (request, response) => {
@@ -132,10 +134,20 @@ async function startMcpServer(manager, userDataRoot, version, options = {}) {
   const connectionFile = path.join(directory, 'connection.json');
   try {
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-    await fs.writeFile(connectionFile, JSON.stringify({ url: `http://127.0.0.1:${server.address().port}/mcp`, token, pid: process.pid }), { mode: 0o600 });
+    await fs.writeFile(connectionFile, JSON.stringify({
+      schemaVersion: 2,
+      url: `http://127.0.0.1:${server.address().port}/mcp`,
+      token,
+      pid: process.pid,
+      instanceId,
+      startedAt,
+      version
+    }), { mode: 0o600 });
   } catch (error) { server.close(); throw error; }
   return {
     connectionFile,
+    instanceId,
+    startedAt,
     get sessionCount() { return sessions.size; },
     async close() {
       for (const timer of sessions.values()) clearTimeout(timer);

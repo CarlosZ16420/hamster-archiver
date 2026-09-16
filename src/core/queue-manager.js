@@ -606,6 +606,7 @@ class QueueManager extends EventEmitter {
     this.safetyHalt = this.config.pendingTrashSafetyHalt && typeof this.config.pendingTrashSafetyHalt === 'object'
       ? { ...this.config.pendingTrashSafetyHalt }
       : null;
+    this.automationRequests = [];
     this.services = services;
   }
 
@@ -625,6 +626,19 @@ class QueueManager extends EventEmitter {
     await this.reloadSimilarityIgnoreTerms({ rebuild: false });
     this.similarityStrength = normalizeSimilarityStrength(this.config.similarityStrength);
     this.jobs = await this.store.loadJobs(this.config.repositoryDirectory);
+    const savedAutomationRequests = typeof this.store.loadAutomationRequests === 'function'
+      ? await this.store.loadAutomationRequests()
+      : [];
+    const retentionStart = Date.now() - (30 * 24 * 60 * 60 * 1000);
+    const automationRequestCandidates = Array.isArray(savedAutomationRequests) ? savedAutomationRequests : [];
+    this.automationRequests = automationRequestCandidates
+      .filter((entry) => entry && typeof entry.requestId === 'string' &&
+        typeof entry.repositoryDirectory === 'string' && Array.isArray(entry.jobs) &&
+        Date.parse(entry.updatedAt || entry.createdAt || '') >= retentionStart)
+      .slice(-200);
+    if (this.automationRequests.length !== automationRequestCandidates.length && typeof this.store.saveAutomationRequests === 'function') {
+      await this.store.saveAutomationRequests(this.automationRequests);
+    }
     const loadedCatalog = await this.store.loadCatalog(this.config.repositoryDirectory);
     const migratedRepositoryFrom = String(this.config.migratedRepositoryFrom || '').trim();
     const shouldRelocateMigratedPaths = migratedRepositoryFrom &&
@@ -2818,6 +2832,75 @@ class QueueManager extends EventEmitter {
 
   async persistJobs() {
     await this.store.saveJobs(this.config.repositoryDirectory, this.jobs);
+    await this.refreshAutomationRequests();
+  }
+
+  automationJobSnapshot(job) {
+    return Object.fromEntries([
+      'id', 'mcpRequestId', 'sourcePath', 'displayName', 'processingMode', 'status', 'progress',
+      'stageText', 'errorCode', 'errorMessage', 'completedAt', 'archiveDirectory', 'archiveBaseName',
+      'sourceDisposition'
+    ].map((key) => [key, job?.[key]]));
+  }
+
+  findAutomationRequest(requestId) {
+    return this.automationRequests.find((entry) => entry.requestId === requestId &&
+      normalizeForComparison(entry.repositoryDirectory) === normalizeForComparison(this.config.repositoryDirectory)) || null;
+  }
+
+  async recordAutomationRequest({ requestId, fingerprint, mode, paths, jobs = [], failures = [] }) {
+    const now = new Date().toISOString();
+    const previous = this.findAutomationRequest(requestId);
+    const snapshots = new Map((previous?.jobs || []).map((job) => [job.id, job]));
+    for (const job of jobs) snapshots.set(job.id, this.automationJobSnapshot(job));
+    const entry = {
+      requestId,
+      fingerprint,
+      mode,
+      paths: [...paths],
+      repositoryDirectory: this.config.repositoryDirectory,
+      createdAt: previous?.createdAt || now,
+      updatedAt: now,
+      jobs: [...snapshots.values()],
+      failures: failures.map((failure) => ({ source: failure.source, code: failure.code, message: failure.message }))
+    };
+    this.automationRequests = this.automationRequests.filter((item) => item !== previous);
+    this.automationRequests.push(entry);
+    this.automationRequests = this.automationRequests.slice(-200);
+    await this.store.saveAutomationRequests?.(this.automationRequests);
+    return entry;
+  }
+
+  async refreshAutomationRequests() {
+    if (!this.automationRequests.length || typeof this.store.saveAutomationRequests !== 'function') return;
+    let changed = false;
+    const repositoryKey = normalizeForComparison(this.config.repositoryDirectory);
+    for (const request of this.automationRequests) {
+      if (normalizeForComparison(request.repositoryDirectory) !== repositoryKey) continue;
+      let requestChanged = false;
+      const currentById = new Map(this.jobs.filter((job) => job.mcpRequestId === request.requestId).map((job) => [job.id, job]));
+      for (let index = 0; index < (request.jobs || []).length; index += 1) {
+        const current = currentById.get(request.jobs[index].id);
+        if (!current) continue;
+        const snapshot = this.automationJobSnapshot(current);
+        if (JSON.stringify(request.jobs[index]) !== JSON.stringify(snapshot)) {
+          request.jobs[index] = snapshot;
+          requestChanged = true;
+        }
+      }
+      for (const current of currentById.values()) {
+        if (!(request.jobs || []).some((saved) => saved.id === current.id)) {
+          request.jobs ||= [];
+          request.jobs.push(this.automationJobSnapshot(current));
+          requestChanged = true;
+        }
+      }
+      if (requestChanged) {
+        request.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+    }
+    if (changed) await this.store.saveAutomationRequests(this.automationRequests);
   }
 
   createJob(task) {
@@ -2992,6 +3075,9 @@ class QueueManager extends EventEmitter {
 
     const summary = await inspectPath(sourcePath, sourceType);
     if (this.config.smallItemFilter && summary.totalBytes < this.config.minimumTaskBytes) {
+      const displayName = path.basename(sourcePath);
+      const thresholdMb = Math.round(this.config.minimumTaskBytes / MIB);
+      await this.log('warning', `“${displayName}”项目低于 ${thresholdMb} MB 的入库阈值，已跳过。`);
       throw new Error(`该项目只有 ${Math.max(0.1, summary.totalBytes / MIB).toFixed(1)} MB，低于当前 ${Math.round(this.config.minimumTaskBytes / MIB)} MB 的入库阈值。`);
     }
     const job = deferJobUntilNextRun(this.createJob({

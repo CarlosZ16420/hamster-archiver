@@ -9,6 +9,7 @@ const path = require('node:path');
 const MCP_DESKTOP_REQUEST_MAX_AGE_MS = 60_000;
 const MCP_DESKTOP_REQUEST_PATTERN = /^hamster-mcp-launch-\d+-[a-f0-9]{32}\.json$/i;
 const MCP_READY_FILE_PATTERN = /^hamster-mcp-ready-\d+-[a-f0-9]{32}\.json$/i;
+const MCP_DIAGNOSTIC_FILE_PATTERN = /^hamster-mcp-diagnostic-\d+-[a-f0-9]{32}\.json$/i;
 
 function samePath(left, right) {
   const normalize = (value) => path.resolve(value).replaceAll('\\', '/').toLowerCase();
@@ -21,9 +22,16 @@ function isValidMcpReadyFile(value, tempDirectory = os.tmpdir()) {
   return samePath(path.dirname(resolved), tempDirectory) && MCP_READY_FILE_PATTERN.test(path.basename(resolved));
 }
 
-async function createDesktopLaunchRequest({ applicationExecutable, readyFile, showUi = false, tempDirectory = os.tmpdir() }) {
+function isValidMcpDiagnosticFile(value, tempDirectory = os.tmpdir()) {
+  if (!value || !path.isAbsolute(value)) return false;
+  const resolved = path.resolve(value);
+  return samePath(path.dirname(resolved), tempDirectory) && MCP_DIAGNOSTIC_FILE_PATTERN.test(path.basename(resolved));
+}
+
+async function createDesktopLaunchRequest({ applicationExecutable, readyFile, diagnosticFile, showUi = false, tempDirectory = os.tmpdir() }) {
   const resolvedExecutable = path.resolve(applicationExecutable);
-  if (!path.isAbsolute(resolvedExecutable) || !isValidMcpReadyFile(readyFile, tempDirectory)) {
+  if (!path.isAbsolute(resolvedExecutable) || !isValidMcpReadyFile(readyFile, tempDirectory) ||
+      !isValidMcpDiagnosticFile(diagnosticFile, tempDirectory)) {
     throw new Error('Invalid MCP desktop launch request');
   }
   const requestFile = path.join(
@@ -34,6 +42,7 @@ async function createDesktopLaunchRequest({ applicationExecutable, readyFile, sh
     schemaVersion: 1,
     applicationExecutable: resolvedExecutable,
     readyFile: path.resolve(readyFile),
+    diagnosticFile: path.resolve(diagnosticFile),
     showUi: Boolean(showUi),
     createdAt: new Date().toISOString()
   })}\n`, { encoding: 'utf8', flag: 'wx' });
@@ -58,10 +67,12 @@ function takeDesktopLaunchRequest({ applicationExecutable, tempDirectory = os.tm
     const createdAt = Date.parse(request?.createdAt || '');
     if (request?.schemaVersion !== 1 || !Number.isFinite(createdAt) || Math.abs(now - createdAt) > MCP_DESKTOP_REQUEST_MAX_AGE_MS ||
         !samePath(request.applicationExecutable || '', applicationExecutable) ||
-        !isValidMcpReadyFile(request.readyFile, tempDirectory)) continue;
+        !isValidMcpReadyFile(request.readyFile, tempDirectory) ||
+        !isValidMcpDiagnosticFile(request.diagnosticFile, tempDirectory)) continue;
     try { fsImpl.unlinkSync(requestFile); } catch { continue; }
     return {
       readyFile: path.resolve(request.readyFile),
+      diagnosticFile: path.resolve(request.diagnosticFile),
       showUi: request.showUi === true
     };
   }
@@ -71,6 +82,7 @@ function takeDesktopLaunchRequest({ applicationExecutable, tempDirectory = os.tm
 module.exports = {
   MCP_DESKTOP_REQUEST_MAX_AGE_MS,
   createDesktopLaunchRequest,
+  isValidMcpDiagnosticFile,
   isValidMcpReadyFile,
   takeDesktopLaunchRequest
 };

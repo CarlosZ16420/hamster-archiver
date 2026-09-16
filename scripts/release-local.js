@@ -20,19 +20,16 @@ const installerPath = path.join(layout.installerRoot, `HamsterArchiver-Setup-v${
 const installerSha = `${installerPath}.sha256`;
 
 function parseOptions(argv) {
-  const options = { qa: 'none', outputs: new Set(['current']), startupIntegrity: false };
+  const options = { outputs: new Set(['current']), smoke: false };
   for (let index = 0; index < argv.length; index += 1) {
     const name = argv[index];
-    if (name === '--full-checks') options.qa = 'full';
-    else if (name === '--startup-integrity') options.startupIntegrity = true;
-    else if (name === '--qa' || name === '--outputs') {
+    if (name === '--smoke') options.smoke = true;
+    else if (name === '--outputs') {
       const value = argv[++index];
       if (!value) throw new Error(`参数 ${name} 缺少值。`);
-      if (name === '--qa') options.qa = value;
-      else options.outputs = new Set(value.split(',').map(item => item.trim()).filter(Boolean));
+      options.outputs = new Set(value.split(',').map(item => item.trim()).filter(Boolean));
     } else throw new Error(`未知本地发行参数：${name}`);
   }
-  if (!['none', 'targeted', 'full'].includes(options.qa)) throw new Error('QA 级别必须是 none、targeted 或 full。');
   const unknownOutputs = [...options.outputs].filter(item => !['current', 'zip', 'installer'].includes(item));
   if (options.outputs.size === 0 || unknownOutputs.length > 0) {
     throw new Error(`发行输出必须从 current、zip、installer 中选择：${unknownOutputs.join(', ')}`);
@@ -222,6 +219,9 @@ async function main() {
   if (process.platform !== 'win32' || process.arch !== 'x64') {
     throw new Error('本地发行只支持 Windows x64。');
   }
+  if (options.smoke && process.env.GITHUB_ACTIONS !== 'true') {
+    throw new Error('--smoke 仅供正式云端构建使用；本地 Current 和本地兜底不执行自动测试。');
+  }
   for (const target of [
     stagingBuild, stagedZip, layout.currentBuild, layout.packageRoot,
     layout.historyRoot, layout.productionData, layout.releaseRunsRoot
@@ -245,41 +245,27 @@ async function main() {
   const checkpoint = await openCheckpoint({
     version: packageJson.version,
     commit,
-    request: { qa: options.qa, outputs: [...options.outputs].sort(), startupIntegrity: options.startupIntegrity }
+    request: { outputs: [...options.outputs].sort(), smoke: options.smoke }
   });
   await runStage(checkpoint, 'source', async () => ({ clean: true }));
-  if (options.qa === 'none' && options.outputs.size === 1 && options.outputs.has('current') &&
-      manifestMatches(layout.currentBuild, commit) && checkpoint.state.stages.smoke?.status === 'success') {
-    console.log(`Current 已对应 ${commit}，复用既有构建和烟雾凭据：${layout.currentBuild}`);
+  if (options.outputs.size === 1 && options.outputs.has('current') && manifestMatches(layout.currentBuild, commit)) {
+    console.log(`Current 已对应 ${commit}，无需重新构建：${layout.currentBuild}`);
     return;
   }
 
   const npmCli = String(process.env.npm_execpath || '').trim();
   if (!npmCli) throw new Error('无法定位当前 npm CLI。请通过 npm run release:local 启动。');
-  const qaStrength = { none: 0, targeted: 1, full: 2 };
-  if (options.qa !== 'none') await prepareNpmDependencies(npmCli);
-  await runStage(checkpoint, 'qa', async () => {
-    if (options.qa === 'full') {
-      for (const script of ['publish:check', 'check', 'test:full']) {
-        run(process.execPath, [npmCli, 'run', script]);
-      }
-    } else if (options.qa === 'targeted') {
-      run(process.execPath, [path.join('scripts', 'qa-plan.js'), '--execute', '--base', 'HEAD^']);
-    }
-    return { level: options.qa };
-  }, { reusable: receipt => qaStrength[receipt.result?.level] >= qaStrength[options.qa] });
   await runStage(checkpoint, 'dependencies', async () => {
     await prepareReleasePrerequisites(npmCli);
     run(process.execPath, [path.join('scripts', 'prepare-electron-runtime.js'), '--allow-download']);
-    if (options.qa === 'full') run(process.execPath, [npmCli, 'run', 'verify:tools']);
-    return { electron: packageJson.devDependencies.electron, toolsVerified: options.qa === 'full' };
+    return { electron: packageJson.devDependencies.electron };
   }, { reusable: receipt => [
     path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe'),
     path.join(projectRoot, 'tools', '7zip', '7z.exe'),
     path.join(projectRoot, 'tools', 'ffmpeg', 'ffmpeg.exe')
-  ].every(fs.existsSync) && (options.qa !== 'full' || receipt.result?.toolsVerified === true) });
+  ].every(fs.existsSync) && receipt.result?.electron === packageJson.devDependencies.electron });
 
-  console.log(`本地构建：QA=${options.qa}，输出=${[...options.outputs].join(',')}`);
+  console.log(`本地构建：自动测试=无，输出=${[...options.outputs].join(',')}`);
   await fsp.mkdir(layout.stagingRoot, { recursive: true });
   await runStage(checkpoint, 'build', async () => {
     run(process.execPath, [path.join('scripts', 'build-release.js')], {
@@ -302,7 +288,7 @@ async function main() {
     'smoke',
     `release-${Date.now()}`
   );
-  await runStage(checkpoint, 'smoke', async () => {
+  if (options.smoke) await runStage(checkpoint, 'smoke', async () => {
     await fsp.mkdir(smokeRoot, { recursive: true });
     try {
       const smokeResultPath = path.join(smokeRoot, 'smoke-result.json');
@@ -329,48 +315,6 @@ async function main() {
       await fsp.rm(smokeRoot, { recursive: true, force: true });
     }
   });
-
-  const startupIntegrityRoot = path.join(
-    layout.root,
-    'development',
-    'smoke',
-    `startup-integrity-${Date.now()}`
-  );
-  if (options.startupIntegrity) await runStage(checkpoint, 'startup-integrity', async () => {
-    await fsp.mkdir(startupIntegrityRoot, { recursive: true });
-    try {
-    const cachePath = path.join(startupIntegrityRoot, 'cache', 'release-integrity-v1.json');
-    const cacheReceipts = [];
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const validationPath = path.join(startupIntegrityRoot, `startup-${attempt + 1}.json`);
-      run(path.join(stagingBuild, 'HamsterArchiver.exe'), [], {
-        env: {
-          ...process.env,
-          HAMSTER_STARTUP_INTEGRITY_TEST: '1',
-          HAMSTER_SMOKE_USER_DATA_DIR: startupIntegrityRoot,
-          HAMSTER_UPDATE_VALIDATION_FILE: validationPath
-        },
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 120000
-      });
-      const validation = await readJson(validationPath, `第 ${attempt + 1} 次打包启动验收`);
-      if (validation.version !== packageJson.version || !validation.validatedAt) {
-        throw new Error(`第 ${attempt + 1} 次打包启动验收与当前版本不一致。`);
-      }
-      const cache = await readJson(cachePath, `第 ${attempt + 1} 次启动完整性缓存`);
-      const cacheStat = await fsp.stat(cachePath);
-      cacheReceipts.push({ source: JSON.stringify(cache), modifiedMs: cacheStat.mtimeMs });
-    }
-    if (cacheReceipts[0].source !== cacheReceipts[1].source ||
-        cacheReceipts[0].modifiedMs !== cacheReceipts[1].modifiedMs) {
-      throw new Error('打包启动完整性缓存在第二次启动时被重写，未按预期命中。');
-    }
-    } finally {
-      await fsp.rm(startupIntegrityRoot, { recursive: true, force: true });
-    }
-    return { startupIntegrity: true };
-  }, { reusable: receipt => receipt.result?.startupIntegrity === true });
 
   await fsp.mkdir(layout.productionData, { recursive: true });
   await fsp.mkdir(layout.historyRoot, { recursive: true });
@@ -407,14 +351,19 @@ async function main() {
   }, { reusable: () => manifestMatches(layout.currentBuild, commit) });
 
   console.log('');
-  console.log(`QA 级别：${options.qa}`);
+  console.log('自动测试：无（本地构建器只负责生成产物）');
+  console.log(`产物烟雾：${options.smoke ? '已执行' : '未执行'}`);
   console.log(`检查点：${checkpoint.target}`);
   if (options.outputs.has('current')) console.log(`当前构建：${layout.currentBuild}`);
   if (options.outputs.has('zip')) console.log(`发行压缩包：${finalZip}\nSHA-256：${digest}`);
   if (options.outputs.has('installer')) console.log(`安装程序：${installerPath}`);
 }
 
-main().catch((error) => {
-  console.error(error.stack || error.message);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.stack || error.message);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { parseOptions };

@@ -39,10 +39,13 @@
       <div class="workbench-grid">
         <div class="settings-col">
           <section class="panel settings-panel location-panel">
-            <header class="panel-head location-heading">
-              <p class="step">01 · 收纳设置</p>
-              <h2>这次从哪里收，存到哪里</h2>
-            </header>
+            <details id="archive-setup-settings" class="settings-group location-settings-group" open>
+              <summary class="panel-head location-heading">
+                <p class="step">01 · 收纳设置</p>
+                <h2>这次从哪里收，存到哪里</h2>
+                <span class="group-chevron" aria-hidden="true">⌄</span>
+              </summary>
+              <div class="group-body location-settings-body">
 
             <div class="path-stack">
               <label class="path-field">
@@ -92,6 +95,8 @@
                     <input id="backup-location" type="text" maxlength="200" aria-label="备份位置" placeholder="例如：百度网盘 / 家庭备份盘 A">
                   </label>
                 </div>
+              </div>
+            </details>
               </div>
             </details>
           </section>

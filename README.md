@@ -5,15 +5,17 @@
 
 ### 收藏的时候很快乐，整理的时候也应该是。
 
-把散乱的本地资源，整理成自己的可视化资源仓库。
+Windows 本地文件整理、媒体建库与可校验批量归档工具；支持 AI 通过 MCP 调用。
 
-![Version](https://img.shields.io/badge/version-4.6.9-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.10-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
-**[下载 Windows 版](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[让 AI 帮你使用](#ai-可以直接调用)** · [English](README.en.md) · [反馈问题](https://github.com/CarlosZ16420/hamster-archiver/issues)
+**[下载 Windows 版](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[让 AI 帮你使用](docs/AI-QUICKSTART.md)** · [English](README.en.md) · [反馈问题](https://github.com/CarlosZ16420/hamster-archiver/issues)
 
 </div>
+
+[快速开始](#快速开始) · [AI 使用](#让-ai-帮你收纳) · [功能介绍](#把整理做顺手也把细节做好) · [常见问题](#常见问题) · [文档与贡献](#文档与贡献)
 
 下载/备份的资源越积越多，硬盘快满了，却一直没整理好？
 
@@ -25,7 +27,7 @@
 
 **资源可以备份到别处，里面有什么、备份放在哪里，仍在本地留下清楚的记录。**
 
-![归档工作台与大缩略图仓库](assets/readme/product-overview.zh-CN.png)
+[![仓库概览、收藏封面与搜索筛选](assets/readme/library-showcase.zh-CN.png)](assets/readme/library-showcase.zh-CN.png)
 
 ## 一座资源仓库，两种整理方式
 
@@ -36,11 +38,39 @@
 
 打包和仓库登记由应用完成，网盘上传由你或同步工具完成；本地分类通过仓库标签等信息管理，不会自动重排磁盘上的文件夹。
 
+## 快速开始
+
+适用于 **Windows x64**，提供中英文界面。直接使用请选择 [Releases 发行包](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)；GitHub 的 Source code 和克隆仓库用于源码开发。
+
+1. 下载 **Setup EXE 安装版**，或完整解压 **ZIP 便携版**后运行 `HamsterArchiver.exe`。
+2. 在“归档工作台”扫描目录，或拖入文件夹、视频，查看待处理内容。第一次可以先添加一个小文件夹。
+3. 想先做**本地整理**，点击“不压缩直接入库”；准备**打包备份**，在“收纳设置”中填写“压缩包保存在”，点击“开始压缩入库”。完成后到“仓库”浏览和整理。
+
+便携版请保留完整目录，例如 `HamsterArchiver-v4.6.10-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供，无需另装 Node.js。
+
+[![批量归档、进度追踪与重复确认](assets/readme/archive-showcase.zh-CN.png)](assets/readme/archive-showcase.zh-CN.png)
+
+## 让 AI 帮你收纳
+
+能够在目标 Windows 电脑上执行本地命令或连接本地 MCP 的 AI 助手，可以调用程序查询收藏、添加标签、提交入库任务并跟踪结果。仅有网页搜索能力的聊天助手可以提供操作指导，不能直接访问你的本机文件。项目提供 AI 工具接口，不内置在线内容识别模型。
+
+把下面这段话交给具备本机操作能力的 AI，并替换其中的目录：
+
+> 请使用 Hamster Archiver（https://github.com/CarlosZ16420/hamster-archiver），把 D:\Downloads\示例项目不压缩入库，保留原文件。先阅读项目的 AI 快速上手并复用已有安装；需要安装时下载并校验 Windows 发行包。按实际安装包的能力选择兼容流程，完成只读连接检查后执行任务，并核实最终结果。
+
+**版本与能力：** 下载包与当前源码可能处于不同阶段，[更新日志](CHANGELOG.md) 中的 `Unreleased` 表示尚未发布的改动。启动诊断、任务预检和托盘任务入口等能力，以安装包实际提供的内容为准。
+
+AI 应先读取包内 `ai-capabilities.json`：只有 `schemaVersion: 2` 且 `cliCommands` 包含 `doctor` 时才运行自检；缺少声明的旧包按包内或对应版本的 `docs/MCP.md` 接入，不用未知命令试探。完整配置、示例和故障处理见 [AI 快速上手](docs/AI-QUICKSTART.md)。
+
+连接后，AI 先确定本次入库方式；用户已经明确指定时直接沿用。不压缩入库始终保留原文件，不要求压缩包位置或密码；压缩入库复用已保存的偏好，只补问缺失的成品位置和原文件处理方式，密码始终可选。支持任务预检的版本会在提交前核对范围，提交后持续跟踪到最终状态。
+
+支持托盘任务入口的版本可随时打开工作台，查看带“AI 提交”标记的任务。任务结果应说明成功、跳过或失败的数量，以及仓库记录和成品位置。应用自身不上传媒体；返回的标题、路径等元数据会进入你连接的 AI 客户端上下文。
+
 ## 备份到别处，内容仍然看得见
 
 每个项目都保留图片缩略图、视频抽帧和完整目录结构。你可以为它选封面、记下解压密码和备份位置；即使暂时不打开压缩包，也能浏览归档的内容。
 
-![项目整理、媒体预览与完整目录](assets/readme/project-detail.zh-CN.png)
+[![标签、星级、备份位置、视频抽帧与完整目录](assets/readme/details-showcase.zh-CN.png)](assets/readme/details-showcase.zh-CN.png)
 
 ## 把整理做顺手，也把细节做好
 
@@ -107,46 +137,6 @@
 
 </details>
 
-## 快速开始
-
-1. 从 [下载页](https://github.com/CarlosZ16420/hamster-archiver/releases/latest) 选择 **Setup EXE 安装版**，或 **ZIP 便携版**。便携版完整解压后运行 `HamsterArchiver.exe`。
-2. 在“归档工作台”扫描目录，或拖入文件夹、视频，查看待处理内容。
-3. 想先做**本地整理**，点击“不压缩直接入库”；准备**打包备份**，在“收纳设置”中填写“压缩包保存在”，点击“开始压缩入库”。完成后到“仓库”浏览和整理。
-
-便携版请保留完整目录，例如 `HamsterArchiver-v4.6.9-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供。
-
-## 让 AI 帮你收纳
-
-适用于能够访问本机并连接 MCP 的 AI 助手。安装、接入、能力检查和任务跟踪均可由 AI 完成，你只需用自然语言说明需求。
-
-### 下载项目
-
-把这句话发给 AI：
-
-> 请帮我下载这个项目：https://github.com/CarlosZ16420/hamster-archiver
-
-### 首次收纳
-
-下载完成后，直接告诉 AI：
-
-> 请帮我收纳 D 盘的 Downloads 目录。
-
-AI 会先读取现有设置，并仅在首次缺少配置时确认：
-
-1. 压缩包需要保存的位置；
-2. 入库方式（压缩入库或不压缩直接入库），以及入库完成后如何处理原文件；
-3. 是否设置解压密码。
-
-确认后即可等待任务完成。AI 会负责连接应用、执行入库、跟踪进度，并汇总成品位置、仓库记录和处理结果。
-
-### 以后继续使用
-
-非首次使用时，可以随时说：
-
-> 请帮我使用仓鼠症大结局，把 E 盘的 Downloads 文件夹整理好。
-
-AI 会复用已经保存的偏好；只有本次需求不同或缺少必要信息时才会再次询问。应用自身不上传媒体；通过 MCP 返回的标题、路径等元数据会进入你连接的 AI 客户端上下文。AI 助手的完整操作规范见 [AI 快速上手](docs/AI-QUICKSTART.md)。
-
 ## 常见问题
 
 <details>
@@ -176,18 +166,17 @@ AI 会复用已经保存的偏好；只有本次需求不同或缺少必要信�
 
 </details>
 
-## 持续的版本更新
+## 文档与贡献
 
-Hamster Archiver原本只是我自娱自乐的小工具，很高兴在发出来之后也帮助了许许多多有同样困扰的朋友。这段时间我做了大量的功能打磨，重做了相似判断和重复核验、增加大目录处理优化、失败恢复、标签自动补全等等，还有很多细节体藏在更少的误报和更流畅的ui体验上。如果你遇到了bug或者有功能上的建议，欢迎提issue。
+| 你需要什么 | 入口 |
+| --- | --- |
+| 下载安装、查看已发布版本 | [Releases](https://github.com/CarlosZ16420/hamster-archiver/releases) |
+| 配置 AI、查看调用示例和排错步骤 | [AI 快速上手](docs/AI-QUICKSTART.md) · [MCP 接口说明](docs/MCP.md) |
+| 了解功能变化 | [更新日志](CHANGELOG.md)（`Unreleased` 为待发布改动） |
+| 报告 Bug 或建议功能 | [Issues](https://github.com/CarlosZ16420/hamster-archiver/issues)，请附版本号、操作步骤和错误信息，隐去私人路径及密码 |
+| 修改源码或参与文档 | [贡献指南](CONTRIBUTING.md) · [开发指南](docs/DEVELOPMENT.md) |
+| 报告安全问题、了解许可 | [安全反馈](SECURITY.md) · [MIT License](LICENSE) |
 
-完整更新记录见 [更新日志](CHANGELOG.md)。
+源码开发使用 Windows、Node.js 22.12+（22.x）或 24.x、npm 10.x/11.x。依赖、Electron 运行时与内置工具的准备方式见开发指南。
 
-## 开源与贡献
-
-[MIT License](LICENSE) · [贡献指南](CONTRIBUTING.md) · [安全反馈](SECURITY.md) · [版本记录](CHANGELOG.md)
-
-Windows 源码开发使用 Node.js 22.12+（22.x）或 24.x、npm 10.x/11.x。运行 `npm ci` 安装依赖，按需用 `npm run tools:prepare` 准备内置工具，再用 `npm start` 启动。验证与贡献要求见贡献指南。
-
-感谢 7-Zip、FFmpeg 及LinuxDo社区，也感谢每一位试用、反馈问题、帮助打磨细节的用户。
-
-如果它让你的收藏更好整理了，求个 Star！希望Hamster Archiver能给你带来快乐!
+Hamster Archiver 原本是我为自己整理收藏写的小工具，也希望它能帮你找回整理的乐趣。感谢 7-Zip、FFmpeg、LinuxDo 社区，以及每一位试用和反馈的朋友。如果它对你有帮助，欢迎点个 Star，或分享你的使用建议。

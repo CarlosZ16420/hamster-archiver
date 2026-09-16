@@ -146,7 +146,18 @@ async function assertUsableConfiguration(config, sourcePath) {
   validatePathLayout(config, sourcePath);
 
   await fs.mkdir(config.archiveStagingDirectory, { recursive: true });
-  await fs.mkdir(config.archiveOutputDirectory, { recursive: true });
+  let archiveOutputStats;
+  try {
+    archiveOutputStats = await fs.stat(config.archiveOutputDirectory);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      const missing = new Error('压缩包存储位置不存在；请先确认是否创建，或重新选择位置。');
+      missing.code = 'ARCHIVE_OUTPUT_DIRECTORY_MISSING';
+      throw missing;
+    }
+    throw error;
+  }
+  if (!archiveOutputStats.isDirectory()) throw new Error('压缩包存储位置不是文件夹。');
   await fs.mkdir(config.repositoryDirectory, { recursive: true });
   await Promise.all([
     fs.access(config.archiveStagingDirectory, fsConstants.R_OK | fsConstants.W_OK),
@@ -674,6 +685,7 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
 
 module.exports = {
   CancelledError,
+  assertUsableConfiguration,
   assertEnoughDiskSpace,
   buildCompressArgs,
   buildVerifyArgs,

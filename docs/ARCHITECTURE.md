@@ -37,7 +37,11 @@ Main process
 
 仓库详情的精确文件查询在排序限额之前排除项目自身，只传递文件级字段，每个匹配项目的 JSON 元数据每次查询只解析一次；不修改 SQLite 结构。渲染层用 IntersectionObserver 按可见区域调度缩略图，同时最多读取 4 张，复用现有缓存；目录继续使用虚拟树。
 
-可选 MCP 入口由 `src/core/mcp-server.js` 在显式启用后监听本机随机端口；发行包根目录的薄 `.cmd` 使用 Electron 内置 Node 运行 `mcp-client.js`。Windows 发行包会先写入一次性、限定程序路径与时效的启动请求，再由桌面 Explorer 代理启动应用，避免继承 AI shell 的受限进程环境；源码模式和桌面代理不可用时的直接启动会禁用 MCP 链路中的崩溃上报组件，但始终保留 Chromium 渲染沙箱。主进程在取得单实例锁后消费请求，已有普通实例则通过 `second-instance` 消费，不建立第二个仓库写入者。stdio 客户端用租约心跳管理后台实例生命周期，旧连接文件不会阻止新会话恢复；`--show-ui` 才主动显示窗口。`mcp-tools.js` 只公开发现、描述和调用三个紧凑工具，`mcp-capabilities.js` 验证参数并复用同一个 QueueManager，主进程把界面、更新、受控路径和用户数据迁移的真实应用服务接入能力层。随机连接凭证只保存在用户数据区 `mcp/connection.json`。AI 任务增加可选请求标识和源文件处理快照，沿用旧 JSON 存储，无数据库迁移。常用设置使用明确字段白名单复用桌面校验，仓库位置只能走专用切换服务；队列只按批次或任务分页返回，仓库概览默认省略桌面热力图的全年空日期，确认/跳过/重试绑定最新任务状态，新批次只启动自身任务。接口继续通过并发写入限制和一次性影响确认令牌控制决策范围。详见 [MCP](MCP.md)。
+可选 MCP 入口由 `src/core/mcp-server.js` 在显式启用后监听本机随机端口；发行包根目录的薄 `.cmd` 使用 Electron 内置 Node 运行 `mcp-client.js`。发行包的 `ai-capabilities.json` 显式列出可用 CLI 命令与 MCP 工具，客户端先按清单做版本能力门控；当前客户端拒绝未知命令。Windows 桌面代理与直接回退共用启动策略：清除派生进程的 Node 模式环境，关闭崩溃上报和 GPU 加速，但保留 Chromium 渲染沙箱。主进程在 app ready 前确定兼容模式；已有普通实例通过 `second-instance` 启用 MCP，始终只有一个仓库写入者，该路径的启用失败也会写回本次短期诊断文件。
+
+stdio 客户端用内部租约心跳管理后台实例生命周期：就绪后首次连接宽限 30 秒，最后会话断开宽限 60 秒，活动 AI 任务继续保活。后台实例提供托盘入口；用户打开共享工作台后转为桌面生命周期。连接文件使用随机 token 与 instanceId 绑定 PID、启动时间和版本，退出时只清理本实例拥有的连接。loopback HTTP 只作为启动器内部认证桥接，不作为稳定远程 MCP 地址。
+
+`mcp-tools.js` 只公开发现、描述和调用三个紧凑工具，`mcp-capabilities.js` 复用同一个 QueueManager。`intake.plan` 只检查明确路径与配置，不扫描或入队；`intake.scan` 明确是写操作。AI 批次使用有界请求账本保存请求指纹和任务快照，即使可见队列被清理，仍可用 `queue.request` 防止不确定响应后的重复归档。账本位于用户数据区，与 SQLite 仓库格式分离，不要求数据库迁移。常用设置、危险确认、分页和状态令牌继续沿用产品服务。详见 [MCP](MCP.md)。
 
 `scripts/build-release.js` 只写入仓库外 staging。`scripts/release-local.js` 从干净提交按需生成 Current、ZIP 或安装版，并把阶段凭据写入仓库外 `builds/release-runs`；所有产物只做一次最小隔离启动，旧 Current 进入 history。正式 Release 入口先识别远端状态，云端预检、构建、上传分作业续跑。公开 GitHub 和 CNB 从上游 Release 镜像同一附件，不参与构建。源码根目录不保存 Electron 运行时副本。
 

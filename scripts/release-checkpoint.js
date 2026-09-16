@@ -6,7 +6,7 @@ const { makeLocalLayout } = require('../src/core/local-paths');
 
 const projectRoot = path.resolve(__dirname, '..');
 const STAGES = Object.freeze([
-  'source', 'qa', 'dependencies', 'build', 'smoke', 'startup-integrity', 'zip', 'installer',
+  'source', 'qa', 'dependencies', 'build', 'smoke', 'zip', 'installer',
   'promote-current', 'publish-private', 'publish-public', 'mirror-cnb'
 ]);
 

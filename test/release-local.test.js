@@ -43,7 +43,20 @@ test('local release builds only explicitly requested outputs', () => {
   assert.match(localRelease, /'-mx=5'/);
   assert.doesNotMatch(formalRelease, /\['build:installer'\]/);
   assert.match(workflow, /\{ 'zip,installer' \} else \{ 'zip' \}/);
-  assert.match(workflow, /--outputs \$outputs --qa none/);
+  assert.match(workflow, /--outputs \$outputs --smoke/);
+});
+
+test('Current and local packaging never select or run source QA', () => {
+  const { parseOptions } = require('../scripts/release-local');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'release-local.js'), 'utf8');
+
+  assert.deepEqual([...parseOptions([]).outputs], ['current']);
+  assert.equal(parseOptions([]).smoke, false);
+  assert.equal(parseOptions(['--outputs', 'zip,installer', '--smoke']).smoke, true);
+  assert.throws(() => parseOptions(['--qa', 'targeted']), /未知本地发行参数/);
+  assert.doesNotMatch(source, /qa-plan\.js|test:full|publish:check/);
+  assert.match(source, /options\.smoke && process\.env\.GITHUB_ACTIONS !== 'true'/);
+  assert.match(source, /if \(options\.smoke\) await runStage\(checkpoint, 'smoke'/);
 });
 
 test('packaged smoke acceptance uses durable files instead of GUI stdout markers', () => {
@@ -55,7 +68,7 @@ test('packaged smoke acceptance uses durable files instead of GUI stdout markers
   assert.match(application, /async function writeSmokeResult/);
   assert.match(application, /writeSmokeResult\(true, 'complete'/);
   assert.match(application, /usesEnglishUi\(\)[\s\S]*Keep Originals[\s\S]*归档后不移动原文件/);
-  assert.match(source, /if \(options\.startupIntegrity\)/);
+  assert.doesNotMatch(source, /startupIntegrity|startup-integrity/);
   assert.doesNotMatch(source, /smokeOutput\.includes\('HAMSTER_SMOKE_TEST_OK'\)/);
   assert.doesNotMatch(source, /startupOutputs.*cacheHit/s);
 });
@@ -63,24 +76,28 @@ test('packaged smoke acceptance uses durable files instead of GUI stdout markers
 test('formal local fallback reuses a complete exact-commit bundle before rebuilding', () => {
   const source = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'release.js'), 'utf8');
 
-  assert.ok(source.indexOf('await verifyFiles()') < source.indexOf("'release:local'"));
-  assert.match(source, /no tests or rebuild were repeated/);
+  assert.ok(source.indexOf('await verifyFiles()') < source.indexOf("'current,zip,installer'"));
+  assert.match(source, /no QA or package build was repeated/);
+  assert.doesNotMatch(source, /'release:local', '--', '--outputs', 'current,zip,installer', '--qa'/);
 });
 
-test('CI and package workflows select QA once and never fall back to full checks', () => {
+test('formal cloud release selects QA once while Current runs independently', () => {
   const packageJson = require('../package.json');
   const localRelease = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'release-local.js'), 'utf8');
+  const formalRelease = fs.readFileSync(path.join(__dirname, '..', 'scripts', 'release.js'), 'utf8');
   const ci = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'ci.yml'), 'utf8');
   const packageWorkflow = fs.readFileSync(path.join(__dirname, '..', '.github', 'workflows', 'package.yml'), 'utf8');
 
   assert.equal(packageJson.scripts['test:changed'], 'node scripts/qa-plan.js --execute');
-  assert.match(localRelease, /qa: 'none'/);
+  assert.doesNotMatch(localRelease, /qa-plan\.js|test:full/);
   assert.match(ci, /Make one QA plan/);
   assert.match(ci, /test_file/);
   assert.doesNotMatch(ci, /^\s+- run: npm test\s*$/m);
-  assert.match(packageWorkflow, /verify-source-ci-receipt\.js/);
-  assert.match(packageWorkflow, /--wait-seconds 0/);
+  assert.doesNotMatch(packageWorkflow, /verify-source-ci-receipt\.js/);
+  assert.match(packageWorkflow, /Plan formal QA once/);
+  assert.match(formalRelease, /runRemoteAndCurrent\(\(\) => cloud\(options\)\)/);
+  assert.match(formalRelease, /if \(options\.resumeRun\) workflowArguments\.push/);
   assert.doesNotMatch(packageWorkflow, /--full-checks/);
-  assert.match(packageWorkflow, /needs: \[preflight, build\]/);
+  assert.match(packageWorkflow, /needs: build/);
   assert.match(packageWorkflow, /resume_run_id/);
 });

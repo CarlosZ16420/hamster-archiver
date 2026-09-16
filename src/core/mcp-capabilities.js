@@ -3,12 +3,22 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { isVideoFile } = require('./constants');
+const { normalizeForComparison } = require('./paths');
 
 const MAX_PAGE = 100;
 const SOURCE_DISPOSITIONS = ['keep', 'trash', 'move'];
 const THEME_VALUES = ['classic', 'day', 'night', 'forest', 'twilight'];
 const MIB = 1024 ** 2;
 const GIB = 1024 ** 3;
+const capabilitySearchTerms = {
+  'intake.plan': '整理 收纳 计划 预检 organize downloads preview intake',
+  'intake.add_batch': '整理 收纳 下载目录 批量归档 建库 organize downloads archive catalog files',
+  'catalog.search': '搜索 查找收藏 备份位置 find projects backup location media catalog',
+  'catalog.update_metadata': '分类 标签 备注 星级 organize tag notes rating',
+  'queue.state': '进度 状态 跟踪 completion progress status',
+  'settings.intake_preferences': '保存位置 保留原文件 回收站 move keep source preferences'
+};
 
 const objectSchema = (properties = {}, required = [], additionalProperties = false) => ({
   type: 'object', properties, required, additionalProperties
@@ -144,6 +154,20 @@ function compactState(manager) {
   return queueSummary(manager);
 }
 
+function intakeRequestFingerprint(value) {
+  return crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
+}
+
+function pathsOverlap(left, right) {
+  if (!left || !right) return false;
+  const a = path.resolve(left);
+  const b = path.resolve(right);
+  const relative = path.relative(a, b);
+  const reverse = path.relative(b, a);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative)) ||
+    (!reverse.startsWith('..') && !path.isAbsolute(reverse));
+}
+
 function catalogSummary(record) {
   if (!record) return null;
   return redact(Object.fromEntries([
@@ -252,13 +276,18 @@ const capabilities = [
   ['settings.intake_preferences', 'settings', 'Save the archive output and keep/trash/move preference used by future AI intake.', {
     archiveOutputDirectory: stringSchema(), sourceDisposition: { type: 'string', enum: SOURCE_DISPOSITIONS }, processedSourceDirectory: stringSchema()
   }, false, ['archiveOutputDirectory', 'sourceDisposition']],
-  ['intake.scan', 'intake', 'Scan an intake directory through the real product scanner.', { directory: stringSchema(), scanToken: { type: 'string', maxLength: 128 } }, false, ['directory']],
+  ['intake.plan', 'intake', 'Inspect explicit source boundaries and required preferences without scanning, hashing, queuing or changing settings.', {
+    paths: { type: 'array', minItems: 1, maxItems: 100, items: stringSchema() },
+    mode: { type: 'string', enum: ['archive', 'inventory_only'] }
+  }, true, ['paths', 'mode']],
+  ['intake.scan', 'intake', 'Scan an intake directory and add discovered items to the real product queue. This is not a read-only probe.', { directory: stringSchema(), scanToken: { type: 'string', maxLength: 128 } }, false, ['directory']],
   ['intake.add_batch', 'intake', 'Add up to 100 folders or videos and optionally start their selected mode.', {
     requestId: stringSchema(128), paths: { type: 'array', minItems: 1, maxItems: 100, items: stringSchema() },
     mode: { type: 'string', enum: ['archive', 'inventory_only'] }, start: { type: 'boolean' },
     archiveOutputDirectory: stringSchema(), sourceDisposition: { type: 'string', enum: SOURCE_DISPOSITIONS }, processedSourceDirectory: stringSchema()
   }, false, ['requestId', 'paths', 'mode']],
   ['queue.state', 'queue', 'Read compact, paginated queue state. Filter by requestId or jobId when polling to avoid unrelated jobs.', { requestId: optionalStringSchema(128), jobId: optionalStringSchema(128), ...pageProperties }, true],
+  ['queue.request', 'queue', 'Read the retained receipt for one AI request, including jobs removed from the visible queue.', { requestId: stringSchema(128) }, true, ['requestId']],
   ['queue.start_archive', 'queue', 'Choose archive mode and start eligible jobs.', {}, false],
   ['queue.start_inventory', 'queue', 'Choose inventory-only mode and start eligible jobs.', {}, false],
   ['queue.pause', 'queue', 'Pause the current safe processing stage.', {}, false],
@@ -339,6 +368,16 @@ function createCapabilityService(manager, services = {}) {
     }
     if (entry.name === 'catalog.add_image' && typeof manager.services?.storeCatalogImage !== 'function') {
       return { available: false, reason: 'Product image storage service is not installed.' };
+    }
+    if (entry.name === 'intake.add_batch') {
+      const preferences = intakePreferences(manager);
+      return {
+        available: true,
+        modeRequirements: {
+          inventory_only: [],
+          archive: preferences.configured ? [] : preferences.missingPreferences
+        }
+      };
     }
     return { available: true };
   };
@@ -430,39 +469,96 @@ function createCapabilityService(manager, services = {}) {
       await manager.updateConfig({ ...manager.config, ...patch }, { source: 'mcp', recordIntakePreferences: true });
       return { intakePreferences: intakePreferences(manager), settings: publicSettings(manager.config) };
     }
+    if (name === 'intake.plan') {
+      const preferences = intakePreferences(manager);
+      const targets = [];
+      for (const raw of input.paths) {
+        if (!path.isAbsolute(raw) || raw.includes('\0')) throw new Error('Each source must be an absolute local path');
+        const source = path.normalize(raw);
+        let stats;
+        try { stats = await fs.stat(source); }
+        catch (error) { targets.push({ source, exists: false, errorCode: error.code || 'SOURCE_UNAVAILABLE' }); continue; }
+        const conflicts = [
+          ['warehouse', manager.config?.repositoryDirectory],
+          ['archive_output', input.mode === 'archive' ? (preferences.archiveOutputDirectory || manager.config?.archiveOutputDirectory) : ''],
+          ['archive_staging', input.mode === 'archive' ? manager.config?.archiveStagingDirectory : '']
+        ].filter(([, target]) => target && pathsOverlap(source, target)).map(([kind]) => kind);
+        const type = stats.isDirectory() ? 'directory' : stats.isFile() && isVideoFile(source) ? 'video' : 'unsupported';
+        targets.push({ source, exists: true, type, conflicts });
+      }
+      return {
+        ready: targets.every((target) => target.exists && target.type !== 'unsupported' && target.conflicts.length === 0) &&
+          (input.mode === 'inventory_only' || preferences.configured),
+        mode: input.mode,
+        targets,
+        ...(input.mode === 'archive' && !preferences.configured ? { missingPreferences: preferences.missingPreferences } : {}),
+        sourceDisposition: input.mode === 'inventory_only' ? 'keep' : preferences.sourceDisposition,
+        sideEffects: 'none'
+      };
+    }
     if (name === 'intake.scan') return compactState(await manager.scanSource(path.resolve(input.directory), input.scanToken || 'mcp'));
     if (name === 'intake.add_batch') {
       if (manager.running) throw new Error('QUEUE_RUNNING: wait until the queue is idle before adding an AI batch');
       if ((manager.jobs || []).some((job) => !job.mcpRequestId && job.intakeModeSelected && job.status === 'queued')) {
         throw new Error('UNRELATED_QUEUE_WORK: finish or pause selected desktop jobs before AI intake');
       }
-      let preferences = intakePreferences(manager);
-      if (input.archiveOutputDirectory || input.sourceDisposition || input.processedSourceDirectory) {
-        const prefPatch = sourceDispositionPatch(input);
-        await manager.updateConfig({ ...manager.config, ...prefPatch }, { source: 'mcp', recordIntakePreferences: true });
-        preferences = intakePreferences(manager);
+      let preferences = input.mode === 'inventory_only'
+        ? { configured: true, archiveOutputDirectory: '', sourceDisposition: 'keep', processedSourceDirectory: '', evidence: 'inventory_only' }
+        : intakePreferences(manager);
+      let preferencePatch = null;
+      if (input.mode === 'archive' && (input.archiveOutputDirectory || input.sourceDisposition || input.processedSourceDirectory)) {
+        preferencePatch = sourceDispositionPatch(input);
+        preferences = {
+          configured: true,
+          evidence: 'request',
+          archiveOutputDirectory: preferencePatch.archiveOutputDirectory,
+          sourceDisposition: input.sourceDisposition,
+          processedSourceDirectory: preferencePatch.processedSourceDirectory
+        };
       }
       if (!preferences.configured) return preferences;
       const normalizedPaths = [...new Set(input.paths.map((entry) => {
         if (!path.isAbsolute(entry) || entry.includes('\0')) throw new Error('Each source must be an absolute local path');
         return path.normalize(entry);
       }))];
+      const fingerprint = intakeRequestFingerprint({
+        mode: input.mode,
+        paths: normalizedPaths.map(normalizeForComparison).sort((left, right) => left.localeCompare(right, 'en-US')),
+        archiveOutputDirectory: preferences.archiveOutputDirectory ? normalizeForComparison(preferences.archiveOutputDirectory) : '',
+        sourceDisposition: input.mode === 'inventory_only' ? 'keep' : preferences.sourceDisposition,
+        processedSourceDirectory: preferences.processedSourceDirectory ? normalizeForComparison(preferences.processedSourceDirectory) : ''
+      });
+      const retained = manager.findAutomationRequest?.(input.requestId);
+      if (retained && retained.fingerprint !== fingerprint) throw new Error('REQUEST_ID_CONFLICT');
       const previous = manager.jobs.filter((job) => job.mcpRequestId === input.requestId);
-      if (previous.some((job) => job.processingMode !== input.mode || !normalizedPaths.includes(job.sourcePath))) throw new Error('REQUEST_ID_CONFLICT');
+      const normalizedPathKeys = new Set(normalizedPaths.map(normalizeForComparison));
+      if (previous.some((job) => job.processingMode !== input.mode || !normalizedPathKeys.has(normalizeForComparison(job.sourcePath)))) throw new Error('REQUEST_ID_CONFLICT');
+      const retainedPaths = new Set((retained?.jobs || []).map((job) => normalizeForComparison(job.sourcePath)));
+      if (preferencePatch) {
+        await manager.updateConfig({ ...manager.config, ...preferencePatch }, { source: 'mcp', recordIntakePreferences: true });
+        preferences = intakePreferences(manager);
+      }
       const failures = [];
-      for (const source of normalizedPaths.filter((entry) => !previous.some((job) => job.sourcePath === entry))) {
+      for (const source of normalizedPaths.filter((entry) => !previous.some((job) => normalizeForComparison(job.sourcePath) === normalizeForComparison(entry)) && !retainedPaths.has(normalizeForComparison(entry)))) {
         try {
           await manager.addSingle(source, { requestId: input.requestId, mode: input.mode, sourceDisposition: preferences.sourceDisposition, processedSourceDirectory: preferences.processedSourceDirectory });
         } catch (error) { failures.push({ source, code: error.code || 'INTAKE_FAILED', message: error.message }); }
       }
       const jobs = manager.jobs.filter((job) => job.mcpRequestId === input.requestId);
+      const receipt = await manager.recordAutomationRequest?.({ requestId: input.requestId, fingerprint, mode: input.mode, paths: normalizedPaths, jobs, failures });
       if (input.start !== false && jobs.length && !manager.running) void manager.startQueue(jobs.map((job) => job.id)).catch((error) => manager.emit('automation-error', error));
-      return { jobs: jobs.map(jobSummary), failures, reused: failures.length === 0 && jobs.length === previous.length };
+      const visibleJobs = jobs.length ? jobs.map(jobSummary) : (receipt?.jobs || retained?.jobs || []);
+      return { jobs: visibleJobs, failures, reused: failures.length === 0 && (retainedPaths.size > 0 || jobs.length === previous.length), retained: Boolean(retained && jobs.length === 0) };
     }
     if (name === 'queue.state') {
       const jobs = (manager.jobs || []).filter((job) =>
         (!input.requestId || job.mcpRequestId === input.requestId) && (!input.jobId || job.id === input.jobId));
       return { ...compactState(manager), ...page(jobs.map(jobSummary), input) };
+    }
+    if (name === 'queue.request') {
+      const retained = manager.findAutomationRequest?.(input.requestId);
+      if (!retained) throw new Error('REQUEST_NOT_FOUND');
+      return redact(retained);
     }
     if (['queue.confirm', 'queue.confirm_anomaly', 'queue.discard_anomaly', 'queue.cancel', 'queue.retry'].includes(name)) {
       const job = manager.findJob(input.jobId);
@@ -555,7 +651,7 @@ function createCapabilityService(manager, services = {}) {
     discover(input = {}) {
       const needle = String(input.query || '').trim().toLowerCase();
       const items = capabilities.filter((entry) => (!input.domain || entry.domain === input.domain) &&
-        (!needle || `${entry.name} ${entry.description}`.toLowerCase().includes(needle)))
+        (!needle || `${entry.name} ${entry.description} ${capabilitySearchTerms[entry.name] || ''}`.toLowerCase().includes(needle)))
         .map((entry) => ({ name: entry.name, domain: entry.domain, description: entry.description, readOnly: entry.readOnly, risk: entry.risk, ...availability(entry) }));
       return page(items, input);
     },

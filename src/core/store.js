@@ -69,6 +69,11 @@ class AppStore {
     this.settingsPath = layout.settingsPath;
     this.legacySettingsPath = layout.legacySettingsPath || null;
     this.logPath = layout.logPath;
+    this.automationRequestsPath = path.join(
+      layout.root || path.dirname(layout.settingsPath),
+      'automation',
+      'mcp-requests.json'
+    );
     this.loadedLegacySettings = false;
     this.repositories = new Map();
   }
@@ -185,6 +190,14 @@ class AppStore {
   async appendLog(_repositoryDirectory, entry) {
     await fs.mkdir(path.dirname(this.logPath), { recursive: true });
     await fs.appendFile(this.logPath, `${JSON.stringify(entry)}\n`, 'utf8');
+  }
+
+  async loadAutomationRequests() {
+    return readJson(this.automationRequestsPath, []);
+  }
+
+  async saveAutomationRequests(requests) {
+    await writeJsonAtomic(this.automationRequestsPath, requests);
   }
 
   async checkpoint(repositoryDirectory) {

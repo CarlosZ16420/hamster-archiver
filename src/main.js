@@ -3,7 +3,7 @@
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const crypto = require('node:crypto');
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, net, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, shell, Tray } = require('electron');
 const { AppStore, writeJsonAtomic } = require('./core/store');
 const { QueueManager } = require('./core/queue-manager');
 const {
@@ -42,7 +42,7 @@ const { formatReleaseNotes } = require('./core/release-notes');
 const { findTrashItems, isTrashItemPresent, restoreTrashItem } = require('./core/recycle-bin');
 const { verifyReleaseManifestAtStartup } = require('./core/startup-integrity');
 const { resolveDevelopmentUserDataRoot } = require('./core/development-paths');
-const { isValidMcpReadyFile, takeDesktopLaunchRequest } = require('./core/mcp-launch');
+const { isValidMcpDiagnosticFile, isValidMcpReadyFile, takeDesktopLaunchRequest } = require('./core/mcp-launch');
 const rendererI18n = require('./renderer/i18n');
 
 // Let Windows choose the nearest native-size frame from the multi-resolution
@@ -68,6 +68,10 @@ let mcpApplicationServices = null;
 let startedAsMcpBackground = false;
 let mcpUiWasShown = false;
 let exitAfterMcpIdle = false;
+let mcpIdleTimer = null;
+let mcpEverConnected = false;
+let mcpTray = null;
+let mcpExitWhenIdleRequested = false;
 let mcpShutdownInProgress = false;
 let mcpShutdownComplete = false;
 let applicationReady = false;
@@ -109,15 +113,16 @@ const electronRuntimeDirectory = (isSmokeTest || isStartupIntegrityTest) && proc
   ? path.resolve(process.env.HAMSTER_SMOKE_USER_DATA_DIR)
   : path.join(configuredUserDataRoot, 'electron');
 app.setPath('userData', electronRuntimeDirectory);
-if (isSmokeTest) {
-  app.disableHardwareAcceleration();
-  app.commandLine.appendSwitch('disable-gpu');
-  app.commandLine.appendSwitch('disable-gpu-compositing');
-}
 const hasSingleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
 const startupDesktopMcpRequest = hasSingleInstanceLock && !isSmokeTest
   ? takeDesktopLaunchRequest({ applicationExecutable: process.execPath })
   : null;
+const startupRequestsMcp = Boolean(startupDesktopMcpRequest) || process.argv.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1';
+if (isSmokeTest || startupRequestsMcp) {
+  app.disableHardwareAcceleration();
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+}
 app.setAppUserModelId('com.carlosz.hamsterarchiver');
 
 function usesEnglishUi() {
@@ -165,10 +170,13 @@ if (!hasSingleInstanceLock) {
 app.on('second-instance', (_event, argv) => {
   const desktopRequest = takeDesktopLaunchRequest({ applicationExecutable: process.execPath });
   const effectiveArgs = desktopRequest
-    ? ['--enable-mcp', '--background', `--mcp-ready-file=${desktopRequest.readyFile}`, ...(desktopRequest.showUi ? ['--show-ui'] : [])]
+    ? ['--enable-mcp', '--background', `--mcp-ready-file=${desktopRequest.readyFile}`, `--mcp-diagnostic-file=${desktopRequest.diagnosticFile}`, ...(desktopRequest.showUi ? ['--show-ui'] : [])]
     : argv;
   if (effectiveArgs.includes('--enable-mcp')) {
-    void enableMcpForArguments(effectiveArgs).catch((error) => console.error(`MCP_START_FAILED ${error.stack || error.message}`));
+    void enableMcpForArguments(effectiveArgs).catch(async (error) => {
+      await writeMcpStartupDiagnostic(effectiveArgs, error, 'mcp-enable');
+      console.error(`MCP_START_FAILED ${error.stack || error.message}`);
+    });
     if (!effectiveArgs.includes('--show-ui')) return;
   }
   showMainWindow();
@@ -184,15 +192,38 @@ function validatedMcpReadyFile(argv) {
   return isValidMcpReadyFile(value) ? path.resolve(value) : null;
 }
 
+function validatedMcpDiagnosticFile(argv) {
+  const value = argumentValue(argv, '--mcp-diagnostic-file');
+  return isValidMcpDiagnosticFile(value) ? path.resolve(value) : null;
+}
+
 async function writeMcpReadyFile(argv) {
   const readyFile = validatedMcpReadyFile(argv);
   if (!readyFile || !mcpServer) return;
-  await writeJsonAtomic(readyFile, { connectionFile: mcpServer.connectionFile });
+  await writeJsonAtomic(readyFile, {
+    schemaVersion: 2,
+    connectionFile: mcpServer.connectionFile,
+    instanceId: mcpServer.instanceId,
+    startedAt: mcpServer.startedAt
+  });
+}
+
+async function writeMcpStartupDiagnostic(argv, error, stage = 'startup') {
+  const diagnosticFile = validatedMcpDiagnosticFile(argv);
+  if (!diagnosticFile) return;
+  await writeJsonAtomic(diagnosticFile, {
+    schemaVersion: 1,
+    code: error?.code || 'STARTUP_FAILED',
+    stage,
+    message: String(error?.message || error || 'Hamster Archiver failed to start.'),
+    at: new Date().toISOString()
+  }).catch(() => {});
 }
 
 function showMainWindow() {
   mcpUiWasShown = true;
   exitAfterMcpIdle = false;
+  clearMcpIdleTimer();
   if (!applicationReady) {
     pendingWindowShow = true;
     if (startupWindow && !startupWindow.isDestroyed()) {
@@ -268,14 +299,85 @@ function showStartupError(error) {
   return true;
 }
 
-function handleMcpSessionCountChanged(count) {
-  if (!startedAsMcpBackground || mcpUiWasShown || count !== 0) return;
-  const timer = setTimeout(() => {
+function clearMcpIdleTimer() {
+  if (mcpIdleTimer) clearTimeout(mcpIdleTimer);
+  mcpIdleTimer = null;
+}
+
+function hasActiveMcpWork() {
+  return (queueManager?.jobs || []).some((job) => job.mcpRequestId && ![
+    'failed', 'cancelled', 'skipped_duplicate'
+  ].includes(job.status) && !String(job.status || '').startsWith('completed'));
+}
+
+function scheduleMcpIdleExit(delayMs) {
+  if (!startedAsMcpBackground || mcpUiWasShown || mcpIdleTimer) return;
+  mcpIdleTimer = setTimeout(() => {
+    mcpIdleTimer = null;
     if (!mcpServer || mcpServer.sessionCount !== 0 || mcpUiWasShown) return;
-    if (queueManager?.running) exitAfterMcpIdle = true;
-    else app.quit();
-  }, 2_000);
-  timer.unref?.();
+    if (hasActiveMcpWork() || queueManager?.running) {
+      exitAfterMcpIdle = true;
+      return;
+    }
+    app.quit();
+  }, delayMs);
+  mcpIdleTimer.unref?.();
+}
+
+function handleMcpSessionCountChanged(count) {
+  if (!startedAsMcpBackground || mcpUiWasShown) return;
+  if (count > 0) {
+    mcpEverConnected = true;
+    exitAfterMcpIdle = false;
+    clearMcpIdleTimer();
+    updateMcpTray();
+    return;
+  }
+  if (hasActiveMcpWork() || queueManager?.running) exitAfterMcpIdle = true;
+  else scheduleMcpIdleExit(mcpEverConnected ? 60_000 : 30_000);
+  updateMcpTray();
+}
+
+function mcpTrayStatusText() {
+  const english = usesEnglishUi();
+  const jobs = (queueManager?.jobs || []).filter((job) => job.mcpRequestId);
+  const active = jobs.filter((job) => !['failed', 'cancelled', 'skipped_duplicate'].includes(job.status) && !String(job.status || '').startsWith('completed')).length;
+  const waiting = jobs.filter((job) => String(job.status || '').startsWith('awaiting_')).length;
+  if (waiting) return english ? `${waiting} AI task(s) need review` : `${waiting} 个 AI 任务等待处理`;
+  if (active) return english ? `${active} AI task(s) running` : `${active} 个 AI 任务进行中`;
+  if (mcpServer?.sessionCount) return english ? 'AI connected' : 'AI 已连接';
+  return english ? 'Waiting for AI connection' : '等待 AI 连接';
+}
+
+function updateMcpTray() {
+  if (!mcpTray) return;
+  const english = usesEnglishUi();
+  const status = mcpTrayStatusText();
+  mcpTray.setToolTip(`Hamster Archiver · ${status}`);
+  mcpTray.setContextMenu(Menu.buildFromTemplate([
+    { label: status, enabled: false },
+    { type: 'separator' },
+    { label: english ? 'Open AI tasks' : '查看 AI 任务', click: () => { void controlMainWindow({ section: 'workbench' }); } },
+    { label: english ? 'Exit after current work' : '当前工作结束后退出', click: () => {
+      mcpExitWhenIdleRequested = true;
+      if (!hasActiveMcpWork() && !queueManager?.running) {
+        allowWindowClose = true;
+        app.quit();
+      }
+    } }
+  ]));
+}
+
+function createMcpTray() {
+  if (mcpTray || !startedAsMcpBackground || isSmokeTest) return;
+  try {
+    mcpTray = new Tray(appIconPath);
+    mcpTray.on('click', () => { void controlMainWindow({ section: 'workbench' }); });
+    updateMcpTray();
+  } catch (error) {
+    console.warn(`MCP_TRAY_WARNING ${error.message}`);
+    mcpTray = null;
+  }
 }
 
 async function enableMcpForArguments(argv) {
@@ -320,6 +422,7 @@ async function enableMcpForArguments(argv) {
       .catch((error) => { mcpServerStarting = null; throw error; });
   }
   await mcpServerStarting;
+  createMcpTray();
   await writeMcpReadyFile(argv);
   handleMcpSessionCountChanged(mcpServer.sessionCount);
 }
@@ -515,6 +618,62 @@ async function showUpdateFailureDialog({ error, releaseUrl = releasesUrl, runRoo
     const openError = await shell.openPath(runRoot);
     if (openError) dialog.showErrorBox(english ? 'Could not open diagnostics' : '无法打开诊断目录', openError);
   }
+}
+
+async function ensureArchiveOutputDirectoryBeforeStart() {
+  const configuredPath = String(queueManager?.config?.archiveOutputDirectory || '').trim();
+  if (!configuredPath) return true;
+  const resolvedPath = path.resolve(configuredPath);
+  try {
+    const stats = await fs.stat(resolvedPath);
+    if (!stats.isDirectory()) throw new Error('压缩包存储位置不是文件夹。');
+    return true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+
+  const english = usesEnglishUi();
+  const response = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: english ? 'Archive folder is missing' : '压缩包存储位置不存在',
+    message: english
+      ? 'The configured archive folder no longer exists.'
+      : '已设置的压缩包存储位置已经不存在。',
+    detail: english
+      ? `${resolvedPath}\n\nCreate this folder, or choose another existing location before archiving.`
+      : `${resolvedPath}\n\n请先创建该文件夹，或重新选择一个现有位置，再开始压缩入库。`,
+    buttons: english
+      ? ['Create folder', 'Choose another folder', 'Cancel']
+      : ['创建该文件夹', '重新选择', '取消'],
+    defaultId: 1,
+    cancelId: 2,
+    noLink: true
+  });
+  if (response.response === 2) return false;
+  if (response.response === 0) {
+    await fs.mkdir(resolvedPath, { recursive: true });
+    return true;
+  }
+
+  const selected = await dialog.showOpenDialog(mainWindow, {
+    title: english ? 'Choose an archive folder' : '重新选择压缩包存储位置',
+    defaultPath: path.dirname(resolvedPath),
+    properties: ['openDirectory', 'createDirectory']
+  });
+  if (selected.canceled || !selected.filePaths[0]) return false;
+  const nextOutputDirectory = selected.filePaths[0];
+  const previousDerivedStaging = makeArchiveStagingDirectory(configuredPath);
+  const currentStaging = String(queueManager.config.archiveStagingDirectory || '').trim();
+  const nextStaging = !currentStaging ||
+      normalizeForComparison(currentStaging) === normalizeForComparison(previousDerivedStaging)
+    ? makeArchiveStagingDirectory(nextOutputDirectory)
+    : currentStaging;
+  await queueManager.updateConfig({
+    ...queueManager.config,
+    archiveOutputDirectory: nextOutputDirectory,
+    archiveStagingDirectory: nextStaging
+  });
+  return true;
 }
 
 function appendReleaseNotes(detail, releaseNotes, english) {
@@ -851,6 +1010,11 @@ function createWindow() {
   void mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   mainWindow.on('close', async (event) => {
+    if (mcpTray && !allowWindowClose) {
+      event.preventDefault();
+      mainWindow.hide();
+      return;
+    }
     if (!queueManager?.running || allowWindowClose) return;
     event.preventDefault();
     if (closePromptOpen) return;
@@ -1646,6 +1810,7 @@ function registerIpc() {
 
   ipcMain.handle('queue:start', async (event) => {
     assertTrustedSender(event);
+    if (!await ensureArchiveOutputDirectoryBeforeStart()) return queueManager.getState();
     return queueManager.startArchiveQueue();
   });
 
@@ -1827,7 +1992,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const workspaceRoot = applicationRoot;
   logStartupTiming('electron-ready');
   const startupMcpArgs = startupDesktopMcpRequest
-    ? ['--enable-mcp', '--background', `--mcp-ready-file=${startupDesktopMcpRequest.readyFile}`, ...(startupDesktopMcpRequest.showUi ? ['--show-ui'] : [])]
+    ? ['--enable-mcp', '--background', `--mcp-ready-file=${startupDesktopMcpRequest.readyFile}`, `--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`, ...(startupDesktopMcpRequest.showUi ? ['--show-ui'] : [])]
     : process.argv;
   const mcpRequested = !isSmokeTest && (startupMcpArgs.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1');
   startedAsMcpBackground = mcpRequested && startupMcpArgs.includes('--background') && !startupMcpArgs.includes('--show-ui');
@@ -2116,7 +2281,15 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
         mainWindow.webContents.send('catalog:changed', catalog);
       }
     }
-    if (exitAfterMcpIdle && !queueManager.running && mcpServer?.sessionCount === 0 && !mcpUiWasShown) app.quit();
+    updateMcpTray();
+    if (mcpExitWhenIdleRequested && !queueManager.running && !hasActiveMcpWork()) {
+      allowWindowClose = true;
+      app.quit();
+      return;
+    }
+    if (exitAfterMcpIdle && !queueManager.running && !hasActiveMcpWork() && mcpServer?.sessionCount === 0 && !mcpUiWasShown) {
+      scheduleMcpIdleExit(60_000);
+    }
   });
   queueManager.on('progress', (progress) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('task:progress', progress);
@@ -2153,8 +2326,12 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) showMainWindow();
   });
-}).catch((error) => {
-  if (process.env.HAMSTER_SMOKE_TEST === '1' || process.argv.includes('--background')) console.error(`HAMSTER_STARTUP_FAILED ${error.stack || error.message}`);
+}).catch(async (error) => {
+  const failedArgs = startupDesktopMcpRequest
+    ? [`--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`]
+    : process.argv;
+  await writeMcpStartupDiagnostic(failedArgs, error);
+  if (process.env.HAMSTER_SMOKE_TEST === '1' || startupRequestsMcp) console.error(`HAMSTER_STARTUP_FAILED ${error.stack || error.message}`);
   else if (!showStartupError(error)) {
     const english = usesEnglishUi();
     dialog.showErrorBox(
@@ -2166,10 +2343,12 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  if (mcpTray && !allowWindowClose) return;
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('before-quit', (event) => {
+  clearMcpIdleTimer();
   if (scheduleTimer) clearInterval(scheduleTimer);
   if (queueManager?.running && !allowWindowClose) {
     event.preventDefault();

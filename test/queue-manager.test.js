@@ -1405,6 +1405,26 @@ test('disabled small-item filtering accepts tiny folders before output setup', a
   assert.deepEqual(scanManager.skippedRootFiles, []);
 });
 
+test('small items rejected during direct intake are logged by project name', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-tiny-intake-log-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const tinyFolder = path.join(root, 'tiny-project');
+  await fs.mkdir(tinyFolder);
+  await fs.writeFile(path.join(tinyFolder, 'tiny.txt'), 'tiny');
+  const manager = new QueueManager(new FakeStore(), {
+    archiveOutputDirectory: '',
+    archiveStagingDirectory: '',
+    repositoryDirectory: path.join(root, 'warehouse'),
+    moveCompleted: false,
+    smallItemFilter: true,
+    minimumTaskBytes: 50 * MIB
+  });
+
+  await assert.rejects(manager.addSingle(tinyFolder), /低于当前 50 MB 的入库阈值/);
+  assert.equal(manager.logs.at(-1)?.level, 'warning');
+  assert.equal(manager.logs.at(-1)?.message, '“tiny-project”项目低于 50 MB 的入库阈值，已跳过。');
+});
+
 test('catalog fuzzy search ranks matches and supports time and filename sorting', () => {
   const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
   manager.catalog = [

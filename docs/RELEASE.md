@@ -1,15 +1,17 @@
 # 版本与发行流程
 
-## 云端优先与本地回退
+## 云端优先、本地 Current 与本地回退
 
-测试选择、按需产物、检查点和失败续跑统一遵循 `docs/QA_RELEASE_ARCHITECTURE.md`。正式发行默认 `npm run release`，也可明确选择 `npm run release -- --mode local`。标签必须指向当前已提交版本，禁止移动历史标签。
+Review、正式 QA、按需产物、检查点和失败续跑统一遵循 `docs/QA_RELEASE_ARCHITECTURE.md`。正式发行默认 `npm run release`，也可在云端确实不可用时明确选择 `npm run release -- --mode local`。标签必须指向当前已提交版本，禁止移动历史标签。
 
-- 云端 `package.yml` 分为预检、QA、构建和发布四个作业。精确提交已有成功 CI 时直接复用；没有凭据时补丁/次版本只执行受影响 QA，主版本自动使用完整矩阵，也可用 `--qa` 明确覆盖。查找凭据不等待，打包不再因查询失败自动回退全量测试。
+- 默认命令同时启动两条路径：本机从源码生成 Current，云端生成正式 Release。Current 始终本地构建，不下载云端附件，不执行源码 QA 或烟雾测试；两条路径可并行，失败状态分别报告。
+- 本地启动器在派发前读取 Release 状态以保证幂等；云端 `package.yml` 只保留 QA、构建和发布三个作业。补丁/次版本执行一次受影响 QA，主版本执行一次完整 QA。稳定发行不允许跳过 QA，也不查询日常 CI 后再决定是否测试。
 - 构建只生成一次 ZIP、安装 EXE 和两份 SHA-256，并做一次最小隔离启动。验证后的文件以短期 Actions 产物保存一天，供发布失败后的作业级续跑。
 - 上传失败时优先在 Actions 里“重新运行失败的作业”。必须新开运行时使用 `npm run release -- --resume-run RUN_ID` 复用原产物；不得重跑 QA 或构建。完整草稿直接发布，部分草稿只续传缺失附件，完整正式 Release 是幂等成功。
 - 启动器用一次 `gh run watch` 等待，不进行高频 AI 轮询。等待超时时远端任务继续运行，不自动取消、不另起任务。
-- 本地回退先复用同提交产物；确需构建时默认 `targeted`，不再强制完整测试。`--qa full` 只用于主版本、明确重大变更或用户明确要求。
+- 本地回退先复用同提交产物和 QA 凭据。传入失败云端运行的 `--resume-run RUN_ID` 时，只确认该运行已有成功 QA；没有可复用凭据时才在打包前执行一次正式 QA。`release:local` 本身永远不运行 QA。
 - Electron 只在打包或相关 QA 中准备。发行入口验证 `electron.exe`，优先使用校验缓存；确实缺失时按锁定版本下载并复验。普通业务测试不准备 Electron。
+- 发布入口在任何 GitHub 操作前只调用一次目标仓库 API。失败时不执行登录循环：受限环境读不到 Windows 凭据库就切换到正常宿主凭据上下文重试一次；通过后出现的 404/422 按远端状态或工作流配置修复。
 - 私有 Release 是二进制权威源。公开发布执行 `release-publish.js mirror`，直接下载、校验并上传私有四附件；CNB 再从公开 GitHub Release 镜像。两个目标均为零测试、零构建。
 
 ## CNB 发行镜像
@@ -22,7 +24,7 @@ GitHub Release 是唯一权威发行源。CNB 只镜像同一正式版本的公�
 
 手动重试同一标签时优先从公开仓库 Actions 运行 `Sync published release to CNB`；它会先补齐缺失的公开源码标签，再执行附件镜像。单独调试附件同步时，在环境中显式设置 `CNB_SYNC_ENABLED=true`、`CNB_REPO_SLUG`、`CNB_TOKEN` 和精确的 `CNB_UPLOAD_HOSTS`，再运行 `npm run release:sync:cnb -- --tag vX.Y.Z --github-repo CarlosZ16420/hamster-archiver --cnb-repo GROUP/REPO --make-latest false`；此命令仍要求 CNB 已有同名标签。`CNB_API_BASE`、`CNB_WEB_BASE` 可覆盖经核实的 SaaS 基址。历史版本手动补同步默认 `makeLatest=false`，不会改变 CNB latest；只有确认目标就是当前最新正式版本时才显式传 `--make-latest true`，发布事件 workflow 会明确传入该值。脚本先创建或接续隐藏草稿，创建阶段始终保持 `make_latest=false`，只读取已发布 GitHub 正文和四附件并逐项校验名称、大小和 SHA-256；完整回读通过后才按显式 latest 选择发布 CNB Release。同名同摘要附件会跳过，正文、标题、大小或摘要冲突会停止且不覆盖。网络、上传或确认响应不明时先回读远端状态，再决定是否重试，不重新构建或盲目补传。公开客户端的匿名下载回退与同步 workflow 的写权限彼此独立：前者不使用 Token，后者的 Token 仍不得进入源码或发行包。
 
-Actions 页面也可手动运行：`tag` 填现有标签。`publish=false` 是快速测试通道，只生成便携 ZIP、摘要和清单并保留一天；`publish=true` 才生成安装版并发布。`qa_level` 只在没有精确提交 CI 凭据时生效。上传阶段失败可重新运行失败作业；新运行填写原 `resume_run_id`，复用保留一天的验证产物。
+Actions 页面也可手动运行：`tag` 填现有标签。`publish=false` 是云端打包验证通道，只生成便携 ZIP、摘要和清单并保留一天；`publish=true` 才生成安装版并发布。稳定发布的 `qa_level` 不能为 `none`。上传阶段失败可重新运行失败作业；新运行填写原 `resume_run_id`，复用保留一天的验证产物。
 
 ## 版本文件
 
@@ -41,12 +43,11 @@ Actions 页面也可手动运行：`tag` 填现有标签。`publish=false` 是�
 
 ## 本地维护版
 
-1. 完成修改后生成一次 QA 计划并只运行选中的测试。文档可为 `none`，普通修复默认 `targeted`。
-2. 审查差异和仓库安全，提交私有 `main`；只有明确需要本机手动测试时才运行 `npm run release:local` 刷新 Current。
-3. `release:local` 默认只生成 Current；用 `--outputs zip`、`--outputs installer` 或组合值生成其他产物。任何组合只执行一次便携构建和一次最小烟雾，安装版仅在选择时构建。
-4. 两次启动完整性缓存验收改为 `--startup-integrity` 显式选项。完整 QA 使用 `--qa full`，不与同提交的成功 CI 重复。
-5. 各阶段写入仓库外 `builds/release-runs`。重跑同一命令会校验并复用成功阶段，只重试失败处。
-6. 使用 `npm run preview:current` 启动；不要在源码根目录复制或运行 EXE。
+1. 完成修改后由人工或 Agent Review 实际差异、边界和安全；默认不运行测试。Reviewer 只有发现具体风险时才点名一项检查。
+2. 修正 Review 问题后提交私有 `main`。需要马上人工体验时运行 `npm run release:local`；它本地刷新 Current，零自动测试、零烟雾、零云端下载。
+3. `release:local` 用 `--outputs zip`、`--outputs installer` 或组合值生成其他产物，但仍不运行源码 QA。只有云端正式构建显式传入 `--smoke`；启动完整性行为由正式 QA 覆盖，不在本地构建阶段重复启动。
+4. 各阶段写入仓库外 `builds/release-runs`。重跑同一命令会校验并复用成功阶段，只重试失败处。
+5. 使用 `npm run preview:current` 启动；不要在源码根目录复制或运行 EXE。
 
 ZIP、Current 与安装版只在选中时报告；未请求的产物不构成失败。
 
@@ -72,7 +73,7 @@ ZIP、Current 与安装版只在选中时报告；未请求的产物不构成失
 
 ## 失败处理
 
-构建或烟雾验证失败时保留 current，不提升 staging。每个阶段把提交、版本、尝试次数、错误和产物写入外部检查点；修复后重跑失败阶段。公开快照失败时恢复公开工作树，不修改私有提交。禁止因单个失败重新开始整个发行。
+构建或显式烟雾验证失败时保留 current，不提升 staging。每个阶段把提交、版本、尝试次数、错误和产物写入外部检查点；修复后只重跑失败阶段。配置、权限或摘要错误先修根因；网络/5xx 最多重试一次。同一根因第二次仍失败就停止并报告，禁止第三次派发、重新登录、重新构建或重新上传。公开快照失败时恢复公开工作树，不修改私有提交。
 
 ## 公开发行必做：累积双语更新说明
 

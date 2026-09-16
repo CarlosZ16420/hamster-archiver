@@ -1,7 +1,6 @@
-name: CI
+name: Manual QA
 
 on:
-  pull_request:
   workflow_dispatch:
     inputs:
       qa_level:
@@ -46,32 +45,26 @@ jobs:
         id: base
         shell: pwsh
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          PUSH_BASE: ${{ github.event.before }}
-          PR_BASE: ${{ github.event.pull_request.base.sha }}
           MANUAL_BASE: ${{ inputs.base }}
         run: |
-          $base = if ($env:EVENT_NAME -eq 'pull_request') { $env:PR_BASE } elseif ($env:EVENT_NAME -eq 'workflow_dispatch' -and $env:MANUAL_BASE) { $env:MANUAL_BASE } else { $env:PUSH_BASE }
-          if (-not $base -or $base -match '^0+$') { $base = 'HEAD^' }
+          $base = if ($env:MANUAL_BASE) { $env:MANUAL_BASE } else { 'HEAD^' }
           "value=$base" >> $env:GITHUB_OUTPUT
       - name: Make one QA plan
         id: qa
         shell: pwsh
         env:
-          EVENT_NAME: ${{ github.event_name }}
           QA_LEVEL: ${{ inputs.qa_level }}
           QA_GROUP: ${{ inputs.group }}
           QA_TEST_FILE: ${{ inputs.test_file }}
           QA_BASE: ${{ steps.base.outputs.value }}
         run: |
           $arguments = @('scripts/qa-plan.js', '--github-output', $env:GITHUB_OUTPUT)
-          if ($env:EVENT_NAME -eq 'workflow_dispatch' -and $env:QA_TEST_FILE) {
+          if ($env:QA_TEST_FILE) {
             $arguments += @('--test-file', $env:QA_TEST_FILE)
-          } elseif ($env:EVENT_NAME -eq 'workflow_dispatch' -and $env:QA_GROUP) {
+          } elseif ($env:QA_GROUP) {
             $arguments += @('--group', $env:QA_GROUP)
           } else {
-            $level = if ($env:EVENT_NAME -eq 'workflow_dispatch') { $env:QA_LEVEL } else { 'auto' }
-            $arguments += @('--base', $env:QA_BASE, '--level', $level)
+            $arguments += @('--base', $env:QA_BASE, '--level', $env:QA_LEVEL)
           }
           node @arguments
 
@@ -79,8 +72,6 @@ jobs:
     needs: plan
     if: needs.plan.outputs.level != 'none'
     runs-on: windows-latest
-    env:
-      electron_config_cache: ${{ runner.temp }}\electron-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -102,6 +93,8 @@ jobs:
           key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'dependency-lock.json') }}
       - name: Prepare Electron only when selected QA needs it
         if: needs.plan.outputs.needs_electron == 'true'
+        env:
+          electron_config_cache: ${{ runner.temp }}\electron-cache
         run: npm run electron:prepare -- --allow-download
       - name: Restore locked bundled tools
         id: tools_cache
@@ -123,15 +116,14 @@ jobs:
       - name: Run the selected QA only
         shell: pwsh
         env:
-          EVENT_NAME: ${{ github.event_name }}
           QA_LEVEL: ${{ needs.plan.outputs.level }}
           QA_GROUP: ${{ inputs.group }}
           QA_TEST_FILE: ${{ inputs.test_file }}
           QA_BASE: ${{ needs.plan.outputs.base }}
         run: |
           $arguments = @('scripts/qa-plan.js', '--execute')
-          if ($env:EVENT_NAME -eq 'workflow_dispatch' -and $env:QA_TEST_FILE) { $arguments += @('--test-file', $env:QA_TEST_FILE) }
-          elseif ($env:EVENT_NAME -eq 'workflow_dispatch' -and $env:QA_GROUP) { $arguments += @('--group', $env:QA_GROUP) }
+          if ($env:QA_TEST_FILE) { $arguments += @('--test-file', $env:QA_TEST_FILE) }
+          elseif ($env:QA_GROUP) { $arguments += @('--group', $env:QA_GROUP) }
           else { $arguments += @('--base', $env:QA_BASE, '--level', $env:QA_LEVEL) }
           node @arguments
       - name: Run the complete release gates only for explicit full QA

@@ -2,6 +2,22 @@
 !include LogicLib.nsh
 !include FileFunc.nsh
 
+!define HAMSTER_INSTALL_DIRECTORY "Hamster Archiver"
+
+!macro customUnInstall
+  ; Remove every exact shortcut name used by supported Hamster Archiver
+  ; installers. This also cleans up a stale link left by an older or
+  ; interrupted uninstall without touching user-created shortcuts.
+  WinShell::UninstShortcut "$DESKTOP\Hamster Archiver.lnk"
+  Delete "$DESKTOP\Hamster Archiver.lnk"
+  WinShell::UninstShortcut "$DESKTOP\HamsterArchiver.lnk"
+  Delete "$DESKTOP\HamsterArchiver.lnk"
+  WinShell::UninstShortcut "$SMPROGRAMS\Hamster Archiver.lnk"
+  Delete "$SMPROGRAMS\Hamster Archiver.lnk"
+  WinShell::UninstShortcut "$SMPROGRAMS\HamsterArchiver.lnk"
+  Delete "$SMPROGRAMS\HamsterArchiver.lnk"
+!macroend
+
 !ifndef BUILD_UNINSTALLER
 
 Var HamsterDesktopShortcutCheckbox
@@ -13,15 +29,38 @@ Function HamsterNormalizeInstallDirectory
     StrCpy $INSTDIR "$INSTDIR" -1
   ${EndIf}
   ${GetFileName} "$INSTDIR" $0
-  ${If} $0 != "${APP_FILENAME}"
-    StrCpy $INSTDIR "$INSTDIR\${APP_FILENAME}"
+  ${If} $0 != "${HAMSTER_INSTALL_DIRECTORY}"
+    StrCpy $INSTDIR "$INSTDIR\${HAMSTER_INSTALL_DIRECTORY}"
   ${EndIf}
+FunctionEnd
+
+Function HamsterInstallDirectoryPre
+  ${If} ${isUpdated}
+    Abort
+  ${EndIf}
+  ; electron-builder initializes a fresh per-user install with APP_FILENAME.
+  ; Present the friendly product folder instead of nesting another directory.
+  ${GetFileName} "$INSTDIR" $0
+  ${If} $0 == "${APP_FILENAME}"
+    ${GetParent} "$INSTDIR" $0
+    StrCpy $INSTDIR "$0\${HAMSTER_INSTALL_DIRECTORY}"
+  ${EndIf}
+FunctionEnd
+
+Function HamsterInstallDirectoryLeave
+  Call HamsterNormalizeInstallDirectory
 FunctionEnd
 
 !macro customPageAfterChangeDir
   ; Define these callbacks when electron-builder expands the page macro. At
   ; that point its update-detection plug-in is available to skip this page for
   ; in-place upgrades while keeping it visible for a fresh installation.
+  !define MUI_PAGE_CUSTOMFUNCTION_PRE HamsterInstallDirectoryPre
+  !define MUI_PAGE_CUSTOMFUNCTION_LEAVE HamsterInstallDirectoryLeave
+  !insertmacro MUI_PAGE_DIRECTORY
+  !undef MUI_PAGE_CUSTOMFUNCTION_PRE
+  !undef MUI_PAGE_CUSTOMFUNCTION_LEAVE
+
   Function HamsterInstallOptionsCreate
     ${If} ${isUpdated}
       Abort

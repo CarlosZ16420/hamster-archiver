@@ -14,7 +14,7 @@ on:
         default: false
         type: boolean
       qa_level:
-        description: QA tier when no exact-commit CI receipt exists
+        description: Formal QA tier for this release run
         default: auto
         type: choice
         options: [auto, none, targeted, full]
@@ -45,58 +45,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  preflight:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      release_state: ${{ steps.release_state.outputs.value }}
-      needs_bundle: ${{ steps.release_state.outputs.value == 'missing' || steps.release_state.outputs.value == 'partial-draft' }}
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_PROMPT_DISABLED: '1'
-      RELEASE_TAG: ${{ inputs.tag }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
-      - name: Inspect Release state before building
-        id: release_state
-        shell: pwsh
-        run: |
-          $state = if ('${{ inputs.publish }}' -eq 'true') { node scripts/release-publish.js state --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG } else { 'missing' }
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "value=$state" >> $env:GITHUB_OUTPUT
-      - name: Publish an already complete draft without rebuilding
-        if: inputs.publish && steps.release_state.outputs.value == 'complete-draft'
-        run: node scripts/release-publish.js publish --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
-      - name: Report an already published complete Release
-        if: inputs.publish && steps.release_state.outputs.value == 'complete-published'
-        shell: pwsh
-        run: "'The requested GitHub Release was already published and complete; no rebuild or upload was needed.' >> $env:GITHUB_STEP_SUMMARY"
-
   qa:
-    needs: preflight
-    if: needs.preflight.outputs.needs_bundle == 'true' && inputs.resume_run_id == ''
+    if: ${{ !inputs.resume_run_id }}
     runs-on: windows-latest
     timeout-minutes: 15
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_PROMPT_DISABLED: '1'
-      electron_config_cache: ${{ runner.temp }}\electron-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
-      - name: Reuse successful source CI for this exact commit
-        id: source_ci
-        if: inputs.qa_level != 'full' && inputs.release_kind != 'major' && inputs.retry_test_file == ''
-        continue-on-error: true
-        run: node scripts/verify-source-ci-receipt.js --repo "$GITHUB_REPOSITORY" --wait-seconds 0
-      - name: Plan fallback QA once
+      - name: Plan formal QA once
         id: qa_plan
-        if: steps.source_ci.outcome != 'success'
         shell: pwsh
         env:
           REQUESTED_QA: ${{ inputs.qa_level }}
@@ -107,10 +66,11 @@ jobs:
             node scripts/qa-plan.js --test-file $env:RETRY_TEST_FILE --github-output $env:GITHUB_OUTPUT
           } else {
             $qa = if ($env:RELEASE_KIND -eq 'major') { 'full' } elseif ($env:REQUESTED_QA -ne 'auto') { $env:REQUESTED_QA } else { 'targeted' }
+            if ('${{ inputs.publish }}' -eq 'true' -and $qa -eq 'none') { throw 'A stable Release must run formal QA.' }
             node scripts/qa-plan.js --base HEAD^ --level $qa --github-output $env:GITHUB_OUTPUT
           }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: steps.source_ci.outcome != 'success'
+        if: steps.qa_plan.outputs.level != 'none'
         with:
           node-version: 24
           cache: npm
@@ -139,6 +99,7 @@ jobs:
         shell: pwsh
         env:
           TOOLS_CACHE_HIT: ${{ steps.tools_cache.outputs.cache-hit }}
+          electron_config_cache: ${{ runner.temp }}\electron-cache
         run: |
           npm run electron:prepare -- --allow-download
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -149,8 +110,8 @@ jobs:
             npm run tools:prepare
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-      - name: Run the selected source QA once
-        if: steps.source_ci.outcome != 'success'
+      - name: Run formal QA once
+        if: steps.qa_plan.outputs.level != 'none'
         shell: pwsh
         env:
           QA_LEVEL: ${{ steps.qa_plan.outputs.level }}
@@ -169,16 +130,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   build:
-    needs: [preflight, qa]
-    if: always() && needs.preflight.result == 'success' && needs.preflight.outputs.needs_bundle == 'true' && inputs.resume_run_id == '' && needs.qa.result == 'success'
+    needs: qa
+    if: ${{ !inputs.resume_run_id && needs.qa.result == 'success' }}
     runs-on: windows-latest
     timeout-minutes: 25
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_PROMPT_DISABLED: '1'
-      RELEASE_TAG: ${{ inputs.tag }}
-      HAMSTER_LOCAL_ROOT: ${{ runner.temp }}\HamsterArchiver-Local
-      electron_config_cache: ${{ runner.temp }}\electron-cache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -206,12 +161,17 @@ jobs:
           key: bundled-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('dependency-lock.json') }}
       - name: Build and smoke once without repeating source QA
         shell: pwsh
+        env:
+          HAMSTER_LOCAL_ROOT: ${{ runner.temp }}\HamsterArchiver-Local
+          electron_config_cache: ${{ runner.temp }}\electron-cache
         run: |
           $outputs = if ('${{ inputs.publish }}' -eq 'true') { 'zip,installer' } else { 'zip' }
-          npm run release:local -- --outputs $outputs --qa none
+          npm run release:local -- --outputs $outputs --smoke
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify complete release files
         if: inputs.publish
+        env:
+          HAMSTER_LOCAL_ROOT: ${{ runner.temp }}\HamsterArchiver-Local
         run: node scripts/release-publish.js verify
       - name: Save the verified bundle checkpoint
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -226,28 +186,27 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [preflight, build]
-    if: always() && needs.preflight.result == 'success' && needs.preflight.outputs.needs_bundle == 'true' && (needs.build.result == 'success' || inputs.resume_run_id != '')
+    needs: build
+    if: ${{ always() && (needs.build.result == 'success' || inputs.resume_run_id) }}
     runs-on: windows-latest
     timeout-minutes: 15
     env:
       GH_TOKEN: ${{ github.token }}
       GH_PROMPT_DISABLED: '1'
       RELEASE_TAG: ${{ inputs.tag }}
-      HAMSTER_LOCAL_ROOT: ${{ runner.temp }}\HamsterArchiver-Local
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag }}
           fetch-depth: 0
       - name: Restore bundle from this run
-        if: inputs.resume_run_id == ''
+        if: ${{ !inputs.resume_run_id }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: HamsterArchiver-${{ inputs.tag }}-windows-x64
           path: ${{ runner.temp }}\HamsterArchiver-Local\builds
       - name: Restore bundle from a prior run
-        if: inputs.resume_run_id != ''
+        if: ${{ inputs.resume_run_id }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: HamsterArchiver-${{ inputs.tag }}-windows-x64
@@ -256,9 +215,13 @@ jobs:
           run-id: ${{ inputs.resume_run_id }}
       - name: Verify restored release files
         if: inputs.publish
+        env:
+          HAMSTER_LOCAL_ROOT: ${{ runner.temp }}\HamsterArchiver-Local
         run: node scripts/release-publish.js verify
       - name: Create or resume and publish verified GitHub Release
         if: inputs.publish
+        env:
+          HAMSTER_LOCAL_ROOT: ${{ runner.temp }}\HamsterArchiver-Local
         run: node scripts/release-publish.js release --repo $env:GITHUB_REPOSITORY --tag $env:RELEASE_TAG
       - name: Report reusable validation bundle
         if: ${{ !inputs.publish }}

@@ -73,6 +73,14 @@ if (!rendererDir) {
     assert.equal(i18n.translate('等待下次入库'), 'Next Run');
     assert.equal(i18n.translate('2 个低于 100 MB 的小项目'), '2 small items below 100 MB');
     assert.equal(
+      i18n.translate('有多个项目低于当前 50 MB 的入库阈值。'),
+      'Multiple items are below the current 50 MB minimum item size.'
+    );
+    assert.equal(
+      i18n.translate('“tiny-project”项目低于 50 MB 的入库阈值，已跳过。'),
+      'Skipped “tiny-project”: below the 50 MB minimum item size.'
+    );
+    assert.equal(
       i18n.translate('“PRESTIGE”已加入相似度白名单；已有关系不会自动重算'),
       'Added “PRESTIGE” to ignore list; existing links unchanged.'
     );

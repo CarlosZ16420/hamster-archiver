@@ -376,7 +376,7 @@ h2 { margin: 0; font-size: 21px; letter-spacing: -.02em; }
 .safety-chip strong { overflow: hidden; font: inherit; text-overflow: ellipsis; white-space: nowrap; }
 
 main { max-width: 1500px; margin: 0 auto; padding: 0 44px 50px; }
-.app-footer { display: flex; justify-content: space-between; align-items: center; gap: 18px; max-width: 1500px; margin: -24px auto 0; padding: 0 44px 28px; color: var(--muted); font-size: 12px; }
+.app-footer { display: flex; justify-content: space-between; align-items: center; gap: 18px; width: 100%; max-width: 1500px; margin: auto auto 0; padding: 0 44px 12px; color: var(--muted); font-size: 12px; }
 .app-footer-links { display: flex; align-items: center; gap: 8px; }
 .app-footer-links i { color: var(--line-strong); font-style: normal; }
 .footer-link { padding: 2px 0; border: 0; color: var(--accent-dark); background: transparent; font-weight: 700; }
@@ -1106,7 +1106,7 @@ main { max-width: 1780px; padding: 24px 28px 50px; }
 .menu-button.danger { color: var(--danger-fg); }
 .log-panel { margin-top: 0; padding-block: 4px; }
 .log-group .group-head { grid-template-columns: max-content minmax(0, 1fr) auto; }
-.log-panel .group-body { padding-top: 8px; }
+.log-panel .group-body { margin-left: 0; padding: 8px 0 14px; }
 .log-panel .log-list { max-height: 230px; }
 
 .library-panel { padding: 18px; }
@@ -1192,7 +1192,7 @@ main { max-width: 1780px; padding: 24px 28px 50px; }
   .warehouse-bulkbar .context-actions { order: 3; flex-basis: 100%; flex-wrap: wrap; }
 }
 
-@media (max-width: 820px) {
+@media (max-width: 760px) {
   .app-bar { grid-template-columns: 1fr auto; padding-inline: 16px; }
   .app-bar .top-nav { grid-row: 2; grid-column: 1 / -1; width: 100%; padding: 5px 0; }
   .app-bar .nav-button { flex: 1; }
@@ -1247,6 +1247,22 @@ main { max-width: 1560px; padding: 22px 26px 40px; }
 .location-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
 .location-heading .step { margin: 2px 0 0; white-space: nowrap; }
 .location-heading h2 { margin: 0; text-align: right; }
+.location-settings-group { margin: 0 !important; }
+.location-settings-group > .location-heading {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  margin: 0 0 16px;
+  padding: 0 2px 13px;
+}
+.location-settings-group:not([open]) > .location-heading { margin-bottom: 0; padding-bottom: 0; }
+.location-settings-group > .location-heading .step,
+.location-settings-group > .location-heading h2 { line-height: 1.25; }
+.location-settings-group > .location-heading .step { margin: 0; }
+.location-settings-group > .location-heading h2 { min-width: 0; }
+.location-settings-group[open] > .location-heading .group-chevron { transform: rotate(180deg); }
+.location-settings-body { padding: 0 !important; }
 .settings-utility-actions { display: flex; justify-content: flex-end; gap: 7px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
 .path-stack { gap: 0; }
 .path-field + .path-field { margin-top: 12px; }
@@ -1686,7 +1702,7 @@ body[data-theme="day"] .discovery-hero.no-cover .discovery-hero-info span { colo
 .app-bar { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
 .app-bar .top-nav { position: static; left: auto; width: max-content; transform: none; }
 
-@media (max-width: 1100px) {
+@media (max-width: 760px) {
   .app-bar { grid-template-columns: minmax(0, 1fr) auto; }
   .app-bar .top-nav { grid-row: 2; grid-column: 1 / -1; width: max-content; justify-self: center; padding: 5px 0; }
   .app-bar .nav-button { flex: 0 0 auto; }
@@ -1702,3 +1718,9 @@ body[data-theme="day"] .discovery-hero.no-cover .discovery-hero-info span { colo
   .statistics-months { grid-template-columns: 1fr; }
   .statistics-year-months { grid-template-columns: repeat(3, 1fr); }
 }
+
+html { min-height: 100%; }
+body { display: flex; min-height: 100vh; flex-direction: column; }
+.app-bar { flex: 0 0 auto; }
+main { box-sizing: border-box; flex: 1 0 auto; width: 100%; }
+.app-footer { box-sizing: border-box; flex: 0 0 auto; }

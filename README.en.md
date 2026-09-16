@@ -6,15 +6,17 @@
 
 ### Enjoy collecting. Enjoy organizing, too.
 
-Turn scattered local files into your own visual resource library.
+Windows local-first file organizer, media catalog and verified batch archiver with MCP tools for AI assistants.
 
-![Version](https://img.shields.io/badge/version-4.6.9-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.10-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
-**[Download for Windows](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[Use with AI](#let-your-ai-client-use-the-library)** · [简体中文](README.md) · [Report an issue](https://github.com/CarlosZ16420/hamster-archiver/issues)
+**[Download for Windows](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[Use with AI](docs/AI-QUICKSTART.md)** · [简体中文](README.md) · [Report an issue](https://github.com/CarlosZ16420/hamster-archiver/issues)
 
 </div>
+
+[Quick start](#quick-start) · [Use with AI](#let-ai-organize-it-for-you) · [Features](#everyday-ease-supported-by-careful-details) · [FAQ](#frequently-asked-questions) · [Documentation and contributions](#documentation-and-contributions)
 
 Downloads keep piling up, your drive is almost full, and organizing everything never gets done?
 
@@ -26,7 +28,7 @@ Downloads keep piling up, your drive is almost full, and organizing everything n
 
 **Your files can live elsewhere while a clear record of their contents and backup locations stays on your computer.**
 
-![Archive workbench and thumbnail library](assets/readme/product-overview.en-US.png)
+[![Library overview, cover gallery and search filters](assets/readme/library-showcase.en-US.png)](assets/readme/library-showcase.en-US.png)
 
 <sub>Actual application views; some labels in these screenshots may differ from the current version.</sub>
 
@@ -34,16 +36,44 @@ Downloads keep piling up, your drive is almost full, and organizing everything n
 
 | Your goal | What you get |
 | --- | --- |
-| **Prepare backups for cloud storage or another drive** | Batch compression, integrity verification and catalog registration. After uploading, record the backup location; local covers, video frames and directory trees show what each archive contains. |
 | **Organize the files already on your computer** | Originals stay in place while the app creates previews and manifests. Categorize with tags and notes in the library, and queue those records for compression later if needed. |
+| **Prepare backups for cloud storage or another drive** | Batch compression, integrity verification and catalog registration. Record the backup location; local covers, video frames and directory trees show what each archive contains. |
 
 The app packages files and records them; you or your sync tool handles cloud uploads. Local organization uses catalog metadata such as tags and does not automatically rearrange folders on disk.
+
+## Quick start
+
+For **Windows x64**, with English and Chinese interfaces. To use the app, choose a [Release package](https://github.com/CarlosZ16420/hamster-archiver/releases/latest); GitHub Source code downloads and repository clones are for development.
+
+1. Download the **Setup EXE installer**, or extract the entire **portable ZIP** and run `HamsterArchiver.exe`.
+2. In the archive workbench, scan a directory or drop folders and videos, then review the pending resources. Try one small folder for your first run.
+3. For **local organization**, choose uncompressed intake. To **prepare backups**, set the archive output directory and start compressed intake. Open the library afterward to browse and organize the results.
+
+Keep the full portable directory, such as `HamsterArchiver-v4.6.10-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included, and no separate Node.js installation is needed.
+
+[![Batch archiving, progress tracking and duplicate review](assets/readme/archive-showcase.en-US.png)](assets/readme/archive-showcase.en-US.png)
+
+## Let AI organize it for you
+
+An AI assistant with local command execution or local MCP access on the target Windows computer can search your collection, add tags, submit intake tasks and track results. A chat assistant with web search alone can provide instructions but cannot access your local files. The project exposes tools for AI assistants; it does not bundle an online content-recognition model.
+
+Send this to an assistant with local access, replacing the folder with your own:
+
+> Please use Hamster Archiver (https://github.com/CarlosZ16420/hamster-archiver) to catalog D:\Downloads\Sample Project without compression, keeping the originals. First read the project's AI quick start and reuse an existing installation; if installation is needed, download and verify a Windows release package. Follow the workflow supported by the installed package, complete read-only connection checks, then perform the task and verify its final result.
+
+**Versions and capabilities:** Downloads and current source may be at different stages. `Unreleased` in the [changelog](CHANGELOG.md) means changes have not been released. Startup diagnostics, intake planning and tray task access depend on what the installed package actually provides.
+
+The AI should first read the package's `ai-capabilities.json`: run `doctor` only when `schemaVersion` is `2` and `cliCommands` includes it. For older packages without that declaration, follow their bundled or versioned `docs/MCP.md`; do not probe with unknown commands. See the [AI quick start](docs/AI-QUICKSTART.md) for configuration, examples and troubleshooting.
+
+After connecting, the AI determines the intake mode, reusing an explicit choice in your request. Inventory-only intake always keeps originals and needs no archive destination or password. Compressed intake reuses saved preferences and asks only for a missing destination and source-handling choice; a password is always optional. Builds supporting intake planning check the scope before submission and track submitted tasks to a final state.
+
+On builds with tray task access, open the workbench at any time to view tasks marked “AI request.” Results should include successful, skipped and failed counts, library records and archive locations. The app itself does not upload media; returned titles, paths and other metadata enter your chosen AI client's context.
 
 ## Store the backup elsewhere. Keep its contents in view.
 
 Each project retains image thumbnails, sampled video frames and a complete directory tree. Choose a cover, record the extraction password and backup location, and browse what you archived without opening the archive itself.
 
-![Project organization, media previews and directory tree](assets/readme/project-detail.en-US.png)
+[![Tags, ratings, backup locations, video frames and directory tree](assets/readme/details-showcase.en-US.png)](assets/readme/details-showcase.en-US.png)
 
 ## Everyday ease, supported by careful details
 
@@ -110,46 +140,6 @@ Choose 7z/ZIP, passwords and custom split volumes. Queue batches, pause or sched
 
 </details>
 
-## Let AI organize it for you
-
-This works with an AI assistant that can access your computer and connect to MCP. The AI can handle setup, connection checks and task tracking; you only need to describe what you want.
-
-### Download
-
-Send this to your AI assistant:
-
-> Please download this project for me: https://github.com/CarlosZ16420/hamster-archiver
-
-### First intake
-
-After the download finishes, say:
-
-> Please use Hamster Archiver to organize my D:\Downloads folder.
-
-The AI reads existing settings first. On the first run, it asks only for missing choices:
-
-1. Where compressed archives should be saved;
-2. The intake mode (compressed or inventory-only) and what to do with original files afterward;
-3. Whether to set an extraction password.
-
-Once confirmed, you can wait for completion. The AI connects to the app, runs the intake, tracks progress and summarizes archive locations, warehouse records and results.
-
-### Later use
-
-At any time, say:
-
-> Please use Hamster Archiver to organize everything in E:\Downloads.
-
-The AI reuses saved preferences and asks again only when this task differs or required information is missing. The app itself does not upload media; metadata returned through MCP enters your chosen AI client's context. Full operating instructions for AI assistants are in the [AI quick start](docs/AI-QUICKSTART.md).
-
-## Start with your first batch
-
-1. Get the **Setup EXE installer** or **portable ZIP** from [Releases](https://github.com/CarlosZ16420/hamster-archiver/releases/latest). Extract the entire portable package and run `HamsterArchiver.exe`.
-2. In the archive workbench, scan a directory or drop folders and videos, then review the pending resources.
-3. For **local organization**, choose uncompressed intake. To **prepare backups**, set the archive output directory and start compressed intake. Open the library afterward to browse and organize the results.
-
-Keep the full portable directory, such as `HamsterArchiver-v4.6.9-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included.
-
 ## Frequently asked questions
 
 <details>
@@ -179,16 +169,17 @@ If an older version has no working updater, export the warehouse and import it i
 
 </details>
 
-## Continued refinement since 4.5.0
+## Documentation and contributions
 
-Recent work reworked similarity and duplicate verification, improved large-folder processing and failure recovery, and added tag completion, theme and language refinements, installed-edition updates and AI access. Much of it shows up as fewer misleading matches, less flicker and clearer file states after a failure. See the [changelog](CHANGELOG.md) for details.
+| What you need | Where to go |
+| --- | --- |
+| Downloads and published versions | [Releases](https://github.com/CarlosZ16420/hamster-archiver/releases) |
+| AI setup, call examples and troubleshooting | [AI quick start](docs/AI-QUICKSTART.md) · [MCP reference](docs/MCP.md) |
+| Feature changes | [Changelog](CHANGELOG.md) (`Unreleased` marks changes awaiting release) |
+| Bug reports or feature suggestions | [Issues](https://github.com/CarlosZ16420/hamster-archiver/issues): include the version, steps and error details; redact private paths and passwords |
+| Code or documentation contributions | [Contributing](CONTRIBUTING.md) · [Development guide](docs/DEVELOPMENT.md) |
+| Security reports and licensing | [Security](SECURITY.md) · [MIT License](LICENSE) |
 
-## Open source and contributions
+Source development requires Windows, Node.js 22.12+ on 22.x or 24.x, and npm 10.x/11.x. See the development guide for dependency, Electron runtime and bundled-tool setup.
 
-[MIT License](LICENSE) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Changelog](CHANGELOG.md)
-
-Source development requires Windows, Node.js 22.12+ on 22.x or 24.x, and npm 10.x/11.x. Install dependencies with `npm ci`, prepare bundled tools with `npm run tools:prepare` as needed, then run `npm start`. See the contribution guide for verification requirements.
-
-Thanks to 7-Zip, FFmpeg, the open-source community and everyone who tests the app and reports the details that need attention.
-
-If Hamster Archiver makes your collection easier to organize, a Star or an Issue with your experience is always welcome.
+Hamster Archiver started as a small tool for my own collection. I hope it helps you enjoy organizing yours, too. Thanks to 7-Zip, FFmpeg, the LinuxDo community and everyone who tries the app and shares feedback. If it helps you, a Star or a suggestion is always welcome.

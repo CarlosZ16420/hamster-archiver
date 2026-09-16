@@ -601,8 +601,22 @@ test('small-item intake errors reveal and highlight the matching setting for pic
   assert.match(app, /friendlyIntakeError/);
   assert.match(app, /elements\.intakePreviewSettings\.open = true/);
   assert.match(app, /smallItemFilterCard\.scrollIntoView/);
-  assert.match(app, /const smallItemError = errors\.find\(isSmallItemThresholdError\)/);
+  assert.match(app, /const smallItemErrors = errors\.filter\(isSmallItemThresholdError\)/);
+  assert.match(app, /有多个项目低于当前 \$\{thresholdMb\} MB 的入库阈值/);
   assert.match(styles, /\.option-card\.attention-flash/);
+});
+
+test('workbench setup, footer and top navigation keep the requested responsive layout', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+
+  assert.match(html, /id="archive-setup-settings"[^>]*open/);
+  assert.match(html, /class="panel-head location-heading"[\s\S]*?01 · 收纳设置[\s\S]*?这次从哪里收，存到哪里[\s\S]*?group-chevron/);
+  assert.match(styles, /\.location-settings-group > \.location-heading\s*\{[^}]*grid-template-columns:\s*max-content minmax\(0, 1fr\) auto;[^}]*align-items:\s*start;/s);
+  assert.match(styles, /body\s*\{[^}]*display:\s*flex;[^}]*min-height:\s*100vh;[^}]*flex-direction:\s*column;/s);
+  assert.match(styles, /\.app-footer\s*\{[^}]*margin:\s*auto auto 0;/s);
+  assert.match(styles, /@media \(max-width: 760px\)\s*\{\s*\.app-bar/s);
+  assert.doesNotMatch(styles, /@media \(max-width: 1100px\)\s*\{\s*\.app-bar/);
 });
 
 test('warehouse view, ratings and image pickers expose native keyboard controls', () => {

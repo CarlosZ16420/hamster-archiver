@@ -1511,6 +1511,11 @@ function renderJobs(jobs) {
     openName.dataset.openJobSource = job.id;
     openName.setAttribute('aria-label', `打开任务位置 ${job.displayName}`);
     nameLine.append(makeUserText('strong', '', job.displayName));
+    if (job.mcpRequestId) {
+      const aiBadge = make('span', 'queue-origin-badge ai', 'AI 提交');
+      aiBadge.title = `${t('AI 请求')}：${job.mcpRequestId}`;
+      nameLine.append(aiBadge);
+    }
     if (job.sourceCatalogRecordId) nameLine.append(make('span', 'queue-origin-badge', '库内项目压缩'));
     else if (job.processingMode === 'inventory_only') nameLine.append(make('span', 'queue-origin-badge uncompressed', '未压缩入库'));
     nameLine.append(copyName, openName);
@@ -3315,6 +3320,12 @@ function isSmallItemThresholdError(message) {
     /^This item is only [\d.]+ MB, below the current \d+ MB intake threshold\.$/.test(message);
 }
 
+function smallItemThresholdMb(message) {
+  return String(message || '').match(/低于当前 (\d+) MB 的入库阈值/)?.[1] ||
+    String(message || '').match(/below the current (\d+) MB intake threshold/i)?.[1] ||
+    null;
+}
+
 function revealSmallItemFilter(message) {
   activatePage('workbench-page');
   elements.intakePreviewSettings.open = true;
@@ -3375,8 +3386,12 @@ async function addPathsToQueue(paths, sourceLabel) {
       render(result.state);
     } else if (result.error) errors.push(result.error);
   }
-  const smallItemError = errors.find(isSmallItemThresholdError);
-  if (smallItemError) revealSmallItemFilter(smallItemError);
+  const smallItemErrors = errors.filter(isSmallItemThresholdError);
+  const smallItemError = smallItemErrors[0];
+  if (smallItemErrors.length > 1) {
+    const thresholdMb = smallItemThresholdMb(smallItemError) || elements.minimumTaskMb.value || '0';
+    revealSmallItemFilter(`有多个项目低于当前 ${thresholdMb} MB 的入库阈值。`);
+  } else if (smallItemError) revealSmallItemFilter(smallItemError);
   else if (errors.length > 0) showToast(errors[0], true);
   if (smallItemError || errors.length > 0) return;
   showToast(

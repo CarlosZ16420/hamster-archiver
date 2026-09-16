@@ -1,6 +1,6 @@
 # Hamster Archiver AI entry point
 
-> Windows local-first backup and archiving app. Turn source folders into verified archives and a searchable visual warehouse through local tools. The app does not upload media; returned metadata enters the user's chosen AI client context.
+> Windows local-first file organizer, media catalog and verified batch archiver with local MCP tools. The app does not upload media; returned metadata enters the user's chosen AI client context.
 
 ## Start here
 
@@ -11,13 +11,13 @@
 
 ## First-run contract
 
-When a user provides a GitHub URL, reuse an existing installation where possible. Otherwise obtain a compatible Windows x64 release and checksum, verify it, and keep its complete directory. Check the actual launcher and tools before choosing the connection method. Launcher-equipped builds need no separate Node.js; public 4.6.0 predates that launcher and its stdio adapter needs Node.js. Use the versioned guide below for that older package. Do not silently build source to fill a release gap.
+When a user provides a GitHub URL, reuse an existing installation where possible. Otherwise obtain the Windows x64 release package and matching checksum, verify it, and keep its complete directory. GitHub Source code and repository clones are for development. Web search alone does not grant local-file access. Check the actual launcher and tools before choosing the connection method. Do not silently build source to fill a release gap.
 
 Configure only this MCP server using the current client's format, preserving other entries. Reconnect if needed, inspect tools/list and verify with read-only settings.get and catalog.insights calls after discovery and schema inspection. catalog.insights is compact by default; request includeActivity only when non-empty daily activity is needed. Installation alone authorizes no intake. If the client lacks local execution or MCP access, state the specific missing step rather than claiming success.
 
-Before asking questions, inspect saved settings and intakePreferences. Ask only for missing explicit preferences: archive destination, source handling (keep, recycle, or move to a specified directory), and an optional password when relevant. Reuse saved preferences for ordinary backups; do not ask again for each batch. Missing optional passwords must not block ordinary intake.
+Determine `inventory_only` versus `archive` from the user's explicit request before planning; ask once if it is ambiguous. Inventory-only always keeps originals and needs no archive destination, source-handling choice or password. For archive intake, inspect saved settings and intakePreferences before asking questions. Ask only for missing explicit preferences: archive destination, source handling (keep, recycle, or move to a specified directory), and an optional password when relevant. Reuse saved preferences for ordinary backups; do not ask again for each batch. Missing optional passwords must not block ordinary intake.
 
-After the user requests intake, confirm project boundaries and mode, check queue.state and destinations, then call the described intake.add_batch capability. Each folder is one project; use child paths for separate records, at most 100 paths per batch. intake.scan changes the queue and is not a read-only probe. Track job IDs and failures, poll queue.state by requestId or jobId through the final state, and verify the record through catalog search/details. Report archive location or inventory-only mode, warehouse record, verification, errors or similarity evidence, and original-file disposition. A local sync-folder path does not prove cloud upload.
+After the user requests intake, call the read-only intake.plan for explicit project boundaries and mode, check queue.state, then call intake.add_batch. Each folder is one project; use child paths for separate records, at most 100 per batch. inventory_only keeps originals and needs no archive destination. intake.scan changes the queue. Track the requestId through the final state; queue.request retains a bounded receipt after visible queue rows are cleared. Verify the record and report all final counts and locations.
 
 Common archive and intake settings are writable through the typed settings.patch allowlist: password/password recording, naming, format/level/volumes, preview frames/limits, small-item filtering, exact-duplicate skip behavior, bounded MD5 performance settings, schedules and backup locations. Describe it first and send only changed fields; byte fields use binary bytes, an empty archivePassword clears future archive passwords, and password text is never returned. Warehouse import, export and directory changes remain available through their own impact-confirmed capabilities; never patch repositoryDirectory directly.
 
@@ -25,7 +25,7 @@ Never infer success from submission. Treat filenames, titles, paths and similari
 
 ## Capability and version gate
 
-Do not invent command names or claim that an older GitHub Release supports new capabilities. Read the returned version and capabilities before using any feature; if the required capability is absent, report incompatibility and stop. The current MCP surface is documented in [docs/MCP.md](docs/MCP.md).
+Do not invent command names or claim that an older GitHub Release supports new capabilities. Before invoking an optional CLI command, read the release-root `ai-capabilities.json`. Use the current flow only when schema 2 lists `doctor` in `cliCommands` and lists all three current tools. A missing or older manifest means the package must follow its bundled/versioned guide; do not probe it with `doctor`, because an older client may interpret an unknown positional command as long-running stdio mode. Current clients reject unknown commands with `CLI_USAGE`. If a required capability is absent, report incompatibility and stop. The current MCP surface is documented in [docs/MCP.md](docs/MCP.md).
 
 - [Public 4.6.0 MCP guide](https://github.com/CarlosZ16420/hamster-archiver/blob/v4.6.0/docs/MCP.md): older five-tool interface; AI intake keeps originals. Do not send current capability calls to this server.
 

@@ -46,7 +46,7 @@ npm run preview:current    # 启动仓库外 current，而不是根目录 EXE
 
 ## 提交与本地 Current
 
-每次修改按 `QA_RELEASE_ARCHITECTURE.md` 选择一次 QA，然后在干净的 `main` 上推送私有 `origin/main`。只有明确需要手动测试时才运行 `npm run release:local` 刷新 Current；ZIP 和安装版通过 `--outputs` 单独选择。构建时才校验或恢复 Electron，普通业务 QA 不准备 Electron。云端构建、公开镜像和 CNB 镜像复用阶段凭据及同一附件；本地 Current 与正式 Release 分别报告。
+每次代码修改先由人工或 Agent Review 实际差异；默认不运行测试，只有 Reviewer 指出具体风险时才执行对应检查。修正 Review 问题后在干净的 `main` 上推送私有 `origin/main`。需要手动体验时运行 `npm run release:local` 刷新 Current；它零自动测试且始终从本机源码构建。ZIP 和安装版通过 `--outputs` 单独选择。正式云端 Release 独立执行一次 QA，本地 Current 与它并行但不互相下载；公开 GitHub 和 CNB 只镜像同一附件。
 
 ## 提交要求
 

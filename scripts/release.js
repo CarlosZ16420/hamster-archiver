@@ -1,6 +1,8 @@
 'use strict';
 
 const { randomUUID } = require('node:crypto');
+const { spawn } = require('node:child_process');
+const path = require('node:path');
 const { completeDraft, completePublishedRelease, getReleaseByTag, publishCompleteDraft, releaseArtifacts, releaseState, run, verifyFiles } = require('./release-publish');
 const { openCheckpoint, runStage } = require('./release-checkpoint');
 const version = require('../package.json').version;
@@ -26,6 +28,7 @@ function optionsFrom(argv) {
   if (result.channel === 'stable' && result.tag !== `v${version}`) throw new Error(`Stable tag must match package version v${version}.`);
   if (!/^[A-Za-z0-9._-]+$/.test(result.tag)) throw new Error('Tag or validation ref contains unsupported characters.');
   if (!['auto', 'none', 'targeted', 'full'].includes(result.qa)) throw new Error('QA must be auto, none, targeted, or full.');
+  if (result.channel === 'stable' && result.qa === 'none') throw new Error('A stable Release must run formal QA; use targeted, full, or auto.');
   if (!['patch', 'minor', 'major'].includes(result.releaseKind)) throw new Error('Release kind must be patch, minor, or major.');
   if (result.resumeRun && !/^\d+$/.test(result.resumeRun)) throw new Error('Resume run must be a numeric GitHub Actions run ID.');
   if (result.retryTest && !/^test\/[a-z0-9-]+\.test\.js$/i.test(result.retryTest.replace(/\\/g, '/'))) {
@@ -41,13 +44,74 @@ function findRequest(runs, requestId) {
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+function repoFromOrigin(commandRunner = run) {
+  const remote = commandRunner('git', ['config', '--get', 'remote.origin.url']).replace(/\.git$/i, '');
+  const match = remote.match(/github\.com[/:]([^/]+\/[^/]+)$/i);
+  if (!match) throw new Error('Could not infer a GitHub repository from origin; pass --repo OWNER/REPO.');
+  return match[1];
+}
+
+function assertGithubAccess(repo, commandRunner = run) {
+  try {
+    commandRunner('gh', ['api', `repos/${repo}`, '--method', 'GET', '--silent']);
+  } catch (cause) {
+    const error = new Error(
+      `GitHub credential check failed for ${repo}. Do not log in repeatedly. ` +
+      'Run this release command once in the normal Windows host credential context; a restricted sandbox cannot read Windows Credential Manager.'
+    );
+    error.code = 'GITHUB_CREDENTIAL_CONTEXT_REQUIRED';
+    error.cause = cause;
+    throw error;
+  }
+}
+
+function runInherited(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd || process.cwd(),
+      env: options.env || process.env,
+      stdio: 'inherit',
+      windowsHide: true,
+      timeout: options.timeout
+    });
+    child.once('error', reject);
+    child.once('exit', (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${command} exited with ${code ?? signal}.`));
+    });
+  });
+}
+
+async function buildCurrent() {
+  const npmCli = String(process.env.npm_execpath || '').trim();
+  if (!npmCli) throw new Error('Start with npm run release so the local Current builder can be located.');
+  await runInherited(process.execPath, [npmCli, 'run', 'release:local'], { timeout: 1800000 });
+}
+
+async function runRemoteAndCurrent(remoteAction) {
+  // Dispatch the cloud path first, then let the independent local Current build overlap it.
+  const remotePromise = Promise.resolve(remoteAction());
+  const currentPromise = buildCurrent();
+  const [current, remote] = await Promise.allSettled([currentPromise, remotePromise]);
+  if (current.status === 'rejected' || remote.status === 'rejected') {
+    const details = [];
+    if (remote.status === 'rejected') details.push(`cloud: ${remote.reason.message}`);
+    if (current.status === 'rejected') details.push(`Current: ${current.reason.message}`);
+    const error = new Error(details.join(' | '));
+    error.runId = remote.status === 'rejected' ? remote.reason.runId : undefined;
+    throw error;
+  }
+}
+
 async function cloud(options) {
   const requestId = { tag: options.tag, id: randomUUID() };
   // Dispatch the current workflow definition, checking out the immutable tag inside it.
-  run('gh', ['workflow', 'run', 'package.yml', '--repo', options.repo, '--ref', 'main',
+  const workflowArguments = ['workflow', 'run', 'package.yml', '--repo', options.repo, '--ref', 'main',
     '-f', `tag=${options.tag}`, '-f', `publish=${options.channel === 'stable'}`, '-f', `qa_level=${options.qa}`,
-    '-f', `release_kind=${options.releaseKind}`, '-f', `retry_test_file=${options.retryTest.replace(/\\/g, '/')}`,
-    '-f', `resume_run_id=${options.resumeRun}`, '-f', `request_id=${requestId.id}`]);
+    '-f', `release_kind=${options.releaseKind}`, '-f', `request_id=${requestId.id}`];
+  if (options.retryTest) workflowArguments.push('-f', `retry_test_file=${options.retryTest.replace(/\\/g, '/')}`);
+  if (options.resumeRun) workflowArguments.push('-f', `resume_run_id=${options.resumeRun}`);
+  run('gh', workflowArguments);
   const deadline = Date.now() + options.waitMinutes * 60000;
   let current;
   for (const waitMs of [15000, 30000, 60000]) {
@@ -81,7 +145,11 @@ async function cloud(options) {
   if (current.status !== 'completed' || !current.conclusion) {
     current = { ...current, ...JSON.parse(run('gh', ['run', 'view', String(current.id), '--repo', options.repo, '--json', 'status,conclusion,url'])) };
   }
-  if (current.conclusion !== 'success') throw new Error(`Cloud build ${current.id} ended: ${current.conclusion}.`);
+  if (current.conclusion !== 'success') {
+    const error = new Error(`Cloud build ${current.id} ended: ${current.conclusion}.`);
+    error.runId = current.id;
+    throw error;
+  }
   if (options.channel === 'validation') {
     console.log(`Validation bundle ready in Actions run ${current.html_url}; it expires after one day and no Release was created.`);
     return;
@@ -108,20 +176,49 @@ async function local(options) {
       (item.display_title?.startsWith(`Windows release ${options.tag} / `) || item.head_branch === options.tag))) {
     throw new Error('A cloud build for this tag is still active. Cancel it and wait for completion before local mode.');
   }
+  const commit = run('git', ['rev-parse', 'HEAD']);
+  const checkpoint = await openCheckpoint({ version, commit, request: { target: options.repo, mode: 'local' } });
+  const qaLevel = options.releaseKind === 'major' ? 'full' : options.qa === 'auto' ? 'targeted' : options.qa;
+  const qaStrength = { none: 0, targeted: 1, full: 2 };
+  await runStage(checkpoint, 'qa', async () => {
+    if (options.resumeRun) {
+      const receipt = JSON.parse(run('gh', [
+        'run', 'view', options.resumeRun, '--repo', options.repo,
+        '--json', 'displayTitle,jobs,url'
+      ]));
+      if (!receipt.displayTitle?.startsWith(`Windows release ${options.tag} / `)) {
+        throw new Error(`Cloud run ${options.resumeRun} is not the requested ${options.tag} release run.`);
+      }
+      const qaJob = receipt.jobs?.find(job => job.name === 'qa');
+      if (!qaJob || qaJob.conclusion !== 'success') {
+        throw new Error(`Cloud run ${options.resumeRun} does not contain a successful formal QA job.`);
+      }
+      return { level: qaLevel, source: 'cloud', runId: options.resumeRun, url: receipt.url };
+    }
+    const qaArguments = [path.join('scripts', 'qa-plan.js'), '--execute', '--base', 'HEAD^', '--level', qaLevel];
+    run(process.execPath, qaArguments, { stdio: 'inherit', timeout: 1800000 });
+    if (qaLevel === 'full') {
+      const npmCli = String(process.env.npm_execpath || '').trim();
+      if (!npmCli) throw new Error('Start with npm run release -- --mode local.');
+      run(process.execPath, [npmCli, 'run', 'publish:check'], { stdio: 'inherit', timeout: 1800000 });
+      run(process.execPath, [npmCli, 'run', 'verify:tools'], { stdio: 'inherit', timeout: 1800000 });
+    }
+    return { level: qaLevel, source: 'local' };
+  }, { reusable: receipt => qaStrength[receipt.result?.level] >= qaStrength[qaLevel] });
+
   try {
     await verifyFiles();
-    console.log('Reusing the complete locally verified release bundle for this exact commit; no tests or rebuild were repeated.');
+    console.log('Reusing the complete exact-commit release bundle; no QA or package build was repeated.');
+    await buildCurrent();
   } catch (reuseError) {
     const npmCli = process.env.npm_execpath;
     if (!npmCli) throw new Error('Start with npm run release -- --mode local.');
-    console.log(`No reusable local release bundle was found (${reuseError.message}). Building and verifying once.`);
-    const qa = options.releaseKind === 'major' ? 'full' : options.qa === 'auto' ? 'targeted' : options.qa;
-    run(process.execPath, [npmCli, 'run', 'release:local', '--', '--outputs', 'zip,installer', '--qa', qa], {
+    console.log(`No reusable local release bundle was found (${reuseError.message}). Building Current and formal files without repeating QA.`);
+    run(process.execPath, [npmCli, 'run', 'release:local', '--', '--outputs', 'current,zip,installer'], {
       stdio: 'inherit', timeout: 1800000
     });
+    await verifyFiles();
   }
-  const commit = run('git', ['rev-parse', 'HEAD']);
-  const checkpoint = await openCheckpoint({ version, commit, request: { target: options.repo, mode: 'local' } });
   await runStage(checkpoint, 'publish-private', () => releaseArtifacts(options.repo, options.tag), {
     reusable: () => releaseState(options.repo, options.tag).state === 'complete-published'
   });
@@ -129,27 +226,37 @@ async function local(options) {
 
 async function main() {
   const options = optionsFrom(process.argv.slice(2));
-  options.repo ||= run('gh', ['repo', 'view', '--json', 'nameWithOwner', '--jq', '.nameWithOwner']);
-  if (options.channel === 'stable') {
-    const existing = releaseState(options.repo, options.tag);
-    if (existing.state === 'complete-published') {
-      console.log(`Release is already published and complete: ${existing.release.html_url}`);
-      return;
-    }
-    if (existing.state === 'complete-draft') {
-      await publishCompleteDraft(options.repo, options.tag, existing.release);
-      return;
-    }
-  }
   try {
-    if (options.mode === 'cloud') await cloud(options);
+    options.repo ||= repoFromOrigin();
+    assertGithubAccess(options.repo);
+    if (options.channel === 'stable') {
+      const existing = releaseState(options.repo, options.tag);
+      if (existing.state === 'complete-published') {
+        console.log(`Release is already published and complete: ${existing.release.html_url}`);
+        await buildCurrent();
+        return;
+      }
+      if (existing.state === 'complete-draft') {
+        await runRemoteAndCurrent(() => publishCompleteDraft(options.repo, options.tag, existing.release));
+        return;
+      }
+    }
+    if (options.mode === 'cloud' && options.channel === 'stable') {
+      await runRemoteAndCurrent(() => cloud(options));
+    } else if (options.mode === 'cloud') await cloud(options);
     else await local(options);
   } catch (error) {
     console.error(`Release did not complete: ${error.message}`);
-    console.error(`Retry only the failed cloud jobs with "gh run rerun RUN_ID --failed --repo ${options.repo}". If the original run cannot be retried, reuse its one-day bundle with "npm run release -- --repo ${options.repo} --resume-run RUN_ID".`);
+    if (error.code === 'GITHUB_CREDENTIAL_CONTEXT_REQUIRED') {
+      console.error('No login or upload retry was attempted. Switch to the Windows host credential context and run the same command once.');
+    } else if (error.runId) {
+      console.error(`Retry failed jobs once with "gh run rerun ${error.runId} --failed --repo ${options.repo}". If cloud publication remains unavailable, use "npm run release -- --mode local --repo ${options.repo} --resume-run ${error.runId}"; its successful QA receipt is reused.`);
+    } else {
+      console.error('Correct the reported configuration error before one retry. If the same root cause appears again, stop and report it instead of restarting the release.');
+    }
     throw error;
   }
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { optionsFrom, findRequest, inferredReleaseKind };
+module.exports = { assertGithubAccess, buildCurrent, findRequest, inferredReleaseKind, optionsFrom, repoFromOrigin, runRemoteAndCurrent };

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.10",
+  "notes": {
+    "zh-CN": [
+      "修复 Windows 安装目录、程序身份、图标与卸载快捷方式清理，安装版继续保留用户数据。",
+      "批量小项目使用合并提示并逐项写入日志；压缩包目录缺失时先询问创建、重新选择或取消。",
+      "收纳设置可折叠，工作台对齐、页脚贴底和顶部导航换行得到优化。",
+      "完善 MCP 启动诊断、无副作用预检、幂等请求、托盘状态和 AI 快速上手。"
+    ],
+    "en-US": [
+      "Fixed Windows install paths, executable identity, icons, and shortcut cleanup while continuing to preserve user data.",
+      "Batch small-item intake now uses one message with per-item logs; missing archive folders require create, reselect, or cancel confirmation.",
+      "Archive Setup is collapsible, with improved Workbench alignment, bottom footer placement, and responsive top navigation.",
+      "Improved MCP startup diagnostics, side-effect-free planning, idempotent requests, tray status, and AI quick-start guidance."
+    ]
+  }
+}
