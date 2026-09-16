@@ -408,7 +408,7 @@ test('deleted catalog history cannot mark a new task as duplicate', async () => 
   manager.jobs = [{
     ...queuedJob('deleted-record-job'),
     displayName: '已经删除的项目',
-    status: 'completed'
+    status: 'skipped_duplicate'
   }];
 
   await manager.deleteCatalogRecords(['deleted-record']);
@@ -423,6 +423,54 @@ test('deleted catalog history cannot mark a new task as duplicate', async () => 
   assert.deepEqual(replacement.nameDuplicateMatches, []);
   assert.deepEqual(replacement.similarMatches, []);
   assert.equal(replacement.status, 'queued');
+});
+
+test('scan can add a source again after its earlier queue item was skipped', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-rescan-skipped-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, '人物');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'one.txt'), 'one');
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', smallItemFilter: false
+  });
+  manager.jobs = [{
+    ...queuedJob('old-skipped'), sourcePath, displayName: '人物', status: 'skipped_duplicate'
+  }];
+
+  await manager.scanSource(root);
+
+  assert.equal(manager.jobs.length, 2);
+  assert.equal(manager.jobs[1].displayName, '人物');
+  assert.equal(manager.jobs[1].status, 'queued');
+});
+
+test('deleting a catalog record releases queue tasks that only referenced that record', async () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.catalog = [{
+    id: 'stale-record', recordType: 'manual', title: '旧候选', displayName: '旧候选',
+    notes: '', tags: [], rating: 0, manifest: [], directories: []
+  }];
+  manager.jobs = [{
+    ...queuedJob('waiting-job'),
+    displayName: '待处理项目',
+    status: 'awaiting_duplicate_confirmation',
+    nameDuplicateMatches: [{ archiveId: 'stale-record', displayName: '旧候选' }],
+    similarMatches: [{ id: 'stale-record', title: '旧候选', reasons: ['标题相似'] }],
+    exactProjectMatches: [],
+    exactDuplicateMatches: [],
+    confirmationReasons: ['name_match', 'similar_title'],
+    intakeModeSelected: true,
+    processingMode: 'archive'
+  }];
+
+  await manager.deleteCatalogRecords(['stale-record']);
+
+  assert.equal(manager.jobs[0].status, 'queued');
+  assert.equal(manager.jobs[0].stageText, '等待压缩');
+  assert.deepEqual(manager.jobs[0].nameDuplicateMatches, []);
+  assert.deepEqual(manager.jobs[0].similarMatches, []);
+  assert.deepEqual(manager.jobs[0].confirmationReasons, []);
 });
 
 test('cancelled tasks can be cleared without touching failed or queued tasks', async () => {
@@ -2306,7 +2354,7 @@ test('warehouse undo history is capped at ten actions', async () => {
   assert.ok(manager.logs.some((entry) => entry.message.includes('撤销记录已达到上限')));
 });
 
-test('deleting one catalog record does not erase unrelated undo history', async () => {
+test('catalog deletion is undoable without erasing unrelated undo history', async () => {
   const store = new FakeStore();
   store.saveCatalog = async () => {};
   const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
@@ -2317,7 +2365,92 @@ test('deleting one catalog record does not erase unrelated undo history', async 
   await manager.updateCatalogMetadata('edited', { notes: '先前修改' });
   await manager.deleteCatalogRecords(['deleted']);
   await manager.undoCatalogAction();
+  assert.equal(manager.catalog.some((record) => record.id === 'deleted'), true);
+  assert.equal(manager.catalog.find((record) => record.id === 'edited').notes, '先前修改');
+  await manager.undoCatalogAction();
   assert.equal(manager.catalog.find((record) => record.id === 'edited').notes, '');
+});
+
+test('catalog deletion undo restores its archive, thumbnails and full record', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-catalog-undo-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const archiveDirectory = path.join(root, 'archives');
+  const repositoryDirectory = path.join(root, 'repository');
+  const stagingDirectory = path.join(root, 'staging');
+  const archivePath = path.join(archiveDirectory, 'item.7z');
+  const thumbnailPath = path.join(repositoryDirectory, 'thumbnails', 'job-one');
+  await fs.mkdir(archiveDirectory, { recursive: true });
+  await fs.mkdir(thumbnailPath, { recursive: true });
+  await fs.writeFile(archivePath, 'archive');
+  await fs.writeFile(path.join(thumbnailPath, 'cover.png'), 'cover');
+  const trashRoot = path.join(root, 'system-trash');
+  await fs.mkdir(trashRoot, { recursive: true });
+  const trashed = new Map();
+  let trashIndex = 0;
+  const store = new FakeStore();
+  store.saveCatalog = async (_library, records) => { store.catalog = structuredClone(records); };
+  const manager = new QueueManager(store, {
+    archiveOutputDirectory: archiveDirectory, repositoryDirectory, archiveStagingDirectory: stagingDirectory,
+    similarityEnabled: false
+  }, {
+    trashItem: async (targetPath) => {
+      const savedPath = path.join(trashRoot, String(trashIndex++));
+      await fs.rename(targetPath, savedPath);
+      trashed.set(targetPath, savedPath);
+    },
+    restoreTrashItem: async (targetPath) => {
+      const savedPath = trashed.get(targetPath);
+      if (!savedPath) return false;
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.rename(savedPath, targetPath);
+      trashed.delete(targetPath);
+      return true;
+    }
+  });
+  manager.catalog = [{
+    id: 'undo-record', jobId: 'job-one', title: '可撤回项目', displayName: '可撤回项目',
+    recordType: 'archive', archiveDirectory, archiveFiles: [{ name: 'item.7z', size: 7 }],
+    tags: ['测试'], notes: '完整信息', manifest: [], directories: [], similarRecords: []
+  }];
+
+  const deleted = await manager.deleteCatalogRecords(['undo-record']);
+  assert.deepEqual(deleted.deletedIds, ['undo-record']);
+  assert.equal(manager.catalog.length, 0);
+  assert.equal(manager.getState().undoLabel, '删除 1 条仓库内容');
+  await assert.rejects(fs.access(archivePath), /ENOENT/);
+  await assert.rejects(fs.access(thumbnailPath), /ENOENT/);
+
+  await manager.undoCatalogAction();
+  assert.equal(manager.catalog.length, 1);
+  assert.equal(manager.catalog[0].notes, '完整信息');
+  assert.deepEqual(manager.catalog[0].tags, ['测试']);
+  assert.equal((await fs.stat(archivePath)).isFile(), true);
+  assert.equal((await fs.stat(path.join(thumbnailPath, 'cover.png'))).isFile(), true);
+  assert.equal(manager.getState().undoDepth, 0);
+});
+
+test('catalog operation tracking waits for a deletion before shutdown', async () => {
+  let releaseTrash;
+  const trashGate = new Promise((resolve) => { releaseTrash = resolve; });
+  const store = new FakeStore();
+  store.saveCatalog = async () => trashGate;
+  const manager = new QueueManager(store, {
+    repositoryDirectory: 'E:\\library', archiveStagingDirectory: 'E:\\staging'
+  });
+  manager.catalog = [{
+    id: 'wait-delete', jobId: null, title: '等待删除', displayName: '等待删除', recordType: 'manual'
+  }];
+
+  const deleting = manager.deleteCatalogRecords(['wait-delete']);
+  assert.equal(manager.hasPendingCatalogOperations(), true);
+  let settled = false;
+  const waiting = manager.waitForCatalogOperations().then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  releaseTrash();
+  await deleting;
+  await waiting;
+  assert.equal(manager.hasPendingCatalogOperations(), false);
 });
 
 test('imported warehouse records keep external archive paths and deletion does not trash them', async (t) => {
@@ -2957,13 +3090,33 @@ test('catalog commit failure rolls back memory and recovers task-owned output wh
     totalBytes: sourceStats.size,
     archiveBaseName: 'catalog-commit-failure.7z'
   };
+  // Exercise the subset-write path and rollback of an affected old record;
+  // its manifest must be reused rather than deep-cloned.
+  const oldManifest = [{ relativePath: 'unrelated.bin', size: 10 }];
+  const oldRelations = [{ id: 'previous', score: 20 }];
+  const oldRecord = { id: 'unrelated', title: 'Unrelated', manifest: oldManifest, similarRecords: oldRelations, possibleDuplicate: true };
+  manager.catalog = [oldRecord];
+  store.saveCatalogRecords = store.saveCatalog;
+  manager.refreshSimilarityForRecord = (record, before) => {
+    before(record);
+    before(oldRecord);
+    oldRecord.similarRecords = [{ id: record.id, score: 90 }];
+    oldRecord.similarityVersion = 'changed';
+    oldRecord.possibleDuplicate = false;
+    return [record, oldRecord];
+  };
   manager.jobs = [job];
 
   await manager.startQueue();
 
   assert.equal(job.status, 'failed');
   assert.equal(job.errorCode, 'EACCES');
-  assert.equal(manager.catalog.length, 0);
+  assert.equal(manager.catalog.length, 1);
+  assert.equal(manager.catalog[0], oldRecord);
+  assert.equal(oldRecord.manifest, oldManifest);
+  assert.equal(oldRecord.similarRecords, oldRelations);
+  assert.equal(oldRecord.possibleDuplicate, true);
+  assert.equal(Object.hasOwn(oldRecord, 'similarityVersion'), false);
   assert.equal(sourceDispositionCalls, 0);
   await fs.access(path.join(sourcePath, 'source.bin'));
   await assert.rejects(fs.access(path.join(output, job.archiveBaseName)), /ENOENT/);

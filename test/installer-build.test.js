@@ -13,6 +13,9 @@ test('installer build stays outside the repository and uses per-user safe defaul
 
   assert.match(script, /layout\.installerRoot/);
   assert.match(script, /--config\.nsis\.perMachine=false/);
+  assert.match(script, /--config\.nsis\.displayLanguageSelector=true/);
+  assert.match(script, /--config\.nsis\.installerLanguages=en_US/);
+  assert.match(script, /--config\.nsis\.installerLanguages=zh_CN/);
   assert.match(script, /--config\.nsis\.deleteAppDataOnUninstall=false/);
   assert.match(script, /--config\.appId=com\.carlosz\.hamsterarchiver/);
   assert.match(script, /--config\.executableName=HamsterArchiver/);
@@ -22,7 +25,10 @@ test('installer build stays outside the repository and uses per-user safe defaul
   assert.match(installerInclude, /HamsterNormalizeInstallDirectory/);
   assert.match(installerInclude, /MUI_PAGE_CUSTOMFUNCTION_LEAVE HamsterInstallDirectoryLeave/);
   assert.match(installerInclude, /StrCpy \$INSTDIR "\$INSTDIR\\\$\{HAMSTER_INSTALL_DIRECTORY\}"/);
-  assert.match(installerInclude, /创建桌面快捷方式/);
+  assert.match(installerInclude, /LangString HAMSTER_DESKTOP_SHORTCUT 1033/);
+  assert.match(installerInclude, /LangString HAMSTER_DESKTOP_SHORTCUT 2052/);
+  assert.match(installerInclude, /\$\(HAMSTER_INSTALL_TO\)/);
+  assert.match(installerInclude, /\$\(HAMSTER_RUN_APP\)/);
   assert.match(installerInclude, /ExecShell "open" "\$INSTDIR\\\$\{PRODUCT_FILENAME\}\.exe"/);
   assert.match(installerInclude, /Delete "\$DESKTOP\\Hamster Archiver\.lnk"/);
   assert.doesNotMatch(installerInclude, /\$launchLink/);

@@ -2,7 +2,13 @@
 
 ## 中文
 
-4.6.11 修复正式发行的测试准备条件和本机发布流程，保留 4.6.10 的 Windows 安装版、入库安全、工作台与 AI 接入改进。
+4.6.11 修复正式发行的测试准备条件和本机发布流程，并继续完善 Windows 安装版与界面细节，保留 4.6.10 的入库安全、工作台与 AI 接入改进。
+
+### 界面与安装程序
+
+- 微调“收纳设置”步骤标题的垂直位置，并让仓库概览中的活跃度卡片与随机漫步卡片下边缘对齐。
+- 修复实时进度更新期间“生成清单与 MD5”等状态胶囊外框消失的问题；“移入库目录”继续用于已验证成品实际发布到仓库的阶段。
+- Windows 安装程序第一步可选择 English 或简体中文，内置页面和自定义选项全程跟随所选语言。
 
 ### 发行可靠性
 
@@ -18,7 +24,13 @@
 
 ## English
 
-Version 4.6.11 repairs formal-release test setup and the local publishing workflow while retaining the Windows installer, intake safety, Workbench, and AI integration improvements from 4.6.10.
+Version 4.6.11 repairs formal-release test setup and the local publishing workflow, further refines the Windows installer and interface details, and retains the intake safety, Workbench, and AI integration improvements from 4.6.10.
+
+### Interface and installer
+
+- Fine-tuned the Archive Setup step label and aligned the lower edges of the activity and Random Walk cards in Warehouse Overview.
+- Fixed live progress updates dropping the status-pill styling from stages such as Building Manifest. “Saving to Warehouse” remains the stage for publishing verified output into the Warehouse.
+- The Windows installer now begins with an English / Simplified Chinese choice, and both built-in and custom pages follow the selected language.
 
 ### Release reliability
 

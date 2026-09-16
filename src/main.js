@@ -24,7 +24,7 @@ const {
 } = require('./core/storage-paths');
 const { prepareUserDataTarget } = require('./core/storage-migration');
 const { IMAGE_EXTENSIONS, LARGE_TASK_BYTES, isVideoFile } = require('./core/constants');
-const { extractVideoFrames } = require('./core/media-service');
+const { createThumbnails: generateThumbnails } = require('./core/thumbnail-service');
 const { checkForUpdates } = require('./core/update-checker');
 const {
   prepareUpdate,
@@ -118,7 +118,7 @@ const startupDesktopMcpRequest = hasSingleInstanceLock && !isSmokeTest
   ? takeDesktopLaunchRequest({ applicationExecutable: process.execPath })
   : null;
 const startupRequestsMcp = Boolean(startupDesktopMcpRequest) || process.argv.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1';
-if (isSmokeTest || startupRequestsMcp) {
+if (isSmokeTest) {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('disable-gpu');
   app.commandLine.appendSwitch('disable-gpu-compositing');
@@ -471,61 +471,7 @@ async function controlMainWindow({ section, theme } = {}) {
 }
 
 async function createThumbnails(job, manifest, config, options = {}) {
-  const thumbnailDir = path.join(config.repositoryDirectory, 'thumbnails', job.id);
-  await fs.mkdir(thumbnailDir, { recursive: true });
-  const candidates = manifest.filter((file) => IMAGE_EXTENSIONS.has(file.extension) || isVideoFile(file.name));
-  const limit = Math.max(1, Math.min(500, Number(config.thumbnailLimit) || 100));
-  let outputIndex = 0;
-
-  for (const file of candidates) {
-    if (outputIndex >= limit) break;
-    const sourcePath = job.sourceType === 'video'
-      ? job.sourcePath
-      : path.join(job.sourcePath, ...file.relativePath.split('/'));
-    try {
-      if (isVideoFile(file.name) && config.videoFrameBackup) {
-        const frameCount = Math.min(Number(config.videoFrameCount) || 6, limit - outputIndex);
-        let extracted = { frames: [], mediaInfo: null };
-        try {
-          extracted = await extractVideoFrames(
-            sourcePath,
-            thumbnailDir,
-            outputIndex,
-            frameCount,
-            config,
-            options
-          );
-        } catch (error) {
-          if (options.signal?.aborted) throw error;
-          options.onLog?.(`FFmpeg 视频抽帧失败，改用系统缩略图：${path.basename(sourcePath)} · ${error.message}`);
-        }
-        file.thumbnails = [];
-        file.mediaInfo = extracted.mediaInfo;
-        for (const frame of extracted.frames) {
-          file.thumbnails.push({
-            ...frame,
-            videoGroup: file.relativePath
-          });
-          outputIndex += 1;
-        }
-        if (file.thumbnails.length > 0) {
-          file.thumbnailPath = file.thumbnails[0].thumbnailPath;
-          continue;
-        }
-      }
-      const thumbnail = await nativeImage.createThumbnailFromPath(sourcePath, { width: 360, height: 240 });
-      if (thumbnail.isEmpty()) continue;
-      const thumbnailPath = path.join(thumbnailDir, `${String(outputIndex + 1).padStart(3, '0')}.png`);
-      await fs.writeFile(thumbnailPath, thumbnail.toPNG());
-      file.thumbnailPath = thumbnailPath;
-      file.thumbnails = [{ thumbnailPath, type: 'image', frameIndex: null }];
-      outputIndex += 1;
-    } catch (error) {
-      if (options.signal?.aborted) throw error;
-      options.onLog?.(`已跳过无法生成预览的媒体：${path.basename(sourcePath)} · ${error.message}`);
-    }
-  }
-  return manifest;
+  return generateThumbnails(job, manifest, config, options, nativeImage);
 }
 
 async function storeCatalogImage(recordId, input, repositoryDirectory) {
@@ -1015,7 +961,19 @@ function createWindow() {
       mainWindow.hide();
       return;
     }
-    if (!queueManager?.running || allowWindowClose) return;
+    if (allowWindowClose) return;
+    const catalogOperationPending = Boolean(queueManager?.hasPendingCatalogOperations?.());
+    if (!queueManager?.running && catalogOperationPending) {
+      event.preventDefault();
+      if (shutdownInProgress) return;
+      shutdownInProgress = true;
+      mainWindow.hide();
+      await queueManager.waitForCatalogOperations();
+      allowWindowClose = true;
+      mainWindow.close();
+      return;
+    }
+    if (!queueManager?.running) return;
     event.preventDefault();
     if (closePromptOpen) return;
     closePromptOpen = true;
@@ -1037,7 +995,10 @@ function createWindow() {
     });
     closePromptOpen = false;
     if (result.response === 1) {
-      await queueManager.stopForShutdown();
+      await Promise.all([
+        queueManager.stopForShutdown(),
+        queueManager.waitForCatalogOperations()
+      ]);
       allowWindowClose = true;
       mainWindow.close();
     }
@@ -2350,11 +2311,14 @@ app.on('window-all-closed', () => {
 app.on('before-quit', (event) => {
   clearMcpIdleTimer();
   if (scheduleTimer) clearInterval(scheduleTimer);
-  if (queueManager?.running && !allowWindowClose) {
+  if ((queueManager?.running || queueManager?.hasPendingCatalogOperations?.()) && !allowWindowClose) {
     event.preventDefault();
     if (shutdownInProgress) return;
     shutdownInProgress = true;
-    void queueManager.stopForShutdown()
+    void Promise.all([
+      queueManager.stopForShutdown(),
+      queueManager.waitForCatalogOperations()
+    ])
       .catch((error) => console.error(`QUEUE_SHUTDOWN_FAILED ${error.stack || error.message}`))
       .finally(() => {
         appStore?.closeAll();

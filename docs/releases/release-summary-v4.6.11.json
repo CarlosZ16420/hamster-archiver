@@ -3,12 +3,12 @@
   "version": "4.6.11",
   "notes": {
     "zh-CN": [
-      "保留 Windows 安装版、入库安全、工作台布局和 AI 接入改进；公开说明累积覆盖 4.6.9 → 4.6.11。",
+      "安装程序第一步支持 English / 简体中文选择；同步优化工作台与仓库概览对齐并修复队列状态外框。",
       "修复正式发行测试准备条件和 Windows 凭据上下文流程，镜像复用同一套验证附件。",
       "不更改仓库格式、用户资料位置或现有记录，无需迁移。"
     ],
     "en-US": [
-      "Retains Windows installer, intake safety, Workbench layout, and AI integration improvements; public notes cover 4.6.9 → 4.6.11.",
+      "Adds an English / Simplified Chinese installer choice, refines Workbench and Warehouse alignment, and fixes queue status-pill styling.",
       "Repairs formal-release test setup and Windows credential-context handling; mirrors reuse the same verified attachments.",
       "Warehouse format, user-data locations, and existing records are unchanged; no migration is required."
     ]

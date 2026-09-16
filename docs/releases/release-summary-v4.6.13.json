@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.13",
+  "notes": {
+    "zh-CN": [
+      "仓库条目删除可在本次运行的撤回历史中恢复，关联压缩包和图片继续使用 Windows 回收站，不新增应用内回收站。",
+      "关闭窗口或退出时会等待正在进行的删除或撤回安全收尾。",
+      "已结束的历史队列项不再导致新任务重复待确认；删除失效候选后会释放相关任务。",
+      "微调“01 · 收纳设置”与右侧步骤标题的视觉对齐；不更改仓库格式或资料位置。"
+    ],
+    "en-US": [
+      "Warehouse deletion can be undone during the current session, restoring associated archives and images from the Windows Recycle Bin without an in-app recycle bin.",
+      "Window close and application exit wait for an active delete or undo operation to finish safely.",
+      "Finished queue history no longer triggers duplicate review for new work, and deleting a stale candidate releases affected tasks.",
+      "Refines the visual alignment of Archive Setup with the right-side step heading; warehouse format and data locations are unchanged."
+    ]
+  }
+}

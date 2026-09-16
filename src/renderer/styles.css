@@ -1259,7 +1259,7 @@ main { max-width: 1560px; padding: 22px 26px 40px; }
 .location-settings-group:not([open]) > .location-heading { margin-bottom: 0; padding-bottom: 0; }
 .location-settings-group > .location-heading .step,
 .location-settings-group > .location-heading h2 { line-height: 1.25; }
-.location-settings-group > .location-heading .step { margin: 0; }
+.location-settings-group > .location-heading .step { margin: 0; transform: translateY(3px); }
 .location-settings-group > .location-heading h2 { min-width: 0; }
 .location-settings-group[open] > .location-heading .group-chevron { transform: rotate(180deg); }
 .location-settings-body { padding: 0 !important; }
@@ -1359,7 +1359,7 @@ main { max-width: 1560px; padding: 22px 26px 40px; }
 .library-shell { min-height: 650px; }
 .warehouse-overview { margin-bottom: 16px; padding: 0; overflow: hidden; border-radius: 16px; }
 .warehouse-overview-body { grid-template-columns: minmax(340px, .8fr) minmax(420px, 1.2fr); }
-.warehouse-summary { padding: 18px 20px 10px; }
+.warehouse-summary { padding: 18px 20px 16px; }
 .warehouse-overview-head { align-items: flex-start; gap: 14px; margin-bottom: 22px; padding: 0; border: 0; background: transparent; flex-wrap: wrap; }
 .warehouse-overview-head h2 { margin: 0; font-size: 17px; }
 .discovery-actions { gap: 7px; }

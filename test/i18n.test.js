@@ -132,6 +132,14 @@ if (!rendererDir) {
   test('dynamic renderer and safety messages have complete English output', () => {
     i18n.setLocale('en-US');
     const messages = [
+      '正在生成缩略图 · 已处理 2/30 · 视频抽帧 1/3 · sample.mp4',
+      '缩略图阶段耗时：125 ms · {"video-frame":{"count":3,"elapsedMs":100}}',
+      '入库阶段耗时：相似关系 12 ms · 仓库写入 20 ms · 更新记录 2',
+      '视频抽帧达到处理时限，保留已生成的预览：sample.mp4',
+      '缩略图尝试达到上限，保留已生成的预览：90/100',
+      '已跳过无法生成的视频帧：sample.mp4 · 2/3 · 媒体处理超时：ffmpeg.exe',
+      '已跳过无法生成预览的媒体：sample.png · ENOENT',
+      'FFmpeg 视频抽帧失败，改用系统缩略图：sample.mp4 · ENOENT',
       '“sample.png”不是支持的 PNG、JPEG、WebP 或 GIF 图片。',
       '“sample.png”超过 25 MB。',
       '无法读取“sample.png”。',

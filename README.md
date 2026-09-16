@@ -7,7 +7,7 @@
 
 Windows 本地文件整理、媒体建库与可校验批量归档工具；支持 AI 通过 MCP 调用。
 
-![Version](https://img.shields.io/badge/version-4.6.11-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.13-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -38,6 +38,8 @@ Windows 本地文件整理、媒体建库与可校验批量归档工具；支持
 
 打包和仓库登记由应用完成，网盘上传由你或同步工具完成；本地分类通过仓库标签等信息管理，不会自动重排磁盘上的文件夹。
 
+入库预览会显示媒体处理数量和视频抽帧进度；图片最多同时处理两张。异常媒体达到尝试或处理时限时会记录警告并保留成功预览，不影响完整文件清单与归档验证。
+
 ## 快速开始
 
 适用于 **Windows x64**，提供中英文界面。直接使用请选择 [Releases 发行包](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)；GitHub 的 Source code 和克隆仓库用于源码开发。
@@ -46,7 +48,7 @@ Windows 本地文件整理、媒体建库与可校验批量归档工具；支持
 2. 在“归档工作台”扫描目录，或拖入文件夹、视频，查看待处理内容。第一次可以先添加一个小文件夹。
 3. 想先做**本地整理**，点击“不压缩直接入库”；准备**打包备份**，在“收纳设置”中填写“压缩包保存在”，点击“开始压缩入库”。完成后到“仓库”浏览和整理。
 
-便携版请保留完整目录，例如 `HamsterArchiver-v4.6.11-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供，无需另装 Node.js。
+便携版请保留完整目录，例如 `HamsterArchiver-v4.6.13-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供，无需另装 Node.js。
 
 [![批量归档、进度追踪与重复确认](assets/readme/archive-showcase.zh-CN.png)](assets/readme/archive-showcase.zh-CN.png)
 
@@ -97,7 +99,7 @@ AI 应先读取包内 `ai-capabilities.json`：只有 `schemaVersion: 2` 且 `cl
 <details>
 <summary>展开：整理工具与轻快浏览的细节</summary>
 
-- 大缩略图与文本列表满足不同浏览习惯；支持键盘翻页、批量追加标签、修改备份位置，以及支持操作的撤回。
+- 大缩略图与文本列表满足不同浏览习惯；支持键盘翻页、批量追加标签、修改备份位置，以及支持操作的撤回；本次运行中误删的仓库条目及其 Windows 回收站文件也可直接撤回。
 - 标签自动补全复用已有分类，可用 Tab 接受建议；选中项目时原位更新状态，减少闪烁和页面跳动。
 - 同一视频的多帧预览成组展示，竖屏画面完整保留；封面可更换，也可手动添加或粘贴补充图片。
 - 大项目详情按需读取，媒体靠近可见区域才加载，同时限制图片读取数量；目录使用虚拟列表，减少无效渲染。

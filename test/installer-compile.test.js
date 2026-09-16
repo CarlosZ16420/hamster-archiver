@@ -44,6 +44,7 @@ Var newDesktopLink
 !insertmacro customFinishPage
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
+!insertmacro MUI_LANGUAGE "SimpChinese"
 Section
   StrCpy $newDesktopLink "$DESKTOP\\Hamster Archiver.lnk"
   !insertmacro customInstall

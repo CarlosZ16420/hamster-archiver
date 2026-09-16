@@ -16,35 +16,49 @@ async function runMediaProcess(executable, args, options = {}) {
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let pendingError = null;
+    let activeElapsedMs = 0;
+    let tickAt = performance.now();
     const finish = (error, result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (!options.pauseController?.paused) activeElapsedMs += performance.now() - tickAt;
+      clearInterval(timer);
       options.signal?.removeEventListener('abort', abort);
       options.pauseController?.detach(child.pid);
-      if (error) reject(error);
-      else resolve(result);
+      if (error) {
+        error.activeElapsedMs = activeElapsedMs;
+        reject(error);
+      } else resolve({ ...result, activeElapsedMs });
     };
     const abort = () => {
+      pendingError = new CancelledError();
       child.kill();
-      finish(new CancelledError());
     };
-    const timer = setTimeout(() => {
-      child.kill();
-      finish(new Error(`媒体处理超时：${path.basename(executable)}`));
-    }, options.timeoutMs || 90_000);
+    const timer = setInterval(() => {
+      const now = performance.now();
+      if (!options.pauseController?.paused) activeElapsedMs += now - tickAt;
+      tickAt = now;
+      if (!pendingError && activeElapsedMs >= (options.timeoutMs || 90_000)) {
+        pendingError = new Error(`媒体处理超时：${path.basename(executable)}`);
+        child.kill();
+      }
+    }, 100);
     child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
     child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
     child.on('error', (error) => finish(error));
     child.on('close', (code) => {
       if (settled) return;
-      if (code === 0) finish(null, { stdout, stderr });
+      if (pendingError) finish(pendingError);
+      else if (code === 0) finish(null, { stdout, stderr });
       else finish(new Error(`${path.basename(executable)} 退出码 ${code}：${stderr.trim().slice(-1000)}`));
     });
     options.signal?.addEventListener('abort', abort, { once: true });
+    if (options.signal?.aborted) abort();
     Promise.resolve(options.pauseController?.attach(child.pid)).catch((error) => {
+      if (settled) return;
+      pendingError = error;
       child.kill();
-      finish(error);
     });
   });
 }
@@ -74,7 +88,7 @@ function parseFfmpegProbeOutput(output) {
 }
 
 async function probeVideo(sourcePath, config, options = {}) {
-  const result = await runMediaProcess(config.ffmpegPath, [
+  const result = await (options.runProcess || runMediaProcess)(config.ffmpegPath, [
     '-nostdin',
     '-hide_banner',
     '-loglevel', 'info',
@@ -84,6 +98,7 @@ async function probeVideo(sourcePath, config, options = {}) {
     '-f', 'null', '-'
   ], { ...options, timeoutMs: 30_000 });
   const output = `${result.stderr}\n${result.stdout}`;
+  options.onTiming?.('video-probe', result.activeElapsedMs);
   const parsed = parseFfmpegProbeOutput(output);
   if (!parsed) {
     options.onLog?.(`FFmpeg 探测失败：${path.basename(sourcePath)}；未能从固定版本输出中解析时长或分辨率。`, 'warning');
@@ -98,30 +113,51 @@ async function extractVideoFrames(sourcePath, outputDirectory, outputStartIndex,
   const mediaInfo = await probeVideo(sourcePath, config, options);
   const count = Math.max(1, Math.min(20, Number(requestedCount) || 3));
   const frames = [];
+  let remainingMs = 120_000;
   for (let index = 0; index < count; index += 1) {
     await options.pauseController?.waitIfPaused(options.signal);
+    if (options.signal?.aborted) throw new CancelledError();
+    if (remainingMs <= 0) {
+      options.onLog?.(`视频抽帧达到处理时限，保留已生成的预览：${path.basename(sourcePath)}`, 'warning');
+      break;
+    }
+    options.onFrameProgress?.(index + 1, count);
     const timeSeconds = mediaInfo.durationSeconds * ((index + 1) / (count + 1));
-    const fileName = `${String(outputStartIndex + index + 1).padStart(3, '0')}.jpg`;
+    const fileName = `${String(outputStartIndex + frames.length + 1).padStart(3, '0')}.jpg`;
     const thumbnailPath = path.join(outputDirectory, fileName);
-    await runMediaProcess(config.ffmpegPath, [
-      '-v', 'error',
-      '-ss', timeSeconds.toFixed(3),
-      '-i', sourcePath,
-      '-map', '0:v:0',
-      '-frames:v', '1',
-      '-vf', 'scale=360:240:force_original_aspect_ratio=decrease:force_divisible_by=2',
-      '-q:v', '3',
-      '-y', thumbnailPath
-    ], options);
-    const stats = await fs.stat(thumbnailPath);
-    frames.push({
-      thumbnailPath,
-      size: stats.size,
-      type: 'video-frame',
-      frameIndex: index,
-      timeSeconds,
-      durationSeconds: mediaInfo.durationSeconds
-    });
+    let elapsedMs = 0;
+    try {
+      const processResult = await (options.runProcess || runMediaProcess)(config.ffmpegPath, [
+        '-v', 'error',
+        '-ss', timeSeconds.toFixed(3),
+        '-i', sourcePath,
+        '-map', '0:v:0',
+        '-frames:v', '1',
+        '-vf', 'scale=360:240:force_original_aspect_ratio=decrease:force_divisible_by=2',
+        '-q:v', '3',
+        '-y', thumbnailPath
+      ], { ...options, timeoutMs: Math.min(30_000, remainingMs) });
+      elapsedMs = processResult.activeElapsedMs;
+      const stats = await fs.stat(thumbnailPath);
+      if (!stats.size) throw new Error('视频抽帧输出为空。');
+      frames.push({
+        thumbnailPath,
+        size: stats.size,
+        type: 'video-frame',
+        frameIndex: index,
+        timeSeconds,
+        durationSeconds: mediaInfo.durationSeconds
+      });
+    } catch (error) {
+      elapsedMs = error.activeElapsedMs || elapsedMs;
+      if (error instanceof CancelledError || options.signal?.aborted) throw error;
+      // A failed later frame must not discard successful earlier frames.
+      await fs.rm(thumbnailPath, { force: true }).catch(() => {});
+      options.onLog?.(`已跳过无法生成的视频帧：${path.basename(sourcePath)} · ${index + 1}/${count} · ${error.message}`, 'warning');
+    } finally {
+      remainingMs -= elapsedMs;
+      options.onTiming?.('video-frame', elapsedMs);
+    }
   }
   return { frames, mediaInfo };
 }

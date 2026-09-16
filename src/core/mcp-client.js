@@ -11,11 +11,9 @@ const { spawn } = require('node:child_process');
 const { createDesktopLaunchRequest } = require('./mcp-launch');
 
 const MAX_MESSAGE_BYTES = 1024 * 1024;
-const MCP_ELECTRON_COMPATIBILITY_SWITCHES = [
+const MCP_CLIENT_RUNTIME_SWITCHES = [
   '--disable-crash-reporter',
-  '--disable-breakpad',
-  '--disable-gpu',
-  '--disable-gpu-compositing'
+  '--disable-breakpad'
 ];
 const MAX_DIAGNOSTIC_BYTES = 16 * 1024;
 const EXPECTED_MCP_TOOLS = ['hamster_discover', 'hamster_describe', 'hamster_call'];
@@ -46,7 +44,7 @@ function parseCli(argv) {
     if (args[index] === '--json') { json = args[index + 1] || ''; jsonProvided = true; args.splice(index, 2); continue; }
     if (args[index] === '--json-file') { jsonFile = args[index + 1] || ''; args.splice(index, 2); continue; }
     if (args[index] === '--output') { outputFile = args[index + 1] || ''; args.splice(index, 2); continue; }
-    if (MCP_ELECTRON_COMPATIBILITY_SWITCHES.includes(args[index])) { args.splice(index, 1); continue; }
+    if (MCP_CLIENT_RUNTIME_SWITCHES.includes(args[index])) { args.splice(index, 1); continue; }
     if (String(args[index]).startsWith('--')) throw Object.assign(new Error(`Unknown option: ${args[index]}`), { code: 'CLI_USAGE' });
     index += 1;
   }
@@ -102,7 +100,7 @@ function launchExitError(code, signal, stderrTail = '') {
   const gpuEvidence = /gpu process isn't usable|gpu_data_manager/i.test(stderrTail);
   const errorCode = gpuEvidence ? 'GRAPHICS_INITIALIZATION_FAILED' : 'APPLICATION_EXITED';
   const hint = gpuEvidence || signedCode === -2147483645
-    ? ' Electron graphics initialization failed even with the MCP compatibility profile.'
+    ? ' Electron graphics initialization failed while using the system default graphics profile.'
     : '';
   return Object.assign(new Error(
     `Hamster Archiver exited before MCP was ready (${outcome}).${hint}` +
@@ -134,7 +132,7 @@ async function startOrConnect(options) {
     const { readyFile, diagnosticFile } = attemptFiles();
     const args = [
       ...launch.prefixArgs,
-      ...MCP_ELECTRON_COMPATIBILITY_SWITCHES,
+      ...MCP_CLIENT_RUNTIME_SWITCHES,
       '--enable-mcp',
       '--background',
       `--mcp-ready-file=${readyFile}`,
@@ -444,7 +442,7 @@ if (require.main === module) main().catch((error) => {
   process.exitCode = 1;
 });
 module.exports = {
-  MCP_ELECTRON_COMPATIBILITY_SWITCHES,
+  MCP_CLIENT_RUNTIME_SWITCHES,
   EXPECTED_MCP_TOOLS,
   isUnexpectedLaunchExit,
   main,

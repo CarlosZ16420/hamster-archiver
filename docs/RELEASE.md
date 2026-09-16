@@ -57,7 +57,7 @@ ZIP、Current 与安装版只在选中时报告；未请求的产物不构成失
 - 安装版仅在 `--outputs` 包含 `installer` 时构建。需要单独重建时也可使用 `npm run build:installer`；产物和 SHA-256 位于仓库外 `HamsterArchiver-Local/builds/installers/`。
 - 自定义 NSIS include 的加载可能早于插件目录注册；依赖插件的函数必须在页面/安装宏展开时定义，MUI 已消费的回调定义不能再次 `!undef`。本地可设置 `HAMSTER_TEST_NSIS_DIR` 为已缓存编译器根目录、`HAMSTER_TEST_NSIS_PLUGINS` 为已缓存 `x86-unicode` 插件目录，运行 `node --test test/installer-compile.test.js` 验证两种加载顺序；该检查不下载工具、不执行安装。构建器显式使用 `--publish never`，Release 上传统一由发布阶段负责。
 - 安装版与便携版是两种独立发行形态：便携版默认使用程序旁 `userdata`；安装版默认使用 Windows 用户数据目录，安装目录不保存运行数据。卸载程序默认保留用户数据。
-- 安装版使用稳定的 `com.carlosz.hamsterarchiver` 应用标识和当前用户安装注册信息识别已有版本；运行更高版本安装程序时会升级已有安装，而不是并排创建第二份。安装目录始终规范为用户所选父目录下的 `Hamster Archiver` 子目录；安装选项可决定是否创建桌面快捷方式，完成页直接启动已安装 EXE，不依赖快捷方式。
+- 安装版使用稳定的 `com.carlosz.hamsterarchiver` 应用标识和当前用户安装注册信息识别已有版本；运行更高版本安装程序时会升级已有安装，而不是并排创建第二份。安装第一步提供 English 与简体中文选择，内置页面与自定义选项跟随所选语言。安装目录始终规范为用户所选父目录下的 `Hamster Archiver` 子目录；安装选项可决定是否创建桌面快捷方式，完成页直接启动已安装 EXE，不依赖快捷方式。
 - 当前 NSIS 安装程序用于普通桌面分发和安装流程验收。进入 Microsoft Store 前，优先从同一 installed 布局生成 MSIX，并在 Partner Center 预留名称、取得 Store identity 后补齐清单。MSIX 商店提交由 Microsoft 签名；在商店外分发的安装程序仍应使用可信代码签名证书。
 - MSIX 安装目录是只读的，因此 installed 布局禁止依赖程序目录中的 `userdata` 或可写配置。商店包还须关闭应用内自更新，交由 Microsoft Store 更新。
 

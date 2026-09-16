@@ -528,6 +528,8 @@ const exactSections = [
     ['删除仓库项目', 'Delete Warehouse Items'],
     ['确认删除所选内容', 'Delete Selected Items?'],
     ['只有必要操作全部成功后，对应仓库记录才会删除。', 'Records delete only after all steps succeed.'],
+    ['只有必要操作全部成功后，对应仓库记录才会删除。本次运行期间可从仓库顶部撤回。', 'Records delete only after all steps succeed. You can undo from the top of the Warehouse during this session.'],
+    ['正在删除…', 'Deleting…'],
     ['尝试将原文件位置复原', 'Restore Original Files'],
     ['仅处理仍在回收站或归档后移动位置中的原文件；复原失败时会保留对应仓库记录和压缩包。', 'Restore from Recycle Bin or move-to folder. Failures keep records and archives.'],
     ['所选项目没有可以尝试复原的原文件记录。', 'No selected items have restorable originals.']
@@ -1016,6 +1018,15 @@ const patternSections = [
     [/^已验证成品发布完成：跨盘复制 ([\d.]+) 个文件，用时 ([\d.]+) 毫秒。$/, ([count, milliseconds]) => `Archive published: copied ${countNoun(count, 'file')} across drives in ${milliseconds} ms.`]
   ]],
   ['进度与剩余时间', [
+    [/^已处理 (\d+)\/(\d+)$/, 'Processed $1/$2'],
+    [/^视频抽帧 (\d+)\/(\d+)$/, 'Video frame $1/$2'],
+    [/^缩略图阶段耗时：(.+) ms$/, 'Thumbnail stage: $1 ms'],
+    [/^入库阶段耗时：相似关系 (\d+) ms$/, 'Intake timing: similarity $1 ms'],
+    [/^仓库写入 (\d+) ms$/, 'Warehouse write $1 ms'],
+    [/^更新记录 (\d+)$/, 'Updated records $1'],
+    [/^视频抽帧达到处理时限，保留已生成的预览：(.+)$/, 'Video preview time budget reached; keeping generated frames: $1'],
+    [/^缩略图尝试达到上限，保留已生成的预览：(\d+)\/(\d+)$/, 'Preview attempt limit reached; keeping generated previews: $1/$2'],
+    [/^已跳过无法生成的视频帧：(.+) · (\d+)\/(\d+) · (.+)$/, 'Skipped video frame: $1 · $2/$3 · $4', { translateCaptures: [4] }],
     [/^已完成 (\d+)\/(\d+) 项 · 预计还需 (\d+) 分钟$/, '$1/$2 done · ~$3 min left'],
     [/^已完成 (\d+)\/(\d+) 项 · 预计还需 (\d+) 小时 (\d+) 分钟$/, '$1/$2 done · ~$3h $4m left'],
     [/^已完成 (\d+)\/(\d+) 项 · 预计还需 (\d+) 小时$/, '$1/$2 done · ~$3h left'],
@@ -1034,6 +1045,7 @@ const patternSections = [
     [/^已为 (\d+) 项追加标签$/, ([count]) => `Added tags to ${countNoun(count, 'item')}`],
     [/^已修改 (\d+) 项的备份位置$/, ([count]) => `Updated backup location for ${countNoun(count, 'item')}`],
     [/^已删除 (\d+) 项$/, ([count]) => `Deleted ${countNoun(count, 'item')}`],
+    [/^已删除 (\d+) 项，可从仓库顶部撤回$/, ([count]) => `Deleted ${countNoun(count, 'item')}. Undo is available at the top of the Warehouse.`],
     [/^已删除 (\d+) 项；(\d+) 项失败：(.+)$/, ([deleted, failed, reason]) => `Deleted ${countNoun(deleted, 'item')}; ${countNoun(failed, 'item')} failed: ${reason}`, { translateCaptures: [3] }]
   ]],
   ['批量与清理结果', [
@@ -1199,12 +1211,13 @@ const patternSections = [
     [/^无法读取更新失败记录：(.+)$/, 'Couldn’t read update failure: $1', { translateCaptures: [1] }]
   ]],
   ['媒体处理', [
+    [/^视频抽帧输出为空。$/, 'Video frame output is empty.'],
     [/^媒体处理超时：(.+)$/, 'Media timeout: $1'],
     [/^(.+) 退出码 (\d+)：(.+)$/, '$1 exited with code $2: $3'],
     [/^FFmpeg 探测失败：(.+)；未能从固定版本输出中解析时长或分辨率。$/, 'FFmpeg probe failed: $1. Couldn’t read duration or resolution.'],
     [/^FFmpeg 探测成功：(.+) · (.+)×(.+) · (.+) 秒。$/, 'FFmpeg probe succeeded: $1 · $2×$3 · $4 s.'],
-    [/^FFmpeg 视频抽帧失败，改用系统缩略图：(.+) · (.+)$/, 'FFmpeg frames failed; using system thumbnail: $1 · $2'],
-    [/^已跳过无法生成预览的媒体：(.+) · (.+)$/, 'Skipped media without a preview: $1 · $2']
+    [/^FFmpeg 视频抽帧失败，改用系统缩略图：(.+) · (.+)$/, 'FFmpeg frames failed; using system thumbnail: $1 · $2', { translateCaptures: [2] }],
+    [/^已跳过无法生成预览的媒体：(.+) · (.+)$/, 'Skipped media without a preview: $1 · $2', { translateCaptures: [2] }]
   ]],
   ['队列阶段与重复提示', [
     [/^相似项目关系重建失败：(.+)$/, 'Similarity rebuild failed: $1', { translateCaptures: [1] }],
@@ -1272,6 +1285,7 @@ const stageFragmentSections = [
     ['正在生成未压缩入库清单与 MD5', 'Building uncompressed manifest and MD5'],
     ['正在生成 MD5：', 'Generating MD5: '],
     ['正在生成缩略图并整理入库信息', 'Generating previews and Warehouse data'],
+    ['正在生成缩略图', 'Generating previews'],
     ['正在更新相似关系并写入仓库记录', 'Updating similarity and Warehouse records'],
     ['正在移动已完成的源项目', 'Moving completed source'],
     ['正在把已完成的源项目移入回收站', 'Moving source to Recycle Bin'],

@@ -4,6 +4,13 @@
 
 !define HAMSTER_INSTALL_DIRECTORY "Hamster Archiver"
 
+LangString HAMSTER_INSTALL_TO 1033 "Hamster Archiver will be installed to:"
+LangString HAMSTER_INSTALL_TO 2052 "Hamster Archiver 将安装到："
+LangString HAMSTER_DESKTOP_SHORTCUT 1033 "Create a desktop shortcut"
+LangString HAMSTER_DESKTOP_SHORTCUT 2052 "创建桌面快捷方式"
+LangString HAMSTER_RUN_APP 1033 "Run Hamster Archiver"
+LangString HAMSTER_RUN_APP 2052 "运行 Hamster Archiver"
+
 !macro customUnInstall
   ; Remove every exact shortcut name used by supported Hamster Archiver
   ; installers. This also cleans up a stale link left by an older or
@@ -71,11 +78,11 @@ FunctionEnd
       Abort
     ${EndIf}
 
-    ${NSD_CreateLabel} 0 0 100% 22u "Hamster Archiver 将安装到 / will be installed to:"
+    ${NSD_CreateLabel} 0 0 100% 22u "$(HAMSTER_INSTALL_TO)"
     Pop $0
     ${NSD_CreateLabel} 0 25u 100% 28u "$INSTDIR"
     Pop $HamsterInstallPathLabel
-    ${NSD_CreateCheckbox} 0 68u 100% 18u "创建桌面快捷方式 / Create a desktop shortcut"
+    ${NSD_CreateCheckbox} 0 68u 100% 18u "$(HAMSTER_DESKTOP_SHORTCUT)"
     Pop $HamsterDesktopShortcutCheckbox
     ${NSD_Check} $HamsterDesktopShortcutCheckbox
     nsDialogs::Show
@@ -110,7 +117,7 @@ FunctionEnd
   FunctionEnd
 
   !define MUI_FINISHPAGE_RUN
-  !define MUI_FINISHPAGE_RUN_TEXT "运行 Hamster Archiver / Run Hamster Archiver"
+  !define MUI_FINISHPAGE_RUN_TEXT "$(HAMSTER_RUN_APP)"
   !define MUI_FINISHPAGE_RUN_FUNCTION "HamsterStartInstalledApp"
   !insertmacro MUI_PAGE_FINISH
 !macroend

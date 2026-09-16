@@ -13,7 +13,7 @@ const { QueueManager } = require('../src/core/queue-manager');
 const { AppStore } = require('../src/core/store');
 const { createArchivePublicationReceipt } = require('../src/core/archive-engine');
 const {
-  MCP_ELECTRON_COMPATIBILITY_SWITCHES,
+  MCP_CLIENT_RUNTIME_SWITCHES,
   EXPECTED_MCP_TOOLS,
   isUnexpectedLaunchExit,
   main: runMcpClient,
@@ -47,11 +47,11 @@ function fakeManager() {
   };
 }
 
-test('MCP launcher compatibility switch is accepted and launch failures do not wait for timeout', async () => {
-  assert.deepEqual(MCP_ELECTRON_COMPATIBILITY_SWITCHES, [
-    '--disable-crash-reporter', '--disable-breakpad', '--disable-gpu', '--disable-gpu-compositing'
-  ]);
-  assert.equal(parseCli(['describe', ...MCP_ELECTRON_COMPATIBILITY_SWITCHES]).command, 'describe');
+test('MCP launcher keeps the native graphics profile and launch failures do not wait for timeout', async () => {
+  assert.deepEqual(MCP_CLIENT_RUNTIME_SWITCHES, ['--disable-crash-reporter', '--disable-breakpad']);
+  assert.equal(parseCli(['describe', ...MCP_CLIENT_RUNTIME_SWITCHES]).command, 'describe');
+  const launcher = await fs.readFile(path.resolve(__dirname, '..', 'scripts', 'HamsterArchiver-MCP.cmd'), 'utf8');
+  assert.equal(launcher.includes('--disable-gpu'), false);
   assert.equal(parseCli([]).command, 'stdio');
   assert.throws(() => parseCli(['doctor-please']), /Unknown command/);
   assert.equal(isUnexpectedLaunchExit(0), false);

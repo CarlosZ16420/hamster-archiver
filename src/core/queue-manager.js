@@ -76,8 +76,8 @@ const DUPLICATE_CONFIRMATION_REASONS = new Set(['name_match', 'similar_title', '
 
 function isDuplicateCandidateJob(job) {
   const status = String(job?.status || '');
-  return Boolean(status) && status !== 'cancelled' && status !== 'failed' &&
-    !status.startsWith('completed');
+  return ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation',
+    'inventorying', 'compressing', 'verifying'].includes(status);
 }
 
 function normalizeCatalogMetadata(record) {
@@ -432,7 +432,7 @@ async function quarantineAndTrashArchiveFiles(record, stagingDirectory, trashIte
     const archivePath = assertOwnedChildPath(archiveDirectory, path.join(archiveDirectory, fileName));
     if (await pathExists(archivePath)) archivePaths.push(archivePath);
   }
-  if (archivePaths.length === 0) return;
+  if (archivePaths.length === 0) return null;
   const configuredStaging = String(stagingDirectory || '').trim();
   if (!configuredStaging) throw new Error('压缩暂存目录未配置，无法安全删除多卷压缩包。');
   const stagingRoot = path.resolve(configuredStaging);
@@ -450,6 +450,13 @@ async function quarantineAndTrashArchiveFiles(record, stagingDirectory, trashIte
       moved.push({ archivePath, quarantinedPath });
     }
     await trashItem(quarantineDirectory);
+    return {
+      trashPath: quarantineDirectory,
+      files: moved.map((item) => ({
+        originalPath: item.archivePath,
+        quarantinedName: path.basename(item.quarantinedPath)
+      }))
+    };
   } catch (error) {
     for (const item of moved.reverse()) {
       try {
@@ -593,6 +600,8 @@ class QueueManager extends EventEmitter {
     this.scheduleWaiting = false;
     this.schedulePaused = false;
     this.undoStack = [];
+    this.catalogOperationTail = Promise.resolve();
+    this.pendingCatalogOperations = 0;
     this.similarityIgnoreTerms = [];
     this.similarityIgnoreTermsWritePromise = Promise.resolve();
     this.similarityStrength = DEFAULT_SIMILARITY_STRENGTH;
@@ -1070,6 +1079,26 @@ class QueueManager extends EventEmitter {
     }
   }
 
+  runCatalogOperation(operation) {
+    this.pendingCatalogOperations += 1;
+    const previous = this.catalogOperationTail.catch(() => {});
+    let release;
+    const current = new Promise((resolve) => { release = resolve; });
+    this.catalogOperationTail = previous.then(() => current);
+    return previous.then(operation).finally(() => {
+      this.pendingCatalogOperations -= 1;
+      release();
+    });
+  }
+
+  hasPendingCatalogOperations() {
+    return this.pendingCatalogOperations > 0;
+  }
+
+  async waitForCatalogOperations() {
+    await this.catalogOperationTail.catch(() => {});
+  }
+
   async saveCatalogRecords(records) {
     if (this.store.saveCatalogRecords) {
       return this.store.saveCatalogRecords(this.config.repositoryDirectory, records, this.catalog);
@@ -1078,8 +1107,20 @@ class QueueManager extends EventEmitter {
   }
 
   async undoCatalogAction() {
-    const action = this.undoStack.pop();
+    return this.runCatalogOperation(() => this.performUndoCatalogAction());
+  }
+
+  async performUndoCatalogAction() {
+    const action = this.undoStack.at(-1);
     if (!action) throw new Error('没有可以撤回的仓库操作。');
+
+    if (action.kind === 'delete-catalog-records') {
+      await this.restoreDeletedCatalogAction(action);
+      this.undoStack.pop();
+      await this.log('warning', `已撤回：${action.label}。`);
+      this.emitState();
+      return this.getState();
+    }
 
     if (action.kind === 'delete-thumbnail') {
       const backup = action.backup;
@@ -1101,6 +1142,7 @@ class QueueManager extends EventEmitter {
       record.coverThumbnailRef = backup.coverThumbnailRef;
       record.metadataUpdatedAt = backup.metadataUpdatedAt || new Date().toISOString();
       await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+      this.undoStack.pop();
       await this.log('warning', `已撤回：${action.label}。`, record.id);
       this.emitState();
       return this.getState();
@@ -1136,8 +1178,91 @@ class QueueManager extends EventEmitter {
         .filter(Boolean);
       await this.saveCatalogRecords(restored);
     }
+    this.undoStack.pop();
     await this.log('warning', `已撤回：${action.label}。`);
     return this.getState();
+  }
+
+  async restoreDeletedCatalogAction(action) {
+    const deleted = Array.isArray(action.deletedRecords) ? action.deletedRecords : [];
+    if (deleted.length === 0) throw new Error('删除记录的撤回数据不完整，无法恢复。');
+    const existingIds = new Set(this.catalog.map((record) => record.id));
+    if (deleted.some((entry) => existingIds.has(entry.record?.id))) {
+      throw new Error('仓库中已经存在同一条目，无法撤回删除。');
+    }
+
+    await this.restoreDeletedCatalogFiles(deleted);
+
+    const catalogBeforeRestore = this.catalog.slice();
+    try {
+      for (const entry of [...deleted].sort((left, right) => left.index - right.index)) {
+        this.catalog.splice(Math.min(entry.index, this.catalog.length), 0, structuredClone(entry.record));
+      }
+      this.markTermStatisticsDirty();
+      await this.rebuildAllSimilarityRelations();
+      await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+    } catch (error) {
+      this.catalog = catalogBeforeRestore;
+      this.markTermStatisticsDirty();
+      throw error;
+    }
+  }
+
+  async restoreDeletedCatalogFiles(deleted) {
+    const unresolvedPaths = [];
+    for (const group of deleted.flatMap((entry) => entry.archiveRecovery ? [entry.archiveRecovery] : [])) {
+      if (!group.restored && !group.trashRestored && !(await pathExists(group.trashPath))) {
+        unresolvedPaths.push(group.trashPath);
+      }
+    }
+    for (const entry of deleted) {
+      for (const thumbnail of entry.thumbnailRecoveries || []) {
+        if (!thumbnail.restored && !(await pathExists(thumbnail.path))) unresolvedPaths.push(thumbnail.path);
+      }
+    }
+    if (unresolvedPaths.length > 0 && this.services.findTrashItems) {
+      const found = new Set((await this.services.findTrashItems(unresolvedPaths)).map(normalizeForComparison));
+      const missing = unresolvedPaths.find((targetPath) => !found.has(normalizeForComparison(targetPath)));
+      if (missing) throw new Error('Windows 回收站中的部分删除内容已经不存在，无法完整撤回。');
+    }
+
+    for (const group of deleted.flatMap((entry) => entry.archiveRecovery ? [entry.archiveRecovery] : [])) {
+      if (group.restored) continue;
+      for (const file of group.files || []) {
+        if (!file.restored && await pathExists(file.originalPath)) {
+          throw new Error(`原压缩包位置已经存在同名内容，无法撤回：${file.originalPath}`);
+        }
+      }
+      if (!group.trashRestored) {
+        if (await pathExists(group.trashPath)) {
+          group.trashRestored = true;
+        } else if (!this.services.restoreTrashItem || !(await this.services.restoreTrashItem(group.trashPath))) {
+          throw new Error('Windows 回收站中已找不到对应压缩包，无法撤回删除。');
+        } else {
+          group.trashRestored = true;
+        }
+      }
+      for (const file of group.files || []) {
+        if (file.restored) continue;
+        await fs.rename(path.join(group.trashPath, file.quarantinedName), file.originalPath);
+        file.restored = true;
+      }
+      try { await fs.rm(group.trashPath, { recursive: false }); } catch {}
+      group.restored = true;
+    }
+
+    for (const entry of deleted) {
+      for (const thumbnail of entry.thumbnailRecoveries || []) {
+        if (thumbnail.restored || await pathExists(thumbnail.path)) {
+          thumbnail.restored = true;
+          continue;
+        }
+        if (!this.services.restoreTrashItem || !(await this.services.restoreTrashItem(thumbnail.path))) {
+          throw new Error('Windows 回收站中已找不到对应图片，无法完整撤回删除。');
+        }
+        thumbnail.restored = true;
+      }
+    }
   }
 
   summarizeCatalogRecord(record) {
@@ -1336,29 +1461,40 @@ class QueueManager extends EventEmitter {
     return this.summarizeCatalogRecord(record);
   }
 
-  refreshSimilarityForRecord(record) {
+  refreshSimilarityForRecord(record, onBeforeChange = () => {}) {
+    const changed = new Set();
+    const touch = (candidate) => {
+      if (changed.has(candidate)) return;
+      onBeforeChange(candidate);
+      changed.add(candidate);
+    };
+    touch(record);
     record.similarityVersion = this.similarityVersionStamp();
     if (!this.isSimilarityEnabled()) {
       if (!Array.isArray(record.similarRecords)) record.similarRecords = [];
-      return;
+      return [...changed];
     }
     this.refreshTermStatistics();
     const stamp = this.similarityVersionStamp();
+    const catalogById = new Map(this.catalog.map((candidate) => [candidate.id, candidate]));
     for (const candidate of this.catalog) {
+      if (!(candidate.similarRecords || []).some((item) => item.id === record.id)) continue;
+      touch(candidate);
       candidate.similarRecords = (candidate.similarRecords || []).filter((item) => item.id !== record.id);
       refreshPossibleDuplicate(candidate);
     }
     const matches = findSimilarProjects(record, this.getSimilarityCandidates(record), this.similarityIgnoreTerms, this.similarityStrength)
       .filter((match) => {
-        const candidate = this.catalog.find((item) => item.id === match.id);
+        const candidate = catalogById.get(match.id);
         return candidate && !similarityIsDismissed(record, candidate);
       });
     record.similarRecords = matches;
     record.similarityVersion = stamp;
     refreshPossibleDuplicate(record);
     for (const match of matches) {
-      const candidate = this.catalog.find((item) => item.id === match.id);
+      const candidate = catalogById.get(match.id);
       if (!candidate) continue;
+      touch(candidate);
       const reciprocal = {
         id: record.id,
         title: record.title || record.displayName,
@@ -1372,6 +1508,7 @@ class QueueManager extends EventEmitter {
       refreshPossibleDuplicate(candidate);
       candidate.similarityVersion = stamp;
     }
+    return [...changed];
   }
 
   async recalculateCatalogSimilarity(recordId) {
@@ -1714,11 +1851,65 @@ class QueueManager extends EventEmitter {
     return { record: this.getCatalogDetails(recordId), path: getOriginalSourcePath(record) };
   }
 
+  pruneDeletedCatalogMatches(deletedIds) {
+    let changed = false;
+    for (const job of this.jobs) {
+      const before = JSON.stringify([
+        job.nameDuplicateMatches, job.similarMatches, job.exactProjectMatches,
+        job.exactDuplicateMatches, job.confirmationReasons, job.status
+      ]);
+      job.nameDuplicateMatches = (job.nameDuplicateMatches || [])
+        .filter((match) => !match.archiveId || !deletedIds.has(match.archiveId));
+      job.similarMatches = (job.similarMatches || [])
+        .filter((match) => !deletedIds.has(match.id));
+      job.exactProjectMatches = (job.exactProjectMatches || [])
+        .filter((match) => !deletedIds.has(match.id));
+      job.exactDuplicateMatches = (job.exactDuplicateMatches || [])
+        .map((match) => ({
+          ...match,
+          previous: (match.previous || []).filter((previous) => !deletedIds.has(previous.archiveId))
+        }))
+        .filter((match) => (match.previous || []).length > 0);
+      job.confirmationReasons = (job.confirmationReasons || []).filter((reason) => {
+        if (reason === 'name_match') return job.nameDuplicateMatches.length > 0;
+        if (reason === 'similar_title') return job.similarMatches.some((match) => (match.reasons || []).includes('标题相似'));
+        if (reason === 'same_video_size') return job.similarMatches.some((match) => (match.reasons || []).includes('视频大小完全一致'));
+        return true;
+      });
+      const stillHasDuplicate = job.nameDuplicateMatches.length > 0 || job.similarMatches.length > 0 ||
+        job.exactProjectMatches.length > 0 || job.exactDuplicateMatches.length > 0;
+      if (job.status === 'awaiting_duplicate_confirmation' && !stillHasDuplicate) {
+        job.status = 'queued';
+        job.stageText = job.deferredUntilNextRun
+          ? '等待下次入库'
+          : !hasSelectedIntakeMode(job) ? '等待选择入库方式'
+            : job.processingMode === 'inventory_only' ? '等待不压缩入库'
+              : job.sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩';
+        job.exactProjectMatches = [];
+        job.exactDuplicateMatches = [];
+        job.duplicateReviewFingerprint = null;
+        job.duplicateReviewKind = null;
+        job.automaticDuplicateCheckPending = false;
+      }
+      changed ||= before !== JSON.stringify([
+        job.nameDuplicateMatches, job.similarMatches, job.exactProjectMatches,
+        job.exactDuplicateMatches, job.confirmationReasons, job.status
+      ]);
+    }
+    return changed;
+  }
+
   async deleteCatalogRecords(recordIds, options = {}) {
+    return this.runCatalogOperation(() => this.performDeleteCatalogRecords(recordIds, options));
+  }
+
+  async performDeleteCatalogRecords(recordIds, options = {}) {
     const ids = [...new Set(recordIds || [])];
     if (ids.length === 0) throw new Error('请先选择要删除的仓库内容。');
     const deletedIds = [];
+    const deletedRecords = [];
     const failures = [];
+    const originalIndexById = new Map(this.catalog.map((record, index) => [record.id, index]));
     const thumbnailRoot = path.join(this.config.repositoryDirectory, 'thumbnails');
     const pathExists = this.services.pathExists || (async (targetPath) => {
       try { await fs.access(targetPath); return true; } catch (error) {
@@ -1733,13 +1924,16 @@ class QueueManager extends EventEmitter {
         failures.push({ id: recordId, title: '未知条目', message: '仓库记录不存在。' });
         continue;
       }
+      const originalIndex = originalIndexById.get(record.id);
+      let archiveRecovery = null;
+      const thumbnailRecoveries = [];
       try {
         if (options?.restoreOriginalSources && ['moved', 'trashed'].includes(record.sourceDisposition)) {
           await this.restoreOriginalSourceForRecord(record, pathExists);
           await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
         }
         if (record.recordType !== 'manual' && !record.importedFrom && (record.archiveFiles || []).length > 0) {
-          await quarantineAndTrashArchiveFiles(
+          archiveRecovery = await quarantineAndTrashArchiveFiles(
             record,
             this.config.archiveStagingDirectory,
             this.services.trashItem,
@@ -1755,7 +1949,10 @@ class QueueManager extends EventEmitter {
           const thumbnailPath = assertOwnedChildPath(thumbnailRoot, path.join(thumbnailRoot, safeFolder));
           if (await pathExists(thumbnailPath)) {
             try {
-              if (this.services.trashItem) await this.services.trashItem(thumbnailPath);
+              if (this.services.trashItem) {
+                await this.services.trashItem(thumbnailPath);
+                thumbnailRecoveries.push({ path: thumbnailPath, restored: false });
+              }
             } catch (error) {
               await this.log('warning', `归档已删除，但缩略图清理失败：${error.message}`, record.jobId);
             }
@@ -1763,6 +1960,12 @@ class QueueManager extends EventEmitter {
         }
         this.catalog = this.catalog.filter((candidate) => candidate.id !== recordId);
         await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+        deletedRecords.push({
+          index: originalIndex,
+          record: structuredClone(record),
+          archiveRecovery,
+          thumbnailRecoveries
+        });
         deletedIds.push(recordId);
         await this.log(
           'warning',
@@ -1775,7 +1978,20 @@ class QueueManager extends EventEmitter {
               : `已删除未压缩仓库内容“${record.title}”；原文件保持不变。`
         );
       } catch (error) {
-        failures.push({ id: recordId, title: record.title, message: error.message });
+        let failure = error;
+        if (!this.catalog.includes(record)) {
+          this.catalog.splice(Math.min(originalIndex, this.catalog.length), 0, record);
+          try {
+            await this.restoreDeletedCatalogFiles([{
+              record,
+              archiveRecovery,
+              thumbnailRecoveries
+            }]);
+          } catch (recoveryError) {
+            failure = new Error(`${error.message}；文件回退也未完成：${recoveryError.message}`);
+          }
+        }
+        failures.push({ id: recordId, title: record.title, message: failure.message });
       }
     }
     if (deletedIds.length > 0) {
@@ -1788,8 +2004,14 @@ class QueueManager extends EventEmitter {
         record.similarRecords = (record.similarRecords || []).filter((item) => validIds.has(item.id));
         refreshPossibleDuplicate(record);
       }
+      if (this.pruneDeletedCatalogMatches(deletedSet)) await this.persistJobs();
       this.markTermStatisticsDirty();
       await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+      this.pushUndoAction({
+        kind: 'delete-catalog-records',
+        label: `删除 ${deletedIds.length} 条仓库内容`,
+        deletedRecords
+      });
     }
     this.emitState();
     return { state: this.getState(), deletedIds, failures };
@@ -3034,7 +3256,8 @@ class QueueManager extends EventEmitter {
 
     const existingPaths = new Set(
       this.jobs
-        .filter((job) => !['cancelled', 'failed'].includes(job.status))
+        .filter((job) => isDuplicateCandidateJob(job) ||
+          ['awaiting_anomaly_confirmation', 'awaiting_trash_safety_confirmation'].includes(job.status))
         .map((job) => path.resolve(job.sourcePath).toLowerCase())
     );
     const added = result.tasks
@@ -3971,6 +4194,9 @@ class QueueManager extends EventEmitter {
       }
 
       if (this.services.createThumbnails && !job.sourceCatalogRecordId) {
+        const thumbnailsStartedAt = Date.now();
+        const mediaTimings = new Map();
+        let lastProgressAt = 0;
         job.stageText = '正在生成缩略图并整理入库信息';
         this.emitState();
         const thumbnailRoot = path.join(this.config.repositoryDirectory, 'thumbnails');
@@ -3983,6 +4209,19 @@ class QueueManager extends EventEmitter {
           result.manifest = await this.services.createThumbnails(job, result.manifest, jobConfig, {
             pauseController: this.pauseController,
             signal: this.abortController.signal,
+            onTiming: (stage, elapsedMs) => {
+              const timing = mediaTimings.get(stage) || { count: 0, elapsedMs: 0 };
+              timing.count += 1;
+              timing.elapsedMs += elapsedMs;
+              mediaTimings.set(stage, timing);
+            },
+            onProgress: ({ processed, total, name, frame, frameCount }) => {
+              if (Date.now() - lastProgressAt < 200 && processed !== total) return;
+              lastProgressAt = Date.now();
+              job.stageText = `正在生成缩略图 · 已处理 ${processed}/${total}` +
+                (frame ? ` · 视频抽帧 ${frame}/${frameCount}` : '') + (name ? ` · ${name}` : '');
+              this.emitState();
+            },
             onLog: (message, level = 'warning') => { void this.log(level, message, job.id, false); }
           });
         } catch (error) {
@@ -3992,6 +4231,7 @@ class QueueManager extends EventEmitter {
           await this.log('warning', `缩略图生成未完成：${error.message}`, job.id);
         } finally {
           if (!thumbnailDirectoryExisted) generatedThumbnailDirectory = thumbnailDirectory;
+          await this.log('info', `缩略图阶段耗时：${Date.now() - thumbnailsStartedAt} ms · ${JSON.stringify(Object.fromEntries(mediaTimings))}`, job.id, false);
         }
       }
 
@@ -4094,15 +4334,34 @@ class QueueManager extends EventEmitter {
         publishedArtifactsFinalized = true;
         return;
       }
-      const catalogBeforeCommit = structuredClone(this.catalog);
+      job.stageText = '正在更新相似关系并写入仓库记录';
+      this.emitState();
+      // Manifests and media are immutable in this operation. Snapshot only the
+      // relationship fields actually touched, rather than cloning every file.
+      const catalogBeforeCommit = this.catalog.slice();
+      const relationshipsBeforeCommit = new Map();
+      const rememberRelationships = (candidate) => {
+        relationshipsBeforeCommit.set(candidate, Object.fromEntries(
+          ['similarRecords', 'possibleDuplicate', 'similarityVersion'].map((key) =>
+            [key, { present: Object.hasOwn(candidate, key), value: candidate[key] }])
+        ));
+      };
       try {
-        job.stageText = '正在更新相似关系并写入仓库记录';
-        this.emitState();
         if (existingRecordIndex >= 0) this.catalog[existingRecordIndex] = record;
         else this.catalog.push(record);
-        this.refreshSimilarityForRecord(record);
-        await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+        const similarityStartedAt = Date.now();
+        const changedRecords = this.refreshSimilarityForRecord(record, rememberRelationships);
+        const similarityElapsedMs = Date.now() - similarityStartedAt;
+        const saveStartedAt = Date.now();
+        await this.saveCatalogRecords(changedRecords);
+        void this.log('info', `入库阶段耗时：相似关系 ${similarityElapsedMs} ms · 仓库写入 ${Date.now() - saveStartedAt} ms · 更新记录 ${changedRecords.length}`, job.id, false);
       } catch (error) {
+        for (const [candidate, fields] of relationshipsBeforeCommit) {
+          for (const [key, previous] of Object.entries(fields)) {
+            if (previous.present) candidate[key] = previous.value;
+            else delete candidate[key];
+          }
+        }
         this.restoreCatalogSnapshot(catalogBeforeCommit);
         const compensation = await this.compensateUncommittedArchive(
           job,

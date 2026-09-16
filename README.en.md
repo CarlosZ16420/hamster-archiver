@@ -8,7 +8,7 @@
 
 Windows local-first file organizer, media catalog and verified batch archiver with MCP tools for AI assistants.
 
-![Version](https://img.shields.io/badge/version-4.6.11-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.13-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -41,6 +41,8 @@ Downloads keep piling up, your drive is almost full, and organizing everything n
 
 The app packages files and records them; you or your sync tool handles cloud uploads. Local organization uses catalog metadata such as tags and does not automatically rearrange folders on disk.
 
+Intake previews show media counts and video-frame progress, with up to two images processed concurrently. Attempt and video processing limits reduce time spent on problematic media; successful previews are retained with a warning, while complete manifests and archive verification remain intact.
+
 ## Quick start
 
 For **Windows x64**, with English and Chinese interfaces. To use the app, choose a [Release package](https://github.com/CarlosZ16420/hamster-archiver/releases/latest); GitHub Source code downloads and repository clones are for development.
@@ -49,7 +51,7 @@ For **Windows x64**, with English and Chinese interfaces. To use the app, choose
 2. In the archive workbench, scan a directory or drop folders and videos, then review the pending resources. Try one small folder for your first run.
 3. For **local organization**, choose uncompressed intake. To **prepare backups**, set the archive output directory and start compressed intake. Open the library afterward to browse and organize the results.
 
-Keep the full portable directory, such as `HamsterArchiver-v4.6.11-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included, and no separate Node.js installation is needed.
+Keep the full portable directory, such as `HamsterArchiver-v4.6.13-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included, and no separate Node.js installation is needed.
 
 [![Batch archiving, progress tracking and duplicate review](assets/readme/archive-showcase.en-US.png)](assets/readme/archive-showcase.en-US.png)
 
@@ -100,7 +102,7 @@ Browse covers and build your own organization habits with tags, ratings and note
 <details>
 <summary>Details: organization tools and responsive browsing</summary>
 
-- Large thumbnails and a text list serve different browsing needs, with keyboard pagination, bulk tags and backup-location edits, and undo for supported operations.
+- Large thumbnails and a text list serve different browsing needs, with keyboard pagination, bulk tags and backup-location edits. Warehouse items deleted during the current session, together with their files in the Windows Recycle Bin, can also be undone directly.
 - Tag completion reuses existing categories; accept suggestions with Tab. Selection updates in place to reduce flicker and layout jumps.
 - Frames from the same video stay grouped, and portrait media remains fully visible. Change covers or add supplementary images from files or the clipboard.
 - Read large-project details on demand. Load nearby visible media with bounded concurrent reads, and render directory trees virtually to reduce unnecessary work.

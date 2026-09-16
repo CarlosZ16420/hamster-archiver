@@ -11,6 +11,26 @@ const { AppStore, readJson, writeJsonAtomic } = require('../src/core/store');
 const { makeUserDataLayout, resolveUserDataRoot } = require('../src/core/storage-paths');
 const { WAREHOUSE_INITIALIZED_MARKER } = require('../src/core/sqlite-repository');
 
+test('relationship-only saves preserve file indexes while content changes rebuild them', () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const { initializeSchema, saveCatalog, saveCatalogRecords, loadCatalog } = require('../src/core/sqlite-repository');
+  const db = new DatabaseSync(':memory:');
+  try {
+    initializeSchema(db);
+    const record = { id: 'one', title: 'Movie', manifest: [{ relativePath: 'movie.mp4', name: 'movie.mp4', size: 123, md5: 'a'.repeat(32) }] };
+    saveCatalog(db, [record, { id: 'two', title: 'Other' }]);
+    db.exec('CREATE TEMP TABLE mutations(n INTEGER); CREATE TEMP TRIGGER file_delete AFTER DELETE ON catalog_files BEGIN INSERT INTO mutations VALUES(1); END;');
+    const updated = { ...record, similarRecords: [{ id: 'two', score: 80 }], possibleDuplicate: true, similarityVersion: 'test' };
+    saveCatalogRecords(db, [updated], new Map([['one', 0]]));
+    assert.equal(db.prepare('SELECT count(*) AS n FROM mutations').get().n, 0);
+    assert.equal(loadCatalog(db).length, 2);
+    assert.deepEqual(loadCatalog(db)[0], updated);
+    saveCatalogRecords(db, [{ ...updated, manifest: [{ ...record.manifest[0], md5: 'b'.repeat(32) }] }], new Map([['one', 0]]));
+    assert.equal(db.prepare('SELECT count(*) AS n FROM mutations').get().n, 1);
+    assert.equal(db.prepare('SELECT md5 FROM catalog_files').get().md5, 'b'.repeat(32));
+  } finally { db.close(); }
+});
+
 test('JSON state can be atomically created and replaced', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-store-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

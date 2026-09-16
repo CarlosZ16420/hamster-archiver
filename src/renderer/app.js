@@ -4180,7 +4180,7 @@ elements.deleteCatalogSelected.addEventListener('click', () => {
   if (archiveCount > 0) parts.push(`${archiveCount} 个普通归档的压缩包将移入 Windows 回收站`);
   if (uncompressedCount > 0) parts.push(`${uncompressedCount} 个未压缩库存只删除仓库记录，原文件保持不变`);
   if (manualCount > 0) parts.push(`${manualCount} 条手动库存记录将被移除`);
-  elements.deleteCatalogSummary.textContent = `${t(`所选 ${selectedRecords.length} 项：`)}${parts.map((part) => t(part)).join(t('；'))}${t('。')} ${t('只有必要操作全部成功后，对应仓库记录才会删除。')}`;
+  elements.deleteCatalogSummary.textContent = `${t(`所选 ${selectedRecords.length} 项：`)}${parts.map((part) => t(part)).join(t('；'))}${t('。')} ${t('只有必要操作全部成功后，对应仓库记录才会删除。本次运行期间可从仓库顶部撤回。')}`;
   const restorableCount = selectedRecords.filter((record) => ['moved', 'trashed'].includes(record.sourceDisposition)).length;
   elements.restoreOriginalSources.disabled = restorableCount === 0;
   elements.restoreOriginalSources.closest('.restore-source-option').classList.toggle('disabled', restorableCount === 0);
@@ -4197,9 +4197,16 @@ elements.deleteCatalogDialog.addEventListener('click', (event) => {
 });
 elements.deleteCatalogForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  const submitButton = elements.deleteCatalogForm.querySelector('button[type="submit"]');
+  const originalLabel = submitButton.textContent;
+  submitButton.disabled = true;
+  submitButton.textContent = t('正在删除…');
   const result = await safely(() => window.archiveApp.deleteCatalogRecords([...selectedCatalogIds], {
     restoreOriginalSources: elements.restoreOriginalSources.checked
-  }));
+  })).finally(() => {
+    submitButton.disabled = false;
+    submitButton.textContent = originalLabel;
+  });
   if (!result) return;
   closeDeleteCatalogDialog();
   for (const id of result.deletedIds) selectedCatalogIds.delete(id);
@@ -4215,7 +4222,7 @@ elements.deleteCatalogForm.addEventListener('submit', async (event) => {
   if (result.failures.length > 0) {
     showToast(`已删除 ${result.deletedIds.length} 项；${result.failures.length} 项失败：${result.failures[0].message}`, true);
   } else {
-    showToast(`已删除 ${result.deletedIds.length} 项`);
+    showToast(`已删除 ${result.deletedIds.length} 项，可从仓库顶部撤回`);
   }
 });
 
@@ -4354,7 +4361,7 @@ window.archiveApp.onTaskProgress((progress) => {
     const fill = row.querySelector('.progress span');
     const progressText = row.querySelector('.progress-text');
     if (status) {
-      status.className = `status-pill ${progress.stage}`;
+      status.className = `status ${progress.stage}`;
       status.textContent = t(statusLabels[progress.stage] || progress.stage);
     }
     if (fill) fill.style.width = `${Math.max(0, Math.min(100, progress.percentage))}%`;

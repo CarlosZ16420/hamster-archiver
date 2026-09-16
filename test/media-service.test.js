@@ -7,7 +7,25 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
-const { extractVideoFrames, parseFfmpegProbeOutput, probeVideo } = require('../src/core/media-service');
+const { extractVideoFrames, parseFfmpegProbeOutput, probeVideo, runMediaProcess } = require('../src/core/media-service');
+
+test('media timeout excludes paused time and cancellation waits for child close', async () => {
+  const pauseController = { paused: true, waitIfPaused: async () => {}, attach: async () => {}, detach: () => {} };
+  const timer = setTimeout(() => { pauseController.paused = false; }, 300);
+  try {
+    const result = await runMediaProcess(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 350)'], {
+      timeoutMs: 200, pauseController
+    });
+    assert.ok(result.activeElapsedMs < 200);
+  } finally { clearTimeout(timer); }
+  const abort = new AbortController();
+  let detached = false;
+  await assert.rejects(runMediaProcess(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    signal: abort.signal,
+    pauseController: { waitIfPaused: async () => {}, attach: async () => { abort.abort(); }, detach: () => { detached = true; } }
+  }), { code: 'TASK_CANCELLED' });
+  assert.equal(detached, true);
+});
 
 test('FFmpeg probe parser tolerates extra stream metadata and tbr frame rates', () => {
   const parsed = parseFfmpegProbeOutput([
@@ -23,6 +41,33 @@ test('FFmpeg probe parser tolerates extra stream metadata and tbr frame rates', 
 });
 
 const ffmpegPath = path.resolve(__dirname, '..', 'tools', 'ffmpeg', 'ffmpeg.exe');
+
+test('video frame failures preserve successes, unique names and a total processing budget', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-partial-frames-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, 'sample.mp4');
+  await fs.writeFile(source, 'fixture');
+  let frameCalls = 0;
+  let probeCalls = 0;
+  const result = await extractVideoFrames(source, root, 0, 10, { ffmpegPath: 'fixture' }, {
+    async runProcess(_executable, args, options) {
+      if (args.includes('null')) {
+        probeCalls += 1;
+        return { stdout: '', stderr: 'Duration: 00:01:00.00\nStream #0:0: Video: h264, yuv420p, 640x360, 24 fps', activeElapsedMs: 1 };
+      }
+      frameCalls += 1;
+      assert.ok(options.timeoutMs <= 30_000);
+      if (frameCalls === 2) throw Object.assign(new Error('bad frame'), { activeElapsedMs: 30_000 });
+      await fs.writeFile(args.at(-1), 'frame');
+      return { activeElapsedMs: 30_000 };
+    }
+  });
+  assert.equal(probeCalls, 1);
+  assert.equal(frameCalls, 4);
+  assert.equal(result.frames.length, 3);
+  assert.deepEqual(result.frames.map((frame) => frame.frameIndex), [0, 2, 3]);
+  assert.deepEqual(result.frames.map((frame) => path.basename(frame.thumbnailPath)), ['001.jpg', '002.jpg', '003.jpg']);
+});
 
 function readImageDimensions(imagePath) {
   const inspected = spawnSync(ffmpegPath, [

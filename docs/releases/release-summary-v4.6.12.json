@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.12",
+  "notes": {
+    "zh-CN": [
+      "本地同版本维护：图片预览有限并发，视频部分失败保留成功帧，增加预览预算与实际进度；入库避免全库深拷贝和无变化索引重建。",
+      "修复部分多显示适配器 Windows 环境中纯 AI/MCP 启动失败的问题，恢复 Electron 默认图形选择。",
+      "AI 快速上手、MCP 说明和能力清单改为单语精简入口，具体能力通过运行时按需发现。",
+      "不更改仓库格式、用户资料位置或现有记录，无需迁移。"
+    ],
+    "en-US": [
+      "Local same-version maintenance: bounded image concurrency, retained successful video frames, preview budgets and progress; intake avoids full-manifest cloning and unchanged index rebuilds.",
+      "Fixes AI/MCP startup on affected multi-display-adapter Windows systems by restoring Electron's default graphics selection.",
+      "Replaces duplicated bilingual AI guidance and the embedded capability catalog with concise single-language entry points and runtime discovery.",
+      "Warehouse format, user-data locations, and existing records are unchanged; no migration is required."
+    ]
+  }
+}

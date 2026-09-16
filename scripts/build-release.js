@@ -7,7 +7,6 @@ const packageJson = require('../package.json');
 const { embedWindowsIcon } = require('./embed-windows-icon');
 const { createFileIntegrityEntries, hashFile } = require('../src/core/tool-integrity');
 const { compactReleaseNotesPayload } = require('../src/core/release-notes');
-const { capabilities } = require('../src/core/mcp-capabilities');
 const { dependencyLock, verifyToolchain } = require('./verify-toolchain');
 const { assertPathInsideLocalRoot, makeLocalLayout } = require('../src/core/local-paths');
 
@@ -130,7 +129,8 @@ async function main() {
     defaultMode: 'stdio',
     cliCommands: ['doctor', 'describe', 'call'],
     tools: ['hamster_discover', 'hamster_describe', 'hamster_call'],
-    capabilities: capabilities.map(({ name, domain, description, readOnly, risk }) => ({ name, domain, description, readOnly, risk }))
+    capabilityDiscovery: 'hamster_discover',
+    instructions: 'llms.txt'
   }, null, 2)}\n`, 'utf8');
   await fs.writeFile(path.join(appDirectory, 'package.json'), `${JSON.stringify({
     name: packageJson.name,

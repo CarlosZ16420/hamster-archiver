@@ -256,7 +256,11 @@ function saveCatalog(database, records, options = {}) {
   const normalized = Array.isArray(records) ? records : [];
   const deleteMissing = options.deleteMissing !== false;
   const sortIndexById = options.sortIndexById instanceof Map ? options.sortIndexById : null;
-  const existing = new Map(database.prepare('SELECT id, content_hash, sort_index FROM catalog_records').all()
+  const existingQuery = database.prepare('SELECT id, content_hash, sort_index FROM catalog_records WHERE id = ?');
+  const existingRows = deleteMissing
+    ? database.prepare('SELECT id, content_hash, sort_index FROM catalog_records').all()
+    : normalized.map((record) => existingQuery.get(String(record?.id || ''))).filter(Boolean);
+  const existing = new Map(existingRows
     .map((row) => [row.id, row]));
   const keepIds = new Set();
   const upsertRecord = database.prepare(`
@@ -303,7 +307,15 @@ function saveCatalog(database, records, options = {}) {
       content_hash = excluded.content_hash,
       complete_md5 = excluded.complete_md5
   `);
-  const indexedIds = new Set(database.prepare('SELECT DISTINCT record_id FROM catalog_search_terms').all().map((row) => row.record_id));
+  const indexedQuery = database.prepare('SELECT record_id FROM catalog_search_terms WHERE record_id = ? LIMIT 1');
+  const indexedIds = new Set(deleteMissing
+    ? database.prepare('SELECT DISTINCT record_id FROM catalog_search_terms').all().map((row) => row.record_id)
+    : normalized.filter((record) => indexedQuery.get(String(record?.id || ''))).map((record) => String(record.id)));
+  const previousJsonQuery = database.prepare('SELECT record_json FROM catalog_records WHERE id = ?');
+  const withoutRelationships = (record) => {
+    const { similarRecords, possibleDuplicate, similarityVersion, ...rest } = record;
+    return stableJson(rest);
+  };
 
   return withTransaction(database, () => {
     let changed = 0;
@@ -321,6 +333,10 @@ function saveCatalog(database, records, options = {}) {
         if (Number(previous.sort_index) !== sortIndex) updateSortIndex.run(sortIndex, id);
         continue;
       }
+      // Relationship-only updates do not invalidate files, search keys or
+      // fingerprints. Verify against persisted JSON rather than trusting a hint.
+      const relationshipsOnly = previous && indexedIds.has(id) &&
+        withoutRelationships(JSON.parse(previousJsonQuery.get(id).record_json)) === withoutRelationships(record);
       upsertRecord.run(
         id,
         sortIndex,
@@ -335,6 +351,10 @@ function saveCatalog(database, records, options = {}) {
         hash,
         json
       );
+      if (relationshipsOnly) {
+        changed += 1;
+        continue;
+      }
       deleteTags.run(id);
       for (const tag of Array.isArray(record.tags) ? record.tags : []) {
         insertTag.run(id, String(tag));
