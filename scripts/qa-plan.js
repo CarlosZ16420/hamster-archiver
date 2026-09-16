@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('node:path');
+const { existsSync } = require('node:fs');
 const { execFileSync } = require('node:child_process');
 
 const projectRoot = path.resolve(__dirname, '..');
@@ -115,10 +116,20 @@ function makePlan(files, options = {}) {
 }
 
 function gitOutput(args) {
-  return execFileSync('git', args, { cwd: projectRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  return execFileSync('git', args, { cwd: projectRoot, encoding: 'utf8', input: '', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+}
+
+function previousReleaseBase(commandRunner = gitOutput) {
+  try {
+    return commandRunner(['describe', '--tags', '--match', 'v[0-9]*', '--exclude', '*-*', '--abbrev=0', 'HEAD^']);
+  } catch {
+    // A first release must cover the entire source tree, including its root commit.
+    return commandRunner(['hash-object', '-t', 'tree', '--stdin']);
+  }
 }
 
 function changedFiles(base, head = 'HEAD') {
+  if (base === 'previous-release') base = previousReleaseBase();
   const diff = base
     ? gitOutput(['diff', '--name-only', '--diff-filter=ACDMRTUXB', base, head])
     : gitOutput(['diff', '--name-only', '--diff-filter=ACDMRTUXB', 'HEAD']);
@@ -148,10 +159,11 @@ function runPlan(plan) {
     console.log('QA skipped: the change contains documentation or metadata only.');
     return;
   }
+  const syntaxFiles = plan.syntaxFiles.filter(file => existsSync(path.join(projectRoot, file)));
   if (plan.level === 'full') {
     execFileSync(process.execPath, [path.join('scripts', 'check-syntax.js')], { cwd: projectRoot, stdio: 'inherit' });
-  } else if (plan.syntaxFiles.length > 0) {
-    execFileSync(process.execPath, [path.join('scripts', 'check-syntax.js'), ...plan.syntaxFiles], { cwd: projectRoot, stdio: 'inherit' });
+  } else if (syntaxFiles.length > 0) {
+    execFileSync(process.execPath, [path.join('scripts', 'check-syntax.js'), ...syntaxFiles], { cwd: projectRoot, stdio: 'inherit' });
   }
   if (plan.level === 'full') {
     execFileSync(process.execPath, ['--test', 'test/**/*.test.js'], { cwd: projectRoot, stdio: 'inherit' });
@@ -205,4 +217,4 @@ async function main() {
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
 
-module.exports = { TEST_GROUPS, changedFiles, groupsForFile, makePlan, parseArgs, runPlan };
+module.exports = { TEST_GROUPS, changedFiles, groupsForFile, makePlan, parseArgs, previousReleaseBase, runPlan };

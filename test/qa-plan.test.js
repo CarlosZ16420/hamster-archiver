@@ -2,7 +2,29 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { groupsForFile, makePlan, parseArgs } = require('../scripts/qa-plan');
+const { groupsForFile, makePlan, parseArgs, previousReleaseBase, runPlan } = require('../scripts/qa-plan');
+
+test('removed source files retain group coverage but are not passed to the syntax checker', () => {
+  const plan = makePlan(['scripts/verify-source-ci-receipt.js'], { level: 'targeted' });
+  assert.deepEqual(plan.groups, ['safety']);
+  assert.doesNotThrow(() => runPlan({ ...plan, tests: [], syntaxFiles: ['scripts/nonexistent-deleted-qa-regression.js'] }));
+});
+
+test('formal release QA compares the previous version, not only the final documentation commit', () => {
+  const calls = [];
+  assert.equal(previousReleaseBase(args => { calls.push(args); return 'v4.6.9'; }), 'v4.6.9');
+  assert.deepEqual(calls, [['describe', '--tags', '--match', 'v[0-9]*', '--exclude', '*-*', '--abbrev=0', 'HEAD^']]);
+});
+
+test('first release QA includes the root commit through an empty tree baseline', () => {
+  const calls = [];
+  assert.equal(previousReleaseBase(args => {
+    calls.push(args);
+    if (args[0] === 'describe') throw new Error('No previous version');
+    return 'empty-tree';
+  }), 'empty-tree');
+  assert.deepEqual(calls[1], ['hash-object', '-t', 'tree', '--stdin']);
+});
 
 test('documentation-only maintenance requires no test or build prerequisites', () => {
   const plan = makePlan(['docs/RELEASE.md', 'CHANGELOG.md']);

@@ -20,6 +20,10 @@ test('cloud release keeps only QA, build, and publish as separately retryable jo
   assert.match(workflow, /--outputs \$outputs --smoke/);
   assert.doesNotMatch(workflow, /verify-source-ci-receipt/);
   assert.doesNotMatch(workflow, /release:local[^\n]*--qa/);
+  assert.match(workflow, /--base previous-release --level \$qa/);
+  assert.match(workflow, /--execute --base previous-release --level \$env:QA_LEVEL/);
+  assert.doesNotMatch(workflow, /--base HEAD\^/);
+  assert.match(read('scripts/release.js'), /'--base', 'previous-release'/);
 });
 
 test('verified cloud artifacts can resume publishing without rebuilding', () => {

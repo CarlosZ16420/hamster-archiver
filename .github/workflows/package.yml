@@ -67,7 +67,7 @@ jobs:
           } else {
             $qa = if ($env:RELEASE_KIND -eq 'major') { 'full' } elseif ($env:REQUESTED_QA -ne 'auto') { $env:REQUESTED_QA } else { 'targeted' }
             if ('${{ inputs.publish }}' -eq 'true' -and $qa -eq 'none') { throw 'A stable Release must run formal QA.' }
-            node scripts/qa-plan.js --base HEAD^ --level $qa --github-output $env:GITHUB_OUTPUT
+            node scripts/qa-plan.js --base previous-release --level $qa --github-output $env:GITHUB_OUTPUT
           }
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: steps.qa_plan.outputs.level != 'none'
@@ -118,7 +118,7 @@ jobs:
           RETRY_TEST_FILE: ${{ inputs.retry_test_file }}
         run: |
           if ($env:RETRY_TEST_FILE) { node scripts/qa-plan.js --execute --test-file $env:RETRY_TEST_FILE }
-          else { node scripts/qa-plan.js --execute --base HEAD^ --level $env:QA_LEVEL }
+          else { node scripts/qa-plan.js --execute --base previous-release --level $env:QA_LEVEL }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run complete release gates only for full QA
         if: steps.qa_plan.outputs.level == 'full' || inputs.release_kind == 'major' || inputs.qa_level == 'full'

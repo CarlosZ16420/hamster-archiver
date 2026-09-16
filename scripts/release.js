@@ -195,7 +195,7 @@ async function local(options) {
       }
       return { level: qaLevel, source: 'cloud', runId: options.resumeRun, url: receipt.url };
     }
-    const qaArguments = [path.join('scripts', 'qa-plan.js'), '--execute', '--base', 'HEAD^', '--level', qaLevel];
+    const qaArguments = [path.join('scripts', 'qa-plan.js'), '--execute', '--base', 'previous-release', '--level', qaLevel];
     run(process.execPath, qaArguments, { stdio: 'inherit', timeout: 1800000 });
     if (qaLevel === 'full') {
       const npmCli = String(process.env.npm_execpath || '').trim();
