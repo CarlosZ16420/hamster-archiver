@@ -12,6 +12,14 @@ const root = path.resolve(__dirname, '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const RELEASE_READ_BACK_DELAY_MS = 30000;
 
+function assertWindowsHostContext(env = process.env, platform = process.platform) {
+  if (platform === 'win32' && /^CodexSandbox/i.test(String(env.USERNAME || env.USER || ''))) {
+    const error = new Error('Local Git/GitHub maintenance requires the normal Windows host credential context from the first call. Request host permission; no credential probe, login or automatic elevation was attempted.');
+    error.code = 'WINDOWS_HOST_CONTEXT_REQUIRED';
+    throw error;
+  }
+}
+
 function run(command, args, options = {}) {
   const output = execFileSync(command, args, {
     cwd: root, encoding: 'utf8', windowsHide: true, timeout: 60000,
@@ -72,7 +80,8 @@ function getReleaseByTag(repo, tag, commandRunner = run) {
   try {
     const release = JSON.parse(commandRunner('gh', ['api', `repos/${repo}/releases/tags/${tag}`]));
     if (release && release.tag_name === tag) return release;
-  } catch {
+  } catch (error) {
+    if (!/\b(?:HTTP|status)\s*404\b/i.test(errorText(error))) throw error;
     // Drafts can be briefly absent from the direct endpoint; use the
     // authenticated paginated listing as a bounded fallback.
   }
@@ -382,6 +391,7 @@ async function mirrorReleaseArtifacts(sourceRepo, targetRepo, tag, dependencies 
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  if (options.command !== 'verify') assertWindowsHostContext();
   if (options.command === 'verify') console.log(JSON.stringify(await verifyFiles(), null, 2));
   else if (options.command === 'state') console.log(releaseState(options.repo, options.tag).state);
   else if (options.command === 'preflight') {
@@ -402,4 +412,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { assertDraftNotes, assertMatchingReleaseAssets, readReleaseNotes, completeDraft, completePublishedRelease, downloadVerifiedReleaseAssets, errorText, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, mirrorReleaseArtifacts, parseArgs, planUploads, preflight, publishCompleteDraft, readReleaseWithOneDelayedRetry, releaseArtifacts, releaseState, run, uploadAssetWithRecovery, validateMirrorTarget, validateTarget, verifyFiles };
+module.exports = { assertWindowsHostContext, assertDraftNotes, assertMatchingReleaseAssets, readReleaseNotes, completeDraft, completePublishedRelease, downloadVerifiedReleaseAssets, errorText, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, mirrorReleaseArtifacts, parseArgs, planUploads, preflight, publishCompleteDraft, readReleaseWithOneDelayedRetry, releaseArtifacts, releaseState, run, uploadAssetWithRecovery, validateMirrorTarget, validateTarget, verifyFiles };

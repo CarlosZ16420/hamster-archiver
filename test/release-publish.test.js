@@ -2,7 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { assertMatchingReleaseAssets, completeDraft, completePublishedRelease, downloadVerifiedReleaseAssets, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, planUploads, parseArgs, preflight, publishCompleteDraft, releaseArtifacts, releaseState, uploadAssetWithRecovery, validateMirrorTarget } = require('../scripts/release-publish');
-const { optionsFrom, findRequest } = require('../scripts/release');
+const { optionsFrom, findRequest, assertGithubAccess } = require('../scripts/release');
+const { assertWindowsHostContext } = require('../scripts/release-publish');
 const { readReleaseNotes, assertDraftNotes } = require('../scripts/release-publish');
 const fs = require('node:fs/promises');
 const os = require('node:os');
@@ -80,12 +81,73 @@ test('release lookup prefers the direct tag endpoint and falls back to the pagin
   assert.equal(fallback.id, 12);
 });
 
+test('known Windows sandbox accounts stop before any remote credential probe', () => {
+  assert.throws(() => assertWindowsHostContext({ USERNAME: 'CodexSandboxOffline' }, 'win32'), { code: 'WINDOWS_HOST_CONTEXT_REQUIRED' });
+  assert.doesNotThrow(() => assertWindowsHostContext({ USERNAME: 'CarlosZ' }, 'win32'));
+  assert.doesNotThrow(() => assertWindowsHostContext({ USERNAME: 'runneradmin' }, 'win32'));
+  assert.doesNotThrow(() => assertWindowsHostContext({ USER: 'runner' }, 'linux'));
+  let calls = 0;
+  assert.throws(() => assertGithubAccess('CarlosZ16420/hamster-archive', () => { calls += 1; }, {
+    env: { USERNAME: 'CodexSandboxOnline' }, platform: 'win32'
+  }), { code: 'WINDOWS_HOST_CONTEXT_REQUIRED' });
+  assert.equal(calls, 0);
+});
+
+test('one host access check distinguishes transport, credentials and repository permissions without leaking stderr', () => {
+  for (const [stderr, code] of [
+    ['Get https://api.github.com/: EOF', 'GITHUB_NETWORK_FAILED'],
+    ['schannel: SSL/TLS handshake failed', 'GITHUB_NETWORK_FAILED'],
+    ['HTTP 401: Bad credentials', 'GITHUB_CREDENTIALS_UNAVAILABLE'],
+    ['SEC_E_NO_CREDENTIALS', 'GITHUB_CREDENTIALS_UNAVAILABLE'],
+    ['HTTP 403: Resource not accessible', 'GITHUB_REPOSITORY_ACCESS_FAILED'],
+    ['HTTP 404', 'GITHUB_REPOSITORY_ACCESS_FAILED'],
+    ['HTTP 422', 'GITHUB_REPOSITORY_ACCESS_FAILED']
+  ]) {
+    let calls = 0;
+    assert.throws(() => assertGithubAccess('CarlosZ16420/hamster-archive', () => {
+      calls += 1;
+      throw Object.assign(new Error('command failed'), { stderr: `${stderr} secret-test-token` });
+    }, { env: { USERNAME: 'CarlosZ' }, platform: 'win32' }), error => {
+      assert.equal(error.code, code);
+      assert.ok(!error.message.includes('secret-test-token'));
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+  let calls = 0;
+  assertGithubAccess('CarlosZ16420/hamster-archive', (command, args) => {
+    calls += 1;
+    assert.equal(command, 'gh');
+    assert.deepEqual(args, ['api', 'repos/CarlosZ16420/hamster-archive', '--method', 'GET', '--silent']);
+  }, { env: { USERNAME: 'CarlosZ' }, platform: 'win32' });
+  assert.equal(calls, 1);
+});
+
+test('release lookup never hides network, credential or malformed JSON errors behind draft-list queries', () => {
+  for (const message of ['EOF', 'HTTP 401', 'HTTP 403', 'HTTP 422', 'SSL handshake failed']) {
+    let calls = 0;
+    const failure = new Error(message);
+    assert.throws(() => getReleaseByTag('CarlosZ16420/hamster-archive', 'v4.6.10', () => {
+      calls += 1;
+      throw failure;
+    }), error => error === failure);
+    assert.equal(calls, 1);
+  }
+  let calls = 0;
+  assert.throws(() => getReleaseByTag('CarlosZ16420/hamster-archive', 'v4.6.10', () => {
+    calls += 1;
+    return '{broken JSON';
+  }), SyntaxError);
+  assert.equal(calls, 1);
+});
+
 test('preflight preserves published refusal and returns a draft through injected GitHub calls', () => {
   const tag = `v${require('../package.json').version}`;
   const runnerFor = release => (command, args) => {
     if (command === 'git' && args[0] === 'status') return '';
     if (command === 'git' && args[0] === 'rev-parse') return 'abc123';
     if (command === 'gh' && args[0] === 'api' && args[1].includes('/commits/')) return JSON.stringify({ sha: 'abc123' });
+    if (command === 'gh' && args[0] === 'api' && args[1].includes('/releases/tags/')) return JSON.stringify(release);
     if (command === 'gh' && args[0] === 'api' && args[1].includes('/releases?')) return JSON.stringify([release]);
     throw new Error(`unexpected call: ${command} ${args.join(' ')}`);
   };

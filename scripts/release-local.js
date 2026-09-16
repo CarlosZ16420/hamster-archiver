@@ -8,6 +8,7 @@ const packageJson = require('../package.json');
 const { hashFile } = require('../src/core/tool-integrity');
 const { assertPathInsideLocalRoot, makeLocalLayout } = require('../src/core/local-paths');
 const { openCheckpoint, runStage } = require('./release-checkpoint');
+const { assertWindowsHostContext } = require('./release-publish');
 
 const projectRoot = path.resolve(__dirname, '..');
 const layout = makeLocalLayout(projectRoot);
@@ -215,6 +216,7 @@ async function replacePackage(digest, suffix) {
 }
 
 async function main() {
+  assertWindowsHostContext();
   const options = parseOptions(process.argv.slice(2));
   if (process.platform !== 'win32' || process.arch !== 'x64') {
     throw new Error('本地发行只支持 Windows x64。');

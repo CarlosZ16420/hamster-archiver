@@ -48,12 +48,14 @@
 
 `scripts/qa-plan.js` 仅供正式 QA 或 Reviewer 明确点名检查时使用。测试组为 `release`、`mirrors`、`packaging`、`archive`、`catalog`、`data`、`desktop`、`mcp` 和 `safety`。失败可用 `--test-file` 或 `--group` 只重跑失败项。不得在 Current、本地打包、公开镜像或 CNB 镜像中隐式调用它。
 
-## GitHub 凭据
+## Windows 宿主、GitHub 凭据与网络
 
 - 本机 Windows 凭据库是 GitHub 私有仓库访问的凭据来源。GitHub CLI 与 Git Credential Manager 必须指向同一有效账号；令牌不得写入仓库、日志或长期环境变量。
-- 发布入口只做一次轻量检查：调用私有仓库 API。检查通过才派发、查询或上传。
-- 如果受限沙箱无法读取 Windows 凭据库，立即停止当前上下文，不执行 `gh auth login`，不反复试 token，也不创建 Release 草稿。将同一命令切换到正常 Windows 宿主凭据上下文后只重试一次。
+- 本机所有 Git 写操作和 GitHub CLI 远端操作，从第一次调用起使用正常 Windows 宿主凭据上下文。Agent 直接申请对应命令的宿主权限，不先在已知沙箱账户试错；授权被拒绝时停止，不修改 ACL、不改用其他账户或令牌路径绕过。只读本地状态、差异和纯产物校验仍可在沙箱进行。
+- 发布入口只做一次轻量检查：在宿主上下文调用目标仓库 API。已知 Windows 沙箱账户由入口在调用 GitHub 前拒绝并说明原因，不自行提权；检查通过才派发、查询或上传。云端继续使用 workflow 注入的短期 GitHub Token，不改用本机凭据。
+- 不执行 `gh auth login` 或搜索令牌位置。访问检查将网络/TLS、凭据和仓库权限错误分开报告；EOF、连接重置或超时不能称为令牌丢失。直接标签查询只在 HTTP 404 时回退草稿列表，网络、认证和格式错误不触发额外列表查询。
 - 凭据检查成功后发生的 404、422 或权限错误按 API/工作流配置故障处理，不能误判为需要再次登录。
+- 本机 Git/GitHub 默认直连，不写入或自动恢复代理，不把 Git 的代理配置注入 GitHub CLI，也不关闭证书校验。若直连失败，仅检查用户当前明确配置的网络路径并报告；更换代理须用户确认。CNB 默认由公开 GitHub Actions 镜像，无需本机 CNB Token 或上传。
 
 ## 状态、检查点与重试
 

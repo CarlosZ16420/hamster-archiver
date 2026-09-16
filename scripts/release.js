@@ -3,7 +3,7 @@
 const { randomUUID } = require('node:crypto');
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { completeDraft, completePublishedRelease, getReleaseByTag, publishCompleteDraft, releaseArtifacts, releaseState, run, verifyFiles } = require('./release-publish');
+const { assertWindowsHostContext, completeDraft, completePublishedRelease, errorText, getReleaseByTag, publishCompleteDraft, releaseArtifacts, releaseState, run, verifyFiles } = require('./release-publish');
 const { openCheckpoint, runStage } = require('./release-checkpoint');
 const version = require('../package.json').version;
 
@@ -51,15 +51,26 @@ function repoFromOrigin(commandRunner = run) {
   return match[1];
 }
 
-function assertGithubAccess(repo, commandRunner = run) {
+function assertGithubAccess(repo, commandRunner = run, context = {}) {
+  assertWindowsHostContext(context.env, context.platform);
   try {
     commandRunner('gh', ['api', `repos/${repo}`, '--method', 'GET', '--silent']);
   } catch (cause) {
-    const error = new Error(
-      `GitHub credential check failed for ${repo}. Do not log in repeatedly. ` +
-      'Run this release command once in the normal Windows host credential context; a restricted sandbox cannot read Windows Credential Manager.'
-    );
-    error.code = 'GITHUB_CREDENTIAL_CONTEXT_REQUIRED';
+    const details = errorText(cause);
+    let code = 'GITHUB_ACCESS_CHECK_FAILED';
+    let guidance = 'Check the reported GitHub API or CLI configuration error before retrying.';
+    if (/HTTP\s*(?:403|404|422)\b|\bstatus\s*(?:403|404|422)\b|resource not accessible|permission denied/i.test(details)) {
+      code = 'GITHUB_REPOSITORY_ACCESS_FAILED';
+      guidance = 'Check the repository name, account permissions and API configuration; do not log in again automatically.';
+    } else if (/HTTP\s*401\b|bad credentials|SEC_E_NO_CREDENTIALS|credential manager|not logged|gh auth login|GH_TOKEN/i.test(details)) {
+      code = 'GITHUB_CREDENTIALS_UNAVAILABLE';
+      guidance = 'Check the existing account in the normal Windows host credential context; do not search token locations or log in automatically.';
+    } else if (/\bEOF\b|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|TLS|SSL|schannel|handshake|certificate|timed?\s*out|connection|no such host|proxy/i.test(details)) {
+      code = 'GITHUB_NETWORK_FAILED';
+      guidance = 'Check direct connectivity, DNS and TLS. This does not prove credentials are missing; do not add a proxy or disable certificate verification automatically.';
+    }
+    const error = new Error(`GitHub access check failed for ${repo} (${code}). ${guidance}`);
+    error.code = code;
     error.cause = cause;
     throw error;
   }
@@ -227,6 +238,7 @@ async function local(options) {
 async function main() {
   const options = optionsFrom(process.argv.slice(2));
   try {
+    assertWindowsHostContext();
     options.repo ||= repoFromOrigin();
     assertGithubAccess(options.repo);
     if (options.channel === 'stable') {
@@ -247,8 +259,8 @@ async function main() {
     else await local(options);
   } catch (error) {
     console.error(`Release did not complete: ${error.message}`);
-    if (error.code === 'GITHUB_CREDENTIAL_CONTEXT_REQUIRED') {
-      console.error('No login or upload retry was attempted. Switch to the Windows host credential context and run the same command once.');
+    if (error.code === 'WINDOWS_HOST_CONTEXT_REQUIRED' || error.code?.startsWith('GITHUB_')) {
+      console.error('Stopped before dispatch or upload. No login, token search, proxy change or automatic retry was attempted. Local maintenance must start in the normal Windows host credential context.');
     } else if (error.runId) {
       console.error(`Retry failed jobs once with "gh run rerun ${error.runId} --failed --repo ${options.repo}". If cloud publication remains unavailable, use "npm run release -- --mode local --repo ${options.repo} --resume-run ${error.runId}"; its successful QA receipt is reused.`);
     } else {

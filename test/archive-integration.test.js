@@ -23,6 +23,8 @@ test('real 7-Zip flow encrypts, verifies and moves a small test archive', {
   const sourcePath = path.join(root, 'source', '测试目录');
   const archiveStagingDirectory = path.join(root, 'staging');
   const archiveOutputDirectory = path.join(root, 'library');
+  // Model the user's confirmed output folder, rather than implicit engine creation.
+  await fs.mkdir(archiveOutputDirectory, { recursive: true });
   await fs.mkdir(sourcePath, { recursive: true });
   await fs.mkdir(path.join(sourcePath, '空子目录'), { recursive: true });
   await fs.writeFile(path.join(sourcePath, '不会明文显示的文件名.txt'), 'hamster archive integration test', 'utf8');
@@ -69,6 +71,7 @@ test('real archive publication is recovered when the SQLite catalog commit is re
   const sourcePath = path.join(root, 'source', 'commit-failure');
   const archiveOutputDirectory = path.join(root, 'output');
   const archiveStagingDirectory = path.join(root, 'staging');
+  await fs.mkdir(archiveOutputDirectory, { recursive: true });
   const realStore = new AppStore(path.join(root, 'userdata'));
   t.after(async () => {
     realStore.closeAll();

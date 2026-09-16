@@ -7,7 +7,7 @@
 
 Windows 本地文件整理、媒体建库与可校验批量归档工具；支持 AI 通过 MCP 调用。
 
-![Version](https://img.shields.io/badge/version-4.6.10-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.11-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -46,7 +46,7 @@ Windows 本地文件整理、媒体建库与可校验批量归档工具；支持
 2. 在“归档工作台”扫描目录，或拖入文件夹、视频，查看待处理内容。第一次可以先添加一个小文件夹。
 3. 想先做**本地整理**，点击“不压缩直接入库”；准备**打包备份**，在“收纳设置”中填写“压缩包保存在”，点击“开始压缩入库”。完成后到“仓库”浏览和整理。
 
-便携版请保留完整目录，例如 `HamsterArchiver-v4.6.10-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供，无需另装 Node.js。
+便携版请保留完整目录，例如 `HamsterArchiver-v4.6.11-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供，无需另装 Node.js。
 
 [![批量归档、进度追踪与重复确认](assets/readme/archive-showcase.zh-CN.png)](assets/readme/archive-showcase.zh-CN.png)
 

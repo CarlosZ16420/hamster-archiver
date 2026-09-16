@@ -1,12 +1,12 @@
 # Changelog
 
-## 4.6.10
+## 4.6.11
 
-# Hamster Archiver 4.6.10
+# Hamster Archiver 4.6.11
 
 ## 中文
 
-本版本汇总公开正式版 4.6.9 → 4.6.10 的变化。
+本版本汇总公开正式版 4.6.9 → 4.6.11 的变化，包含未单独正式公开发行的 4.6.10 改进。
 
 ### Windows 安装版
 
@@ -28,11 +28,11 @@
 
 ### 升级与数据
 
-本次范围为公开正式版 4.6.9 → 4.6.10。请通过完整便携程序目录或安装程序升级；本次不更改 SQLite 仓库格式、用户资料位置或现有记录，无需迁移或重建数据。
+本次范围为公开正式版 4.6.9 → 4.6.11。请通过完整便携程序目录或安装程序升级；本次不更改 SQLite 仓库格式、用户资料位置或现有记录，无需迁移或重建数据。
 
 ## English
 
-This release covers changes from public stable 4.6.9 to 4.6.10.
+This release covers changes from public stable 4.6.9 to 4.6.11, including the 4.6.10 improvements that were not published as a separate public stable release.
 
 ### Windows installer
 
@@ -54,7 +54,7 @@ This release covers changes from public stable 4.6.9 to 4.6.10.
 
 ### Upgrade and data
 
-This release covers public stable 4.6.9 → 4.6.10. Upgrade through the complete portable application directory or installer. The SQLite warehouse format, user-data locations, and existing records remain unchanged; no migration or rebuild is required.
+This release covers public stable 4.6.9 → 4.6.11. Upgrade through the complete portable application directory or installer. The SQLite warehouse format, user-data locations, and existing records remain unchanged; no migration or rebuild is required.
 
 ## 4.6.9
 
