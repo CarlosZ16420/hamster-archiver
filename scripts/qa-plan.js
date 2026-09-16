@@ -12,7 +12,8 @@ const TEST_GROUPS = Object.freeze({
     'test/release-architecture.test.js',
     'test/release-checkpoint.test.js',
     'test/release-local.test.js',
-    'test/release-publish.test.js'
+    'test/release-publish.test.js',
+    'test/release-zip-manifest.test.js'
   ],
   mirrors: [
     'test/public-snapshot.test.js',

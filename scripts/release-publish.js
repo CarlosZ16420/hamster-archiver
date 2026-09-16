@@ -103,6 +103,36 @@ function preflight(repo, tag, commandRunner = run) {
   return release;
 }
 
+function readPortableZipManifest(file, commandRunner = run) {
+  // Check the shipped archive itself: a refreshed staging directory can coexist
+  // with an older ZIP bearing the same version and a perfectly valid checksum.
+  const entryName = `HamsterArchiver-v${version}-win-x64/release-manifest.json`;
+  if (process.platform !== 'win32') {
+    return JSON.parse(commandRunner('unzip', ['-p', file, entryName]));
+  }
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)',
+    'Add-Type -AssemblyName System.IO.Compression.FileSystem',
+    '$archive = [System.IO.Compression.ZipFile]::OpenRead($env:HAMSTER_VERIFY_ZIP)',
+    'try {',
+    '  $entries = @($archive.Entries | Where-Object { $_.FullName.Replace([char]92, [char]47) -ceq $env:HAMSTER_VERIFY_ZIP_ENTRY })',
+    '  if ($entries.Count -ne 1) { throw "ZIP must contain exactly one release manifest." }',
+    '  $reader = New-Object System.IO.StreamReader($entries[0].Open())',
+    '  try { [Console]::Write($reader.ReadToEnd()) } finally { $reader.Dispose() }',
+    '} finally { $archive.Dispose() }'
+  ].join('\n');
+  return JSON.parse(commandRunner('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    env: { ...process.env, HAMSTER_VERIFY_ZIP: file, HAMSTER_VERIFY_ZIP_ENTRY: entryName }
+  }));
+}
+
+function assertManifestCommit(manifest, expectedCommit) {
+  if (manifest.version !== version || manifest.commit !== expectedCommit) {
+    throw new Error('Build manifest does not match the expected commit/version.');
+  }
+}
+
 async function verifyFiles(expectedCommit = run('git', ['rev-parse', 'HEAD'])) {
   const layout = makeLocalLayout(root);
   const portableStaging = path.join(layout.stagingRoot, `HamsterArchiver-v${version}-win-x64`);
@@ -114,14 +144,13 @@ async function verifyFiles(expectedCommit = run('git', ['rev-parse', 'HEAD'])) {
     path.join(layout.stagingRoot, `HamsterArchiver-v${version}-win-x64-installed`, 'release-manifest.json')
   ]) {
     const manifest = JSON.parse(await fs.readFile(manifestPath, 'utf8'));
-    if (manifest.version !== version || manifest.commit !== expectedCommit) {
-      throw new Error('Build manifest does not match the expected commit/version.');
-    }
+    assertManifestCommit(manifest, expectedCommit);
   }
   const binaries = [
     path.join(layout.packageRoot, `HamsterArchiver-v${version}-win-x64.zip`),
     path.join(layout.installerRoot, `HamsterArchiver-Setup-v${version}-win-x64.exe`)
   ];
+  assertManifestCommit(readPortableZipManifest(binaries[0]), expectedCommit);
   const assets = [];
   for (const file of binaries) {
     const checksumFile = `${file}.sha256`;
@@ -412,4 +441,4 @@ async function main() {
 }
 
 if (require.main === module) main().catch(error => { console.error(error.message); process.exitCode = 1; });
-module.exports = { assertWindowsHostContext, assertDraftNotes, assertMatchingReleaseAssets, readReleaseNotes, completeDraft, completePublishedRelease, downloadVerifiedReleaseAssets, errorText, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, mirrorReleaseArtifacts, parseArgs, planUploads, preflight, publishCompleteDraft, readReleaseWithOneDelayedRetry, releaseArtifacts, releaseState, run, uploadAssetWithRecovery, validateMirrorTarget, validateTarget, verifyFiles };
+module.exports = { readPortableZipManifest, assertManifestCommit, assertWindowsHostContext, assertDraftNotes, assertMatchingReleaseAssets, readReleaseNotes, completeDraft, completePublishedRelease, downloadVerifiedReleaseAssets, errorText, expectedReleaseAssetNames, findReleaseByTag, getRelease, getReleaseByTag, hasCompleteReleaseAssets, isTransientUploadError, mirrorReleaseArtifacts, parseArgs, planUploads, preflight, publishCompleteDraft, readReleaseWithOneDelayedRetry, releaseArtifacts, releaseState, run, uploadAssetWithRecovery, validateMirrorTarget, validateTarget, verifyFiles };
