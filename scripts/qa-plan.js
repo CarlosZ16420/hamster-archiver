@@ -21,6 +21,7 @@ const TEST_GROUPS = Object.freeze({
   ],
   packaging: [
     'test/installer-build.test.js',
+    'test/installer-compile.test.js',
     'test/manifest.test.js',
     'test/prepare-electron-runtime.test.js',
     'test/tool-integrity.test.js',

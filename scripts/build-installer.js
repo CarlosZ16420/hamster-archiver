@@ -45,6 +45,7 @@ async function main() {
     env: { ...process.env, HAMSTER_RELEASE_COMMIT: commit }
   });
   run(process.execPath, [builderCli,
+    '--publish', 'never',
     '--win', 'nsis:x64',
     '--prepackaged', installedBuild,
     '--config.appId=com.carlosz.hamsterarchiver',

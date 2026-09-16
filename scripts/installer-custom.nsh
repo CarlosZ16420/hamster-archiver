@@ -34,32 +34,31 @@ Function HamsterNormalizeInstallDirectory
   ${EndIf}
 FunctionEnd
 
-Function HamsterInstallDirectoryPre
-  ${If} ${isUpdated}
-    Abort
-  ${EndIf}
-  ; electron-builder initializes a fresh per-user install with APP_FILENAME.
-  ; Present the friendly product folder instead of nesting another directory.
-  ${GetFileName} "$INSTDIR" $0
-  ${If} $0 == "${APP_FILENAME}"
-    ${GetParent} "$INSTDIR" $0
-    StrCpy $INSTDIR "$0\${HAMSTER_INSTALL_DIRECTORY}"
-  ${EndIf}
-FunctionEnd
-
-Function HamsterInstallDirectoryLeave
-  Call HamsterNormalizeInstallDirectory
-FunctionEnd
-
 !macro customPageAfterChangeDir
   ; Define these callbacks when electron-builder expands the page macro. At
   ; that point its update-detection plug-in is available to skip this page for
   ; in-place upgrades while keeping it visible for a fresh installation.
+  Function HamsterInstallDirectoryPre
+    ${If} ${isUpdated}
+      Abort
+    ${EndIf}
+    ; electron-builder initializes a fresh per-user install with APP_FILENAME.
+    ; Present the friendly product folder instead of nesting another directory.
+    ${GetFileName} "$INSTDIR" $0
+    ${If} $0 == "${APP_FILENAME}"
+      ${GetParent} "$INSTDIR" $0
+      StrCpy $INSTDIR "$0\${HAMSTER_INSTALL_DIRECTORY}"
+    ${EndIf}
+  FunctionEnd
+
+  Function HamsterInstallDirectoryLeave
+    Call HamsterNormalizeInstallDirectory
+  FunctionEnd
+
   !define MUI_PAGE_CUSTOMFUNCTION_PRE HamsterInstallDirectoryPre
   !define MUI_PAGE_CUSTOMFUNCTION_LEAVE HamsterInstallDirectoryLeave
+  ; MUI consumes and undefines these callbacks when inserting the page.
   !insertmacro MUI_PAGE_DIRECTORY
-  !undef MUI_PAGE_CUSTOMFUNCTION_PRE
-  !undef MUI_PAGE_CUSTOMFUNCTION_LEAVE
 
   Function HamsterInstallOptionsCreate
     ${If} ${isUpdated}
