@@ -545,9 +545,10 @@ test('warehouse browsing keeps compact controls, root folders, backup locations 
 
   assert.match(styles, /\.similarity-rebuild-setting > \.button\s*\{[^}]*white-space:\s*nowrap;/s);
   assert.match(app, /record\.sourceType === 'directory' \? record\.displayName : ''/);
-  assert.match(app, /\['catalog-text-tags', '标签'\]/);
-  assert.match(app, /\['catalog-text-backup', '备份位置'\]/);
-  assert.match(app, /\['catalog-text-date', '入库时间'\]/);
+  const { columns } = require('../src/renderer/catalog-columns');
+  assert.deepEqual(columns.filter(({ key }) => ['tags', 'backup', 'date'].includes(key))
+    .map(({ key, label }) => [key, label]), [['tags', '标签'], ['backup', '备份位置'], ['date', '入库时间']]);
+  assert.match(app, /for \(const \{ key, label \} of window\.hamsterCatalogColumns\.columns\)/);
   assert.match(app, /backupCell\.textContent = record\.backupLocation \|\| '—'/);
   assert.match(app, /\['ArrowLeft', 'ArrowRight'\]\.includes\(event\.key\)/);
   assert.match(app, /changeCatalogPage\(catalogPage \+ \(previous \? -1 : 1\), \{ scrollToList: false \}\)/);

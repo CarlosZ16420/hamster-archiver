@@ -36,11 +36,15 @@ const TEST_GROUPS = Object.freeze({
     'test/scanner.test.js'
   ],
   catalog: [
+    'test/catalog-columns.test.js',
+    'test/catalog-selection.test.js',
     'test/catalog-query-performance.test.js',
     'test/tag-autocomplete.test.js',
+    'test/thumbnail-generation.test.js',
     'test/thumbnail-loading.test.js'
   ],
   data: [
+    'test/recycle-bin.test.js',
     'test/import-export.test.js',
     'test/migration.test.js',
     'test/storage-migration.test.js',
@@ -55,6 +59,7 @@ const TEST_GROUPS = Object.freeze({
     'test/update-manager.test.js'
   ],
   mcp: [
+    'test/automation-v2.test.js',
     'test/mcp.test.js',
     'test/mcp-application-services.test.js'
   ],

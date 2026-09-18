@@ -136,7 +136,7 @@ if (!rendererDir) {
   });
 
   test('warehouse density, selection actions and off-page counts translate in both directions', () => {
-    const labels = ['缩略图视图', '缩略图大小', '小', '中', '大', '全选当前页', '取消全部选择', '输入仓库页码', '返回仓库工具栏', '批量操作', '入库时间 ↓', '入库时间 ↑', '第'];
+    const labels = ['缩略图视图', '小', '中', '大', '全选当前页', '取消全部选择', '输入仓库页码', '返回仓库工具栏', '批量操作', '入库时间 ↓', '入库时间 ↑', '第'];
     i18n.setLocale('en-US');
     for (const label of labels) assert.ok(!CJK.test(i18n.translate(label)), label);
     assert.equal(i18n.translate('其中 1 项不在当前页'), '1 item on other pages');

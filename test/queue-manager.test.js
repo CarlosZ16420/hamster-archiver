@@ -3806,7 +3806,7 @@ test('individual backup review blocks only conflicts and preserves queued settin
   assert.equal(same.status, 'queued');
   assert.equal(manager.store.jobs[0].backupLocationConfirmation.currentLocation, 'current-backup');
   const processed = [];
-  manager.processJob = async (job) => { processed.push(job.id); job.status = 'completed'; };
+  manager.runOne = async (job) => { processed.push(job.id); job.status = 'completed'; };
   await manager.startQueue();
   assert.deepEqual(processed, [same.id]);
   await assert.rejects(manager.confirmJob(keep.id, { autoStart: false }), /请先确认/);

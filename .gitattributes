@@ -15,6 +15,7 @@ AGENTS.md export-ignore
 docs/private/ export-ignore
 发帖点.md export-ignore
 docs/public-release-coverage-*.md export-ignore
+docs/UNCOMPRESSED_INTAKE_IMPLEMENTATION.md export-ignore
 CHANGELOG.md export-ignore
 scripts/sync-public-snapshot.js export-ignore
 test/public-snapshot.test.js export-ignore

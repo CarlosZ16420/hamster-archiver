@@ -8,7 +8,7 @@
 
 Windows local-first file organizer, media library, and verifiable batch archiver. Optional local CLI/MCP interfaces support capable AI agents as an experimental feature.
 
-![Version](https://img.shields.io/badge/version-4.6.16-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.17-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -55,7 +55,7 @@ For **Windows x64**, with English and Chinese interfaces. To use the app, choose
 
 Compression and video-preview tools are included, and no separate Node.js installation is needed.
 
-Keep all included files in the portable directory, `HamsterArchiver-v4.6.16-win-x64/`.
+Keep all included files in the portable directory, `HamsterArchiver-v4.6.17-win-x64/`.
 
 [![Batch archiving, progress tracking and duplicate review](assets/readme/archive-showcase.en-US.png)](assets/readme/archive-showcase.en-US.png)
 

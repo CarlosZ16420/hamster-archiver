@@ -323,8 +323,8 @@ function updateLanguageToggle(locale = i18n?.getLocale?.() || 'zh-CN') {
 function selectInterfaceLanguage(nextLocale) {
   i18n?.setLocale(nextLocale);
   updateLanguageToggle(nextLocale);
-  updateCatalogThumbnailButton();
   updateLocaleSensitiveWarehouseText();
+  updateCatalogThumbnailButton();
   if (onboardingActive) renderOnboardingStep();
   void saveConfig();
 }
@@ -2043,7 +2043,12 @@ function updateCatalogThumbnailButton() {
       ? [6, 10.5, 15].flatMap((y) => [6, 10.5, 15].map((x) => [x, y, 3, 0.8]))
       : [7, 13].flatMap((y) => [7, 13].map((x) => [x, y, 4, 1]));
   elements.catalogGridView.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="1" y="1" width="22" height="22" rx="5" fill="#1C1C1F"/>${rects.map(([x, y, size, radius]) => `<rect x="${x}" y="${y}" width="${size}" height="${size}" rx="${radius}" fill="#F7F7F8"/>`).join('')}</svg>`;
-  const label = t(`缩略图视图 · ${catalogThumbnailSize === 'large' ? '大' : catalogThumbnailSize === 'small' ? '小' : '中'} · 再次点击切换大小`);
+  const labels = {
+    large: '缩略图视图 · 大 · 再次点击切换大小',
+    medium: '缩略图视图 · 中 · 再次点击切换大小',
+    small: '缩略图视图 · 小 · 再次点击切换大小'
+  };
+  const label = t(labels[catalogThumbnailSize]);
   elements.catalogGridView.title = label;
   elements.catalogGridView.setAttribute('aria-label', label);
   elements.catalogGridView.dataset.i18nUserText = 'true';

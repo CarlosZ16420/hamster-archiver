@@ -7,7 +7,7 @@
 
 Windows 本地文件整理、媒体建库与可校验批量归档工具。支持可选的本机 CLI / MCP 接入，可由具备本机操作能力的 AI / Agent 调用（实验功能）。
 
-![Version](https://img.shields.io/badge/version-4.6.16-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.17-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -52,7 +52,7 @@ Windows 本地文件整理、媒体建库与可校验批量归档工具。支持
 
 压缩和视频预览所需工具已随发行包提供，无需另装 Node.js。
 
-便携版完整目录为 `HamsterArchiver-v4.6.16-win-x64/`，请保留随附文件。
+便携版完整目录为 `HamsterArchiver-v4.6.17-win-x64/`，请保留随附文件。
 
 [![批量归档、进度追踪与重复确认](assets/readme/archive-showcase.zh-CN.png)](assets/readme/archive-showcase.zh-CN.png)
 
