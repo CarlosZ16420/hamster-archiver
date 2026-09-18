@@ -7,6 +7,7 @@ const execFileAsync = promisify(execFile);
 
 const RECYCLE_BIN_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $TargetPath = [string]$env:HAMSTER_RECYCLE_TARGET
 $Action = [string]$env:HAMSTER_RECYCLE_ACTION
 
@@ -48,6 +49,7 @@ Write-Output 'RESTORE_TIMEOUT'; exit 5
 
 const RECYCLE_BIN_BATCH_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $targets = @((ConvertFrom-Json ([string]$env:HAMSTER_RECYCLE_TARGETS)))
 $wanted = @{}
 foreach ($value in $targets) {
@@ -113,21 +115,25 @@ function restoreTrashItem(originalPath) {
 }
 
 async function findTrashItems(originalPaths) {
-  const targets = [...new Set((originalPaths || []).map((value) => String(value || '').trim()).filter(Boolean))].slice(0, 100);
+  const targets = [...new Set((originalPaths || []).map((value) => String(value || '').trim()).filter(Boolean))];
   if (targets.length === 0 || process.platform !== 'win32') return [];
-  const { stdout } = await execFileAsync('powershell.exe', [
-    '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-Command', RECYCLE_BIN_BATCH_SCRIPT
-  ], {
-    windowsHide: true,
-    timeout: 20_000,
-    maxBuffer: 1024 * 1024,
-    env: { ...process.env, HAMSTER_RECYCLE_TARGETS: JSON.stringify(targets) }
-  });
-  const output = String(stdout || '').trim();
-  if (!output) return [];
-  const parsed = JSON.parse(output);
-  return Array.isArray(parsed) ? parsed.map(String) : [String(parsed)];
+  const found = [];
+  for (let offset = 0; offset < targets.length; offset += 100) {
+    const { stdout } = await execFileAsync('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+      '-Command', RECYCLE_BIN_BATCH_SCRIPT
+    ], {
+      windowsHide: true,
+      timeout: 20_000,
+      maxBuffer: 1024 * 1024,
+      env: { ...process.env, HAMSTER_RECYCLE_TARGETS: JSON.stringify(targets.slice(offset, offset + 100)) }
+    });
+    const output = String(stdout || '').trim();
+    if (!output) continue;
+    const parsed = JSON.parse(output);
+    found.push(...(Array.isArray(parsed) ? parsed.map(String) : [String(parsed)]));
+  }
+  return found;
 }
 
 module.exports = { findTrashItems, isTrashItemPresent, restoreTrashItem };

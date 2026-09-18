@@ -61,10 +61,13 @@ let appStore;
 let allowWindowClose = false;
 let closePromptOpen = false;
 let shutdownInProgress = false;
+let shutdownLogInProgress = false;
+let shutdownLogComplete = false;
 let scheduleTimer = null;
 let mcpServer = null;
 let mcpServerStarting = null;
 let mcpApplicationServices = null;
+let integrationManager = null;
 let startedAsMcpBackground = false;
 let mcpUiWasShown = false;
 let exitAfterMcpIdle = false;
@@ -77,7 +80,8 @@ let mcpShutdownComplete = false;
 let applicationReady = false;
 let pendingWindowShow = false;
 let startupUsesEnglish = false;
-const startupStartedAt = Date.now();
+// Include Electron bootstrap and top-level module loading in startup diagnostics.
+const startupStartedAt = Date.now() - (process.uptime() * 1000);
 let resolveApplicationInitialized;
 const applicationInitialized = new Promise((resolve) => { resolveApplicationInitialized = resolve; });
 let lastCatalogPushSignature = '';
@@ -147,10 +151,34 @@ function nativeText(value, english = usesEnglishUi()) {
   }
 }
 
+async function appendRuntimeLog(level, message, jobId = null) {
+  if (queueManager) {
+    await queueManager.log(level, message, jobId);
+    return;
+  }
+  const store = appStore || new AppStore(makeUserDataLayout(applicationRoot, null, configuredUserDataRoot));
+  await store.appendLog('', {
+    at: new Date().toISOString(),
+    level,
+    message,
+    jobId
+  });
+  await store.flushLogs?.();
+}
+
+async function runLoggedAction(label, operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    await appendRuntimeLog('error', `${label}失败：${error.message}`).catch(() => {});
+    throw error;
+  }
+}
+
 function logStartupTiming(stage, details = {}) {
   console.log(`HAMSTER_STARTUP_TIMING ${JSON.stringify({
     stage,
-    elapsedMs: Date.now() - startupStartedAt,
+    elapsedMs: Math.round(Date.now() - startupStartedAt),
     ...details
   })}`);
 }
@@ -257,7 +285,7 @@ async function createStartupWindow() {
   const preferences = await readStartupPreferences();
   startupUsesEnglish = preferences.language === 'en-US';
   startupWindow = new BrowserWindow({
-    show: false,
+    show: !isStartupIntegrityTest,
     width: 460,
     height: 280,
     resizable: false,
@@ -273,8 +301,10 @@ async function createStartupWindow() {
     }
   });
   startupWindow.removeMenu();
+  logStartupTiming('startup-window-created');
   startupWindow.once('ready-to-show', () => {
     if (!isStartupIntegrityTest) startupWindow?.show();
+    logStartupTiming('startup-window-ready');
   });
   await startupWindow.loadFile(path.join(__dirname, 'renderer', 'startup.html'), {
     query: { language: preferences.language, theme: preferences.theme }
@@ -668,14 +698,19 @@ async function promptAndLaunchPreparedUpdate({
     cancelId: 1,
     noLink: true
   });
-  if (restart.response !== 0) return { staged: true };
+  if (restart.response !== 0) {
+    await queueManager?.log('info', `更新包 ${version} 已校验；用户选择稍后重启。`);
+    return { staged: true };
+  }
   try {
     await launchUpdate({ prepared, targetPid: process.pid });
   } catch (error) {
     console.error(`UPDATE_LAUNCH_FAILED ${error.stack || error.message}`);
+    await queueManager?.log('error', `启动更新助手失败：${error.message}`);
     await showUpdateFailureDialog({ error: error.message, releaseUrl, runRoot: prepared.runRoot });
     return { staged: true, launchFailed: true, error: error.message };
   }
+  await queueManager?.log('warning', `更新包 ${version} 已校验，应用将重启并执行更新。`);
   allowWindowClose = true;
   app.quit();
   return { restarting: true };
@@ -697,14 +732,19 @@ async function promptAndLaunchPreparedInstaller({ prepared, version, releaseUrl 
     cancelId: 1,
     noLink: true
   });
-  if (response.response !== 0) return { staged: true };
+  if (response.response !== 0) {
+    await queueManager?.log('info', `安装程序 ${version} 已校验；用户选择稍后安装。`);
+    return { staged: true };
+  }
   try {
     await launchInstalledUpdate({ prepared });
   } catch (error) {
     console.error(`INSTALLER_UPDATE_LAUNCH_FAILED ${error.stack || error.message}`);
+    await queueManager?.log('error', `启动安装程序失败：${error.message}`);
     await showUpdateFailureDialog({ error: error.message, releaseUrl, runRoot: prepared.runRoot });
     return { staged: true, launchFailed: true, error: error.message };
   }
+  await queueManager?.log('warning', `安装程序 ${version} 已校验，应用将退出并启动安装。`);
   allowWindowClose = true;
   app.quit();
   return { restarting: true, installerStarted: true };
@@ -939,6 +979,7 @@ function createWindow() {
   mainWindow.removeMenu();
   mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
     console.error(`PRELOAD_ERROR ${preloadPath}: ${error.stack || error.message}`);
+    void appendRuntimeLog('error', `界面预加载失败：${error.message}`).catch(() => {});
   });
   if (replacesStartupWindow) {
     mainWindow.once('ready-to-show', () => {
@@ -1009,12 +1050,12 @@ function createWindow() {
       const bridgeStatus = await mainWindow.webContents.executeJavaScript(`(() => {
         const required = [
           'getState', 'chooseDirectory', 'chooseProgram', 'changeWarehouseLocation', 'openWarehouse', 'exportWarehouse', 'importWarehouse', 'checkForUpdates', 'installUpdatePackage', 'changeUserDataLocation', 'openExternal', 'copyText', 'chooseSingle', 'saveConfig', 'scanSource',
-          'addSingle', 'openTaskSource', 'getQueueSimilarityReport', 'getDroppedPath', 'confirmTask', 'confirmAnomaly', 'acknowledgeTrashSafety', 'cancelTask', 'retryTask', 'startQueue', 'startInventoryOnlyQueue',
+          'addSingle', 'openTaskSource', 'getQueueSimilarityReport', 'getSourceChangeReport', 'resolveSourceChange', 'getDroppedPath', 'confirmTask', 'confirmAnomaly', 'acknowledgeTrashSafety', 'cancelTask', 'retryTask', 'startQueue', 'startInventoryOnlyQueue',
           'discardAnomaly', 'pauseQueue', 'resumeQueue', 'removeJobs', 'clearCompletedJobs', 'clearCancelledJobs', 'clearQueue', 'clearPotentialDuplicates', 'clearExactDuplicates', 'confirmAllDuplicates', 'finishNextAndPause', 'searchCatalog',
           'getCatalogSuggestions', 'openSimilarityIgnoreTerms', 'reloadSimilarityIgnoreTerms', 'addSimilarityIgnoreTerm', 'rebuildAllSimilarity', 'onSimilarityRebuildProgress',
           'getWarehouseInsights', 'getRandomCatalogRecord',
-          'getCatalogDetails', 'openCatalogSource', 'restoreCatalogSource', 'updateCatalogMetadata', 'recalculateCatalogSimilarity', 'removeCatalogSimilarity', 'addManualCatalogRecord', 'addCatalogImage',
-          'setCatalogCover', 'addTagsToCatalogRecords', 'updateBackupLocationForCatalogRecords', 'queueCatalogRecordsForCompression', 'undoCatalogAction', 'deleteCatalogRecords', 'getThumbnail',
+          'getCatalogDetails', 'openCatalogSource', 'restoreCatalogSource', 'updateCatalogMetadata', 'updateCatalogSourcePath', 'recalculateCatalogSimilarity', 'removeCatalogSimilarity', 'addManualCatalogRecord', 'addCatalogImage',
+          'setCatalogCover', 'addTagsToCatalogRecords', 'updateBackupLocationForCatalogRecords', 'queueCatalogRecordsForCompression', 'queueCatalogRecordsForRefresh', 'undoCatalogAction', 'deleteCatalogRecords', 'getThumbnail',
           'onStateChanged', 'onTaskProgress', 'onCatalogChanged', 'onScanProgress', 'onUpdateProgress'
         ];
         return {
@@ -1445,6 +1486,7 @@ function createWindow() {
 }
 
 function registerIpc() {
+  const waitForCatalog = () => queueManager.waitForCatalogReady();
   ipcMain.handle('state:get', (event) => {
     assertTrustedSender(event);
     return queueManager.getState();
@@ -1481,6 +1523,7 @@ function registerIpc() {
 
   ipcMain.handle('warehouse:change-location', async (event) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     const english = queueManager?.config?.language === 'en-US';
     const result = await dialog.showOpenDialog(mainWindow, {
       title: english ? 'Choose a Warehouse folder' : '选择仓库位置',
@@ -1488,7 +1531,7 @@ function registerIpc() {
       properties: ['openDirectory', 'createDirectory']
     });
     if (result.canceled) return null;
-    return queueManager.changeWarehouseDirectory(result.filePaths[0]);
+    return runLoggedAction('切换仓库位置', () => queueManager.changeWarehouseDirectory(result.filePaths[0]));
   });
 
   ipcMain.handle('warehouse:open', async (event) => {
@@ -1501,6 +1544,7 @@ function registerIpc() {
 
   ipcMain.handle('warehouse:export', async (event) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     const english = queueManager?.config?.language === 'en-US';
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const defaultPath = path.join(
@@ -1513,11 +1557,12 @@ function registerIpc() {
       filters: [{ name: english ? 'Warehouse archive' : '仓库压缩包', extensions: ['zip'] }]
     });
     if (result.canceled || !result.filePath) return null;
-    return queueManager.exportWarehouseToFile(result.filePath);
+    return runLoggedAction('导出仓库', () => queueManager.exportWarehouseToFile(result.filePath));
   });
 
   ipcMain.handle('warehouse:import', async (event) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     const english = queueManager?.config?.language === 'en-US';
     const result = await dialog.showOpenDialog(mainWindow, {
       title: english ? 'Choose an external Warehouse archive' : '选择外来仓库压缩包',
@@ -1526,21 +1571,29 @@ function registerIpc() {
       filters: [{ name: english ? 'Warehouse archive' : '仓库压缩包', extensions: ['zip'] }]
     });
     if (result.canceled) return null;
-    return queueManager.importWarehouseFromArchiveOrDirectory(result.filePaths[0]);
+    return runLoggedAction('并入外部仓库', () => queueManager.importWarehouseFromArchiveOrDirectory(result.filePaths[0]));
   });
 
   let checkedUpdate = null;
   let updateInstallInFlight = false;
   ipcMain.handle('app:check-for-updates', async (event, options = {}) => {
     assertTrustedSender(event);
-    const result = await checkForUpdates({
+    const check = () => checkForUpdates({
       currentVersion: app.getVersion(),
       distributionMode: isInstalledDistribution ? 'installed' : 'portable',
       includeHistory: options?.silent !== true,
       fetchImpl: net.fetch,
       timeoutMs: options?.silent === true ? 6_000 : 8_000
     });
+    const result = options?.silent === true
+      ? await check()
+      : await runLoggedAction('检查更新', check);
     if (options?.silent !== true) checkedUpdate = result;
+    if (options?.silent !== true) {
+      await queueManager.log('info', result.updateAvailable
+        ? `检查更新完成：发现版本 ${result.latestVersion}。`
+        : `检查更新完成：当前已是最新版本 ${result.currentVersion}。`);
+    }
     return result;
   });
 
@@ -1573,6 +1626,9 @@ function registerIpc() {
         prepared, version: result.latestVersion, releaseUrl: result.releaseUrl
       });
       return { ...result, ...updateState };
+    } catch (error) {
+      await appendRuntimeLog('error', `准备版本 ${version} 更新失败：${error.message}`).catch(() => {});
+      throw error;
     } finally {
       updateInstallInFlight = false;
     }
@@ -1584,6 +1640,9 @@ function registerIpc() {
     updateInstallInFlight = true;
     try {
       return await runLocalPackageUpdate(checkedUpdate);
+    } catch (error) {
+      await appendRuntimeLog('error', `准备本地更新包失败：${error.message}`).catch(() => {});
+      throw error;
     } finally {
       updateInstallInFlight = false;
     }
@@ -1591,6 +1650,7 @@ function registerIpc() {
 
   ipcMain.handle('user-data:change-location', async (event) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     const english = queueManager?.config?.language === 'en-US';
     if (queueManager.running) {
       throw new Error(english
@@ -1636,21 +1696,73 @@ function registerIpc() {
       noLink: true
     });
     if (confirmation.response !== 0) return null;
+    await queueManager.log('warning', `开始切换用户数据区：${currentRoot} → ${targetRoot}。`);
+    try {
+      await appStore.saveSettings(queueManager.config);
+      await appStore.checkpoint(queueManager.config.repositoryDirectory);
+      appStore.closeAll();
+      const prepared = await prepareUserDataTarget(currentRoot, targetRoot);
+      await fs.mkdir(path.dirname(activeUserDataLocationPath), { recursive: true });
+      await writeJsonAtomic(activeUserDataLocationPath, {
+        version: 1,
+        userDataDirectory: prepared.target,
+        savedAt: new Date().toISOString()
+      });
+      const migrationMode = prepared.mode === 'copied'
+        ? '复制当前数据'
+        : prepared.mode === 'existing'
+          ? '切换到已有数据'
+          : '保持当前位置';
+      const targetStore = new AppStore(makeUserDataLayout(applicationRoot, null, prepared.target));
+      await targetStore.appendLog('', {
+        at: new Date().toISOString(),
+        level: 'warning',
+        message: `用户数据区切换完成：${currentRoot} → ${prepared.target}；方式：${migrationMode}。`,
+        jobId: null
+      }).catch(async (error) => {
+        await queueManager.log('error', `用户数据区已切换，但新位置的运行日志写入失败：${error.message}`);
+      });
+      await targetStore.flushLogs();
+      app.relaunch();
+      allowWindowClose = true;
+      app.quit();
+      return { path: prepared.target, mode: prepared.mode, restarting: true };
+    } catch (error) {
+      await queueManager.log('error', `切换用户数据区失败：${error.message}`).catch(() => {});
+      throw error;
+    }
+  });
 
-    await appStore.saveSettings(queueManager.config);
-    await appStore.checkpoint(queueManager.config.repositoryDirectory);
-    appStore.closeAll();
-    const prepared = await prepareUserDataTarget(currentRoot, targetRoot);
-    await fs.mkdir(path.dirname(activeUserDataLocationPath), { recursive: true });
-    await writeJsonAtomic(activeUserDataLocationPath, {
-      version: 1,
-      userDataDirectory: prepared.target,
-      savedAt: new Date().toISOString()
+  ipcMain.handle('integrations:status', async (event) => {
+    assertTrustedSender(event);
+    return integrationManager.status();
+  });
+
+  ipcMain.handle('integrations:install', async (event, adapterId, options = {}) => {
+    assertTrustedSender(event);
+    return runLoggedAction('启用 AI 助手接入', async () => {
+      const result = await integrationManager.install(String(adapterId || ''), options || {});
+      await queueManager.log('info', `已启用实验接入：${adapterId}。`);
+      return result;
     });
-    app.relaunch();
-    allowWindowClose = true;
-    app.quit();
-    return { path: prepared.target, mode: prepared.mode, restarting: true };
+  });
+
+  ipcMain.handle('integrations:uninstall', async (event, adapterId) => {
+    assertTrustedSender(event);
+    return runLoggedAction('关闭 AI 助手接入', async () => {
+      const result = await integrationManager.uninstall(String(adapterId || ''));
+      await queueManager.log('info', `已关闭实验接入：${adapterId}；仓库和用户资料未更改。`);
+      return result;
+    });
+  });
+
+  ipcMain.handle('integrations:repair', async (event, adapterId, options = {}) => {
+    assertTrustedSender(event);
+    return runLoggedAction('修复 AI 助手接入', async () => {
+      const result = await integrationManager.repair(String(adapterId || ''), options || {});
+      await queueManager.log('info', `已修复实验接入：${adapterId}。`);
+      return result;
+    });
   });
 
   ipcMain.handle('similarity:open-ignore-terms', async (event) => {
@@ -1663,17 +1775,20 @@ function registerIpc() {
 
   ipcMain.handle('similarity:reload-ignore-terms', async (event) => {
     assertTrustedSender(event);
-    return queueManager.reloadSimilarityIgnoreTerms();
+    await waitForCatalog();
+    return runLoggedAction('重新载入相似度排除词', () => queueManager.reloadSimilarityIgnoreTerms());
   });
 
   ipcMain.handle('similarity:add-ignore-term', async (event, term) => {
     assertTrustedSender(event);
-    return queueManager.addSimilarityIgnoreTerm(term);
+    await waitForCatalog();
+    return runLoggedAction('新增相似度排除词', () => queueManager.addSimilarityIgnoreTerm(term));
   });
 
   ipcMain.handle('similarity:rebuild-all', async (event) => {
     assertTrustedSender(event);
-    return queueManager.recalculateAllSimilarity();
+    await waitForCatalog();
+    return runLoggedAction('全局重算相似关系', () => queueManager.recalculateAllSimilarity());
   });
 
   ipcMain.handle('system:open-external', async (event, value) => {
@@ -1714,16 +1829,19 @@ function registerIpc() {
 
   ipcMain.handle('config:save', async (event, config) => {
     assertTrustedSender(event);
-    return queueManager.updateConfig(config);
+    await waitForCatalog();
+    return runLoggedAction('保存设置', () => queueManager.updateConfig(config));
   });
 
   ipcMain.handle('source:scan', async (event, intakeDirectory, scanToken) => {
     assertTrustedSender(event);
-    return queueManager.scanSource(intakeDirectory, scanToken);
+    await waitForCatalog();
+    return runLoggedAction('扫描待处理目录', () => queueManager.scanSource(intakeDirectory, scanToken));
   });
 
   ipcMain.handle('task:add-single', async (event, sourcePath) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.addSingle(sourcePath);
   });
 
@@ -1737,20 +1855,36 @@ function registerIpc() {
 
   ipcMain.handle('task:similarity-report', async (event, jobId) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.getQueueSimilarityReport(jobId);
   });
 
-  ipcMain.handle('task:confirm', async (event, jobId) => {
+  ipcMain.handle('task:source-change-report', async (event, jobId) => {
     assertTrustedSender(event);
-    return queueManager.confirmJob(jobId);
+    await waitForCatalog();
+    return queueManager.getSourceChangeReport(jobId);
+  });
+
+  ipcMain.handle('task:resolve-source-change', async (event, jobId, action) => {
+    assertTrustedSender(event);
+    await waitForCatalog();
+    return queueManager.resolveSourceChange(jobId, action);
+  });
+
+  ipcMain.handle('task:confirm', async (event, jobId, options) => {
+    assertTrustedSender(event);
+    await waitForCatalog();
+    return queueManager.confirmJob(jobId, { updateBackupLocation: options?.updateBackupLocation });
   });
 
   ipcMain.handle('task:confirm-anomaly', async (event, jobId) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.confirmAnomaly(jobId);
   });
   ipcMain.handle('task:discard-anomaly', async (event, jobId) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.discardAnomalousArchive(jobId);
   });
 
@@ -1766,17 +1900,20 @@ function registerIpc() {
 
   ipcMain.handle('task:retry', async (event, jobId) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.retryJob(jobId);
   });
 
   ipcMain.handle('queue:start', async (event) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     if (!await ensureArchiveOutputDirectoryBeforeStart()) return queueManager.getState();
     return queueManager.startArchiveQueue();
   });
 
   ipcMain.handle('queue:start-inventory-only', async (event) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.startInventoryOnlyQueue();
   });
 
@@ -1828,32 +1965,38 @@ function registerIpc() {
     return queueManager.getState();
   });
 
-  ipcMain.handle('catalog:search', (event, query) => {
+  ipcMain.handle('catalog:search', async (event, query) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.searchCatalog(query);
   });
-  ipcMain.handle('catalog:suggestions', (event, query) => {
+  ipcMain.handle('catalog:suggestions', async (event, query) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.getCatalogSuggestions(query);
   });
 
-  ipcMain.handle('catalog:insights', (event) => {
+  ipcMain.handle('catalog:insights', async (event) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.getWarehouseInsights();
   });
 
-  ipcMain.handle('catalog:random', (event, excludeId) => {
+  ipcMain.handle('catalog:random', async (event, excludeId) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.getRandomCatalogRecord(excludeId);
   });
 
-  ipcMain.handle('catalog:details', (event, recordId) => {
+  ipcMain.handle('catalog:details', async (event, recordId) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.getCatalogDetails(recordId);
   });
 
   ipcMain.handle('catalog:open-source', async (event, recordId) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     const record = queueManager.catalog.find((candidate) => candidate.id === recordId);
     if (!record) throw new Error('没有找到指定仓库记录。');
     const originalPath = String(record.originalSourcePath || '').trim();
@@ -1871,74 +2014,100 @@ function registerIpc() {
 
   ipcMain.handle('catalog:restore-source', async (event, recordId) => {
     assertTrustedSender(event);
-    const result = await queueManager.restoreCatalogSource(recordId);
+    await waitForCatalog();
+    const result = await runLoggedAction('复原原文件', () => queueManager.restoreCatalogSource(recordId));
     await openItemLocation(result.path, '复原后的原文件位置');
     return result;
   });
 
   ipcMain.handle('catalog:update-metadata', async (event, recordId, metadata) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.updateCatalogMetadata(recordId, metadata);
+  });
+
+  ipcMain.handle('catalog:update-source-path', async (event, recordId, sourcePath, sourceType) => {
+    assertTrustedSender(event);
+    await waitForCatalog();
+    return queueManager.updateCatalogSourcePath(recordId, sourcePath, sourceType);
   });
 
   ipcMain.handle('catalog:recalculate-similarity', async (event, recordId) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.recalculateCatalogSimilarity(recordId);
   });
 
   ipcMain.handle('catalog:remove-similarity', async (event, recordId, similarId) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.removeCatalogSimilarity(recordId, similarId);
   });
 
   ipcMain.handle('catalog:set-cover', async (event, recordId, relativePath) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.setCatalogCover(recordId, relativePath);
   });
 
   ipcMain.handle('catalog:delete-thumbnail', async (event, recordId, thumbnailRef) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.deleteCatalogThumbnail(recordId, thumbnailRef);
   });
 
   ipcMain.handle('catalog:add-manual', async (event, input) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.addManualCatalogRecord(input);
   });
 
   ipcMain.handle('catalog:add-image', async (event, recordId, input) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.addCatalogImage(recordId, input);
   });
 
   ipcMain.handle('catalog:add-tags', async (event, recordIds, tags) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.addTagsToCatalogRecords(recordIds, tags);
   });
 
   ipcMain.handle('catalog:update-backup-location', async (event, recordIds, location) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.updateBackupLocationForCatalogRecords(recordIds, location);
   });
 
   ipcMain.handle('catalog:queue-compression', async (event, recordIds, options) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.queueCatalogRecordsForCompression(recordIds, options);
+  });
+
+  ipcMain.handle('catalog:queue-refresh', async (event, recordIds) => {
+    assertTrustedSender(event);
+    await waitForCatalog();
+    return queueManager.queueCatalogRecordsForRefresh(recordIds);
   });
 
 
   ipcMain.handle('catalog:undo', async (event) => {
     assertTrustedSender(event);
-    return queueManager.undoCatalogAction();
+    await waitForCatalog();
+    return runLoggedAction('撤回仓库操作', () => queueManager.undoCatalogAction());
   });
 
   ipcMain.handle('catalog:delete', async (event, recordIds, options) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     return queueManager.deleteCatalogRecords(recordIds, options);
   });
 
   ipcMain.handle('catalog:thumbnail', async (event, recordId, relativePath) => {
     assertTrustedSender(event);
+    await waitForCatalog();
     const thumbnailPath = queueManager.getThumbnailPath(recordId, relativePath);
     if (!thumbnailPath) return null;
     const data = await fs.readFile(thumbnailPath);
@@ -2017,8 +2186,10 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     restoreTrashItem,
     resolveProgramPath: (configuredPath) => resolveApplicationPath(workspaceRoot, configuredPath)
   });
-  await queueManager.initialize();
-  logStartupTiming('warehouse-ready');
+  const deferCatalog = !isSmokeTest && !isStartupIntegrityTest && !startedAsMcpBackground;
+  await queueManager.initialize({ deferCatalog });
+  await queueManager.log('info', `应用已启动：版本 ${app.getVersion()}。`, null, false);
+  logStartupTiming(deferCatalog ? 'startup-data-ready' : 'warehouse-ready');
   const pendingUpdateSuccess = await readUpdateSuccessNotice({
     userDataDirectory: userDataLayout.root,
     noticeFile: process.env.HAMSTER_UPDATE_NOTICE_FILE,
@@ -2030,9 +2201,6 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const pendingUpdateFailure = await consumeUpdateFailure(userDataLayout.root).catch((error) => {
     console.warn(`UPDATE_FAILURE_READ_WARNING ${error.message}`);
     return null;
-  });
-  await cleanupSuccessfulUpdateRuns(userDataLayout.root).catch((error) => {
-    console.warn(`UPDATE_CLEANUP_WARNING ${error.message}`);
   });
   if (isSmokeTest && process.env.HAMSTER_SMOKE_IMPORT_DIRECTORY) {
     const importDirectory = path.resolve(process.env.HAMSTER_SMOKE_IMPORT_DIRECTORY);
@@ -2082,7 +2250,10 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     console.log(`HAMSTER_IMPORT_TEST_OK ${JSON.stringify({ jobs: queueManager.jobs.length, catalog: queueManager.catalog.length })}`);
   }
   scheduleTimer = setInterval(() => {
-    void queueManager.handleScheduleTick().catch((error) => console.error('SCHEDULE_ERROR', error));
+    void queueManager.handleScheduleTick().catch((error) => {
+      console.error('SCHEDULE_ERROR', error);
+      void queueManager.log('error', `定时运行检查失败：${error.message}`);
+    });
   }, 15_000);
   scheduleTimer.unref?.();
   if (process.env.HAMSTER_TRASH_TEST_DIR) {
@@ -2265,7 +2436,34 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       mainWindow.webContents.send('similarity:rebuild-progress', progress);
     }
   });
-  queueManager.on('automation-error', (error) => console.error('MCP_QUEUE_ERROR', error.message));
+  queueManager.on('automation-error', (error) => {
+    console.error('MCP_QUEUE_ERROR', error.message);
+    void queueManager.log('error', `AI 任务处理失败：${error.message}`);
+    const { getApplicationTaskService } = require('./core/application-task-service');
+    void getApplicationTaskService(queueManager).recordAsyncError(error);
+  });
+  const { IntegrationManager } = require('./core/integration-manager');
+  integrationManager = new IntegrationManager({
+    applicationRoot: workspaceRoot,
+    userDataRoot: userDataLayout.root,
+    packagedWithIdentity: process.windowsStore === true
+  });
+  if (deferCatalog) {
+    setImmediate(() => {
+      void queueManager.initializeCatalog({ background: true })
+        .then(() => logStartupTiming('warehouse-ready', { records: queueManager.catalog.length }))
+        .catch((error) => {
+          console.error(`WAREHOUSE_BACKGROUND_LOAD_FAILED ${error.stack || error.message}`);
+          void queueManager.log('error', `仓库后台加载失败：${error.message}`);
+        });
+    });
+  }
+  setImmediate(() => {
+    void (async () => {
+      if (mainWindow && !mainWindow.isDestroyed()) await waitForWindowReady(mainWindow);
+      await cleanupSuccessfulUpdateRuns(userDataLayout.root);
+    })().catch((error) => console.warn(`UPDATE_CLEANUP_WARNING ${error.message}`));
+  });
   resolveApplicationInitialized();
   if (mcpRequested) await enableMcpForArguments(startupMcpArgs);
 
@@ -2292,6 +2490,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     ? [`--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`]
     : process.argv;
   await writeMcpStartupDiagnostic(failedArgs, error);
+  await appendRuntimeLog('error', `应用启动失败：${error.message}`).catch(() => {});
   if (process.env.HAMSTER_SMOKE_TEST === '1' || startupRequestsMcp) console.error(`HAMSTER_STARTUP_FAILED ${error.stack || error.message}`);
   else if (!showStartupError(error)) {
     const english = usesEnglishUi();
@@ -2339,6 +2538,20 @@ app.on('before-quit', (event) => {
         mcpServerStarting = null;
         mcpShutdownComplete = true;
         mcpShutdownInProgress = false;
+        app.quit();
+    });
+    return;
+  }
+  if (queueManager && !shutdownLogComplete) {
+    event.preventDefault();
+    if (shutdownLogInProgress) return;
+    shutdownLogInProgress = true;
+    void queueManager.log('info', '应用正在正常退出。', null, false)
+      .then(() => queueManager.waitForLogWrites())
+      .catch((error) => console.error(`APP_LOG_FLUSH_FAILED ${error.stack || error.message}`))
+      .finally(() => {
+        shutdownLogComplete = true;
+        shutdownLogInProgress = false;
         app.quit();
       });
     return;

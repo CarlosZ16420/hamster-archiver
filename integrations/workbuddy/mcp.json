@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "hamster-archiver": {
+      "type": "stdio",
+      "command": "{{HAMSTER_MCP}}",
+      "args": [],
+      "timeout": 30000
+    }
+  }
+}

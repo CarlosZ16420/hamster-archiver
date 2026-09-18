@@ -470,10 +470,16 @@ test('catalog detail rendering ignores stale rapid-selection responses', () => {
   assert.match(app, /record\.id !== activeCatalogId\) return/);
 });
 
-test('catalog tag filter always includes the possible-duplicate virtual option', () => {
+test('catalog tag filter keeps special tags first and bounds long menus', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
-  assert.match(app, /new Option\('可能重复', possibleDuplicateFilter\)/);
-  assert.match(app, /possibleDuplicateFilter = '__possible_duplicate__'/);
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+
+  assert.match(html, /id="catalog-tag-filter-menu"/);
+  assert.match(app, /const POSSIBLE_DUPLICATE_FILTER = '__possible_duplicate__'/);
+  assert.match(app, /const UNCOMPRESSED_TAG = '未压缩'/);
+  assert.match(app, /value: POSSIBLE_DUPLICATE_FILTER,[\s\S]*?value: UNCOMPRESSED_TAG,[\s\S]*?\.\.\.\[\.\.\.counts\.entries\(\)\]/);
+  assert.match(styles, /\.catalog-tag-filter-options\s*\{[^}]*max-height:\s*min\(688px, calc\(100dvh - 160px\)\);[^}]*overflow-y:\s*auto;/s);
 });
 
 test('catalog single and bulk tag editors share comma-aware autocomplete', () => {
@@ -539,9 +545,13 @@ test('warehouse browsing keeps compact controls, root folders, backup locations 
 
   assert.match(styles, /\.similarity-rebuild-setting > \.button\s*\{[^}]*white-space:\s*nowrap;/s);
   assert.match(app, /record\.sourceType === 'directory' \? record\.displayName : ''/);
-  assert.match(app, /'标签', '备份位置', '入库时间'/);
+  assert.match(app, /\['catalog-text-tags', '标签'\]/);
+  assert.match(app, /\['catalog-text-backup', '备份位置'\]/);
+  assert.match(app, /\['catalog-text-date', '入库时间'\]/);
   assert.match(app, /backupCell\.textContent = record\.backupLocation \|\| '—'/);
   assert.match(app, /\['ArrowLeft', 'ArrowRight'\]\.includes\(event\.key\)/);
+  assert.match(app, /changeCatalogPage\(catalogPage \+ \(previous \? -1 : 1\), \{ scrollToList: false \}\)/);
+  assert.match(app, /window\.scrollTo\(scrollPosition\.left, scrollPosition\.top\)/);
   assert.match(styles, /\.activity-cell\[data-level="0"\][^\{]*\{[^}]*background:\s*var\(--activity-0\);/s);
   assert.match(styles, /\.activity-cell\[data-level="-1"\][^\{]*\{[^}]*background:\s*var\(--activity-0\);/s);
   assert.match(app, /inventoryDate:\s*activeActivityDateFilter/);
@@ -550,6 +560,10 @@ test('warehouse browsing keeps compact controls, root folders, backup locations 
   assert.match(html, /id="open-inventory-statistics"[^>]*type="button"/);
   assert.match(html, /id="open-storage-statistics"[^>]*type="button"/);
   assert.match(html, /id="warehouse-statistics-dialog"/);
+  assert.match(html, /id="open-warehouse-tags"[^>]*type="button"/);
+  assert.match(html, /id="warehouse-tags-dialog"/);
+  assert.match(app, /function renderWarehouseTags\(\)/);
+  assert.match(app, /applyCatalogTagFilter\(button\.dataset\.warehouseTagFilter, \{ returnToToolbar: true \}\)/);
   assert.match(app, /const weekCount = Math\.ceil\(insights\.activity\.length \/ 7\)/);
   assert.match(app, /function renderWarehouseStatistics\(\)/);
   assert.match(styles, /\.activity-scroll\s*\{[^}]*overflow-x:\s*auto;/s);
@@ -613,7 +627,7 @@ test('workbench setup, footer and top navigation keep the requested responsive l
   assert.match(html, /id="archive-setup-settings"[^>]*open/);
   assert.match(html, /class="panel-head location-heading"[\s\S]*?01 · 收纳设置[\s\S]*?这次从哪里收，存到哪里[\s\S]*?group-chevron/);
   assert.match(styles, /\.location-settings-group > \.location-heading\s*\{[^}]*grid-template-columns:\s*max-content minmax\(0, 1fr\) auto;[^}]*align-items:\s*start;/s);
-  assert.match(styles, /\.location-settings-group > \.location-heading \.step\s*\{[^}]*transform:\s*translateY\(1px\);/s);
+  assert.match(styles, /\.location-settings-group > \.location-heading \.step\s*\{[^}]*transform:\s*translateY\(3px\);/s);
   assert.match(styles, /body\s*\{[^}]*display:\s*flex;[^}]*min-height:\s*100vh;[^}]*flex-direction:\s*column;/s);
   assert.match(styles, /\.app-footer\s*\{[^}]*margin:\s*auto auto 0;/s);
   assert.match(styles, /@media \(max-width: 760px\)\s*\{\s*\.app-bar/s);
@@ -659,6 +673,8 @@ test('language changes refresh warehouse dates, counts, months and filter-help c
   assert.match(app, /querySelectorAll\('\[data-catalog-date\]'\)/);
   assert.match(app, /querySelectorAll\('\[data-item-count\]'\)/);
   assert.match(app, /if \(currentWarehouseInsights\) renderWarehouseInsights\(currentWarehouseInsights\)/);
+  assert.match(app, /updateTagFilterOptions\(currentState\?\.catalog \|\| \[\]\)/);
+  assert.match(app, /if \(elements\.warehouseTagsDialog\?\.open\) renderWarehouseTags\(\)/);
   assert.match(app, /makeCatalogDate\('span', '', record\.inventoryDate \|\| record\.completedAt, '入库', record\.rating\)/);
   assert.match(html, /启用小项目过滤时，低于当前阈值的项目也不会入队（默认 100 MB）/);
 });

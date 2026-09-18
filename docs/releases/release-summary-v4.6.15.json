@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.15",
+  "notes": {
+    "zh-CN": [
+      "本地后续维护：未压缩目录可单项或批量更新，同路径再次添加继续原记录；删改先确认，未变化指纹和预览复用，支持原位置修复。",
+      "稳定仓库批量操作栏的计数、按钮与右侧操作布局，避免窗口宽度变化时随意换行或拉伸。",
+      "仓库搜索去除红色聚焦外圈，库存、标签和 GB 指标改用中性悬浮与键盘聚焦反馈。",
+      "列表与缩略图点击条目均定位到项目详情，保留复制和选择手势的独立行为。",
+      "移除备份位置标签与内容之间的多余间隔，将外部仓库入口统一改为“导入仓库”。",
+      "页码框去除上下微调按钮，点击显示候选列表，同时保留直接编辑、Enter/失焦提交和无效输入处理。",
+      "不更改仓库格式、用户资料位置或现有记录，无需迁移或重建数据。"
+    ],
+    "en-US": [
+      "Local maintenance: refresh uncompressed folders individually or in batches; reuse same-source records, review changes, retain unchanged fingerprints and previews, and relocate originals manually.",
+      "Stabilize Warehouse selection counts, bulk buttons, and right-side actions as the window changes width.",
+      "Remove the red search focus ring and use neutral hover and keyboard focus feedback for Inventory, Tags, and GB metrics.",
+      "Item clicks in list and thumbnail views both scroll to details while copying and selection gestures remain independent.",
+      "Remove extra spacing inside the Backup location pill and use Import Warehouse consistently for the import entry and title.",
+      "Replace page spinner buttons with a clickable candidate list while preserving direct editing, Enter/blur submission, and invalid-input handling.",
+      "The Warehouse format, user-data locations, and existing records are unchanged; no migration or rebuild is required."
+    ]
+  }
+}

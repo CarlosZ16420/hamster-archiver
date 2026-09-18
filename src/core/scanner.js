@@ -113,7 +113,8 @@ async function scanIntakeDirectory(intakeDirectory, options = {}) {
     });
     let summary;
     try {
-      summary = await inspectPath(candidate.sourcePath, candidate.sourceType, onProgress);
+      summary = options.resolveExistingCandidate?.(candidate) ||
+        await inspectPath(candidate.sourcePath, candidate.sourceType, onProgress);
     } catch (error) {
       skippedRootFiles.push({
         path: candidate.sourcePath,
@@ -123,7 +124,7 @@ async function scanIntakeDirectory(intakeDirectory, options = {}) {
       });
       continue;
     }
-    if (minimumBytes > 0 && summary.totalBytes < minimumBytes) {
+    if (!summary.sourceCatalogRecordId && minimumBytes > 0 && summary.totalBytes < minimumBytes) {
       filteredItems.push({ ...candidate, ...summary, reason: 'below_minimum_size' });
       continue;
     }

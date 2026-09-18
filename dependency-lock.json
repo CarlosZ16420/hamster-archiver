@@ -5,15 +5,15 @@
     "npm": "^10.0.0 || ^11.0.0"
   },
   "packages": {
-    "electron": "43.4.0",
+    "electron": "43.7.1",
     "electron-builder": "26.15.7",
     "resedit": "3.0.2"
   },
   "packageArtifacts": {
     "electron": {
       "path": "node_modules/electron/dist/electron.exe",
-      "bytes": 225533440,
-      "sha256": "bab31519ee1bc5b490caf7844e2b1dbcd4f7bb49a13039103952ab381c02ade4"
+      "bytes": 238789120,
+      "sha256": "0d0ba06333e8a687984faac3d50f304f02bc85ea49e2f38e6172def12446456c"
     }
   },
   "bundledTools": {

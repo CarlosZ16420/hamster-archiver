@@ -5,17 +5,17 @@
 
 ### 收藏的时候很快乐，整理的时候也应该是。
 
-Windows 本地文件整理、媒体建库与可校验批量归档工具；支持 AI 通过 MCP 调用。
+Windows 本地文件整理、媒体建库与可校验批量归档工具。支持可选的本机 CLI / MCP 接入，可由具备本机操作能力的 AI / Agent 调用（实验功能）。
 
-![Version](https://img.shields.io/badge/version-4.6.13-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.16-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
-**[下载 Windows 版](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[让 AI 帮你使用](docs/AI-QUICKSTART.md)** · [English](README.en.md) · [反馈问题](https://github.com/CarlosZ16420/hamster-archiver/issues)
+**[下载 Windows 版](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · [English](README.en.md) · [反馈问题](https://github.com/CarlosZ16420/hamster-archiver/issues)
 
 </div>
 
-[快速开始](#快速开始) · [AI 使用](#让-ai-帮你收纳) · [功能介绍](#把整理做顺手也把细节做好) · [常见问题](#常见问题) · [文档与贡献](#文档与贡献)
+[快速开始](#快速开始) · [功能介绍](#把整理做顺手也把细节做好) · [实验性 AI 接入](#实验功能) · [常见问题](#常见问题) · [文档与贡献](#文档与贡献)
 
 下载/备份的资源越积越多，硬盘快满了，却一直没整理好？
 
@@ -36,9 +36,11 @@ Windows 本地文件整理、媒体建库与可校验批量归档工具；支持
 | **本地整理：先把电脑里的收藏管起来** | 原文件保持原位，为资源生成预览和清单，在仓库里分类、打标签、写备注。以后需要备份，还能把这些项目继续送去压缩。 |
 | **打包备份：把资源存储到网盘或其他硬盘** | 批量压缩、完整性验证、登记仓库、记录备份位置；本地仍能看封面、视频抽帧和目录，知道每个压缩包装了什么。 |
 
-打包和仓库登记由应用完成，网盘上传由你或同步工具完成；本地分类通过仓库标签等信息管理，不会自动重排磁盘上的文件夹。
+打包和仓库登记由应用完成，网盘上传由你或同步工具完成；本地分类通过仓库标签进行管理，不会自动重排磁盘上的文件夹。
 
-入库预览会显示媒体处理数量和视频抽帧进度；图片最多同时处理两张。异常媒体达到尝试或处理时限时会记录警告并保留成功预览，不影响完整文件清单与归档验证。
+已经不压缩入库的目录可以在仓库详情中直接“更新目录”，也可以批量检查。应用在任务真正执行时只扫描一次：仅新增文件会自动合并；修改、删除或旧清单不完整时会先展示逐项变化，让你选择覆盖原项目、新建独立项目或跳过。未变化文件复用已有 MD5 和预览，不重复抽帧；整个过程不会修改、移动或删除原文件。再次拖入同一路径时，也会先引导到更新或压缩，而不是静默创建重复项目。
+
+入库自动查重，在提供相似度报告的同时，可以自动跳过已存在内容；大目录也能流畅浏览，并可快速检索整个仓库。
 
 ## 快速开始
 
@@ -48,25 +50,15 @@ Windows 本地文件整理、媒体建库与可校验批量归档工具；支持
 2. 在“归档工作台”扫描目录，或拖入文件夹、视频，查看待处理内容。第一次可以先添加一个小文件夹。
 3. 想先做**本地整理**，点击“不压缩直接入库”；准备**打包备份**，在“收纳设置”中填写“压缩包保存在”，点击“开始压缩入库”。完成后到“仓库”浏览和整理。
 
-便携版请保留完整目录，例如 `HamsterArchiver-v4.6.13-win-x64/`，不要只复制 EXE。压缩和视频预览所需工具已随发行包提供，无需另装 Node.js。
+压缩和视频预览所需工具已随发行包提供，无需另装 Node.js。
+
+便携版完整目录为 `HamsterArchiver-v4.6.16-win-x64/`，请保留随附文件。
 
 [![批量归档、进度追踪与重复确认](assets/readme/archive-showcase.zh-CN.png)](assets/readme/archive-showcase.zh-CN.png)
 
-## 让 AI 帮你收纳
+### 面向现代本机工作流
 
-能够在目标 Windows 电脑上执行本地命令或连接本地 MCP 的 AI 助手，可以调用程序查询收藏、添加标签、提交入库任务并跟踪结果。仅有网页搜索能力的聊天助手可以提供操作指导，不能直接访问你的本机文件。项目提供 AI 工具接口，不内置在线内容识别模型。
-
-把下面这段话交给具备本机操作能力的 AI，并替换其中的目录：
-
-> 请使用 Hamster Archiver（https://github.com/CarlosZ16420/hamster-archiver），把 D:\Downloads\示例项目不压缩入库，保留原文件。先阅读项目的 AI 快速上手并复用已有安装；需要安装时下载并校验 Windows 发行包。按实际安装包的能力选择兼容流程，完成只读连接检查后执行任务，并核实最终结果。
-
-**版本与能力：** 下载包与当前源码可能处于不同阶段，[更新日志](CHANGELOG.md) 中的 `Unreleased` 表示尚未发布的改动。启动诊断、任务预检和托盘任务入口等能力，以安装包实际提供的内容为准。
-
-AI 应先读取包内 `ai-capabilities.json`：只有 `schemaVersion: 2` 且 `cliCommands` 包含 `doctor` 时才运行自检；缺少声明的旧包按包内或对应版本的 `docs/MCP.md` 接入，不用未知命令试探。完整配置、示例和故障处理见 [AI 快速上手](docs/AI-QUICKSTART.md)。
-
-连接后，AI 先确定本次入库方式；用户已经明确指定时直接沿用。不压缩入库始终保留原文件，不要求压缩包位置或密码；压缩入库复用已保存的偏好，只补问缺失的成品位置和原文件处理方式，密码始终可选。支持任务预检的版本会在提交前核对范围，提交后持续跟踪到最终状态。
-
-支持托盘任务入口的版本可随时打开工作台，查看带“AI 提交”标记的任务。任务结果应说明成功、跳过或失败的数量，以及仓库记录和成品位置。应用自身不上传媒体；返回的标题、路径等元数据会进入你连接的 AI 客户端上下文。
+除桌面界面外，Hamster Archiver 还提供可选的 CLI / MCP 自动化入口，便于脚本和具备本机工具能力的 AI / Agent 调用。该能力目前作为实验功能提供，不影响默认的本地桌面使用。
 
 ## 备份到别处，内容仍然看得见
 
@@ -103,6 +95,7 @@ AI 应先读取包内 `ai-capabilities.json`：只有 `schemaVersion: 2` 且 `cl
 - 标签自动补全复用已有分类，可用 Tab 接受建议；选中项目时原位更新状态，减少闪烁和页面跳动。
 - 同一视频的多帧预览成组展示，竖屏画面完整保留；封面可更换，也可手动添加或粘贴补充图片。
 - 大项目详情按需读取，媒体靠近可见区域才加载，同时限制图片读取数量；目录使用虚拟列表，减少无效渲染。
+- 列表与缩略图均支持框选、Ctrl 反选及 Shift 范围选择，可直接清空跨页选择。“仓库工具”可设置小/中/大缩略图；向下浏览后可一键返回搜索与批量操作栏。
 - 仓库保存缩略图而非再复制一整套原始媒体，预览数量可调。
 - 提供五套主题与中英文界面，持续完善深色菜单、文字对比度和动态提示。
 
@@ -139,6 +132,22 @@ AI 应先读取包内 `ai-capabilities.json`：只有 `schemaVersion: 2` 且 `cl
 
 </details>
 
+## 实验功能
+
+### AI / Agent 接入（CLI · MCP · 自动发现预览）
+
+Hamster Archiver 持续跟进本机 AI / Agent 工作流，并提供实验性的本地接入能力。启用后，支持本机命令或 MCP 的 AI 助手可以查询仓库、添加标签，以及提交不压缩入库或压缩归档任务。
+
+AI 接入默认关闭，不影响普通桌面使用。推荐使用 Setup EXE 安装版，因为它提供稳定的程序位置、升级和卸载生命周期；ZIP 便携版仍可手动使用 CLI / MCP。
+
+在 **更多设置 → 实验功能 → AI 助手接入** 中，可以按需启用 Codex / ChatGPT Desktop、Codex MCP、WorkBuddy、通用 MCP，以及受支持 Windows 上的 ODR 自动发现预览。每种接入都可以单独关闭。
+
+日常使用只需要直接说目标，例如：“请用 Hamster Archiver 把 `D:\Downloads\示例目录` 不压缩入库并保留原文件。”应用负责输入校验、排队、归档验证和结果保存；只有真实缺少输入、需要确认或发生错误时，AI 才需要进一步处理。
+
+> 这是实验功能。AI 客户端会看到工具返回的路径、标题、标签、备注等元数据；Hamster Archiver 本身不会把媒体文件上传到在线模型。具体可用性取决于所使用的 AI 客户端、操作系统和权限设置。
+
+[AI 快速上手](docs/AI-QUICKSTART.md) · [CLI 参考](docs/CLI.md) · [MCP 参考](docs/MCP.md) · [排错](docs/AI-TROUBLESHOOTING.md)
+
 ## 常见问题
 
 <details>
@@ -160,6 +169,13 @@ AI 应先读取包内 `ai-capabilities.json`：只有 `schemaVersion: 2` 且 `cl
 </details>
 
 <details>
+<summary>关闭应用后还能查看运行日志吗？</summary>
+
+可以。运行日志保存在当前用户数据区的 `logs/app.log`，关闭应用不会清空；下次启动会在界面中恢复最近 300 条有效记录。日志包含任务处理、设置字段变化、用户数据区切换、更新操作和关键错误，但不记录密码内容，也不记录普通搜索、浏览或复制动作。
+
+</details>
+
+<details>
 <summary>老用户如何更新？仓库导出是否包含原文件？</summary>
 
 在“检查更新”中查看新版说明并更新。网络不便时，先下载新版发行文件，再选择“手动更新”：便携版选择 ZIP，安装版选择 Setup EXE。
@@ -173,7 +189,7 @@ AI 应先读取包内 `ai-capabilities.json`：只有 `schemaVersion: 2` 且 `cl
 | 你需要什么 | 入口 |
 | --- | --- |
 | 下载安装、查看已发布版本 | [Releases](https://github.com/CarlosZ16420/hamster-archiver/releases) |
-| 配置 AI、查看调用示例和排错步骤 | [AI 快速上手](docs/AI-QUICKSTART.md) · [MCP 接口说明](docs/MCP.md) |
+| 实验性 AI / CLI / MCP 接入 | [AI 快速上手](docs/AI-QUICKSTART.md) · [CLI 参考](docs/CLI.md) · [MCP 参考](docs/MCP.md) · [排错](docs/AI-TROUBLESHOOTING.md) |
 | 了解功能变化 | [更新日志](CHANGELOG.md)（`Unreleased` 为待发布改动） |
 | 报告 Bug 或建议功能 | [Issues](https://github.com/CarlosZ16420/hamster-archiver/issues)，请附版本号、操作步骤和错误信息，隐去私人路径及密码 |
 | 修改源码或参与文档 | [贡献指南](CONTRIBUTING.md) · [开发指南](docs/DEVELOPMENT.md) |

@@ -9,6 +9,7 @@ const { createFileIntegrityEntries, hashFile } = require('../src/core/tool-integ
 const { compactReleaseNotesPayload } = require('../src/core/release-notes');
 const { dependencyLock, verifyToolchain } = require('./verify-toolchain');
 const { assertPathInsideLocalRoot, makeLocalLayout } = require('../src/core/local-paths');
+const { createAutomationManifest } = require('../src/core/automation-definitions');
 
 const projectRoot = path.resolve(__dirname, '..');
 const electronDist = path.join(projectRoot, 'node_modules', 'electron', 'dist');
@@ -117,21 +118,14 @@ async function main() {
   }
   await fs.copyFile(path.join(projectRoot, 'LICENSE'), path.join(outputRoot, 'LICENSE'));
   await fs.copyFile(path.join(projectRoot, 'scripts', 'HamsterArchiver-MCP.cmd'), path.join(outputRoot, 'HamsterArchiver-MCP.cmd'));
+  await fs.copyFile(path.join(projectRoot, 'scripts', 'hamster.cmd'), path.join(outputRoot, 'hamster.cmd'));
+  await fs.cp(path.join(projectRoot, 'integrations'), path.join(outputRoot, 'integrations'), { recursive: true });
   await fs.mkdir(path.join(outputRoot, 'docs'), { recursive: true });
-  await fs.copyFile(path.join(projectRoot, 'docs', 'MCP.md'), path.join(outputRoot, 'docs', 'MCP.md'));
-  await fs.copyFile(path.join(projectRoot, 'docs', 'AI-QUICKSTART.md'), path.join(outputRoot, 'docs', 'AI-QUICKSTART.md'));
+  for (const name of ['MCP.md', 'CLI.md', 'AI-QUICKSTART.md', 'AI-TROUBLESHOOTING.md']) {
+    await fs.copyFile(path.join(projectRoot, 'docs', name), path.join(outputRoot, 'docs', name));
+  }
   await fs.copyFile(path.join(projectRoot, 'llms.txt'), path.join(outputRoot, 'llms.txt'));
-  await fs.writeFile(path.join(outputRoot, 'ai-capabilities.json'), `${JSON.stringify({
-    schemaVersion: 2,
-    version: packageJson.version,
-    platform: 'win32-x64',
-    launcher: 'HamsterArchiver-MCP.cmd',
-    defaultMode: 'stdio',
-    cliCommands: ['doctor', 'describe', 'call'],
-    tools: ['hamster_discover', 'hamster_describe', 'hamster_call'],
-    capabilityDiscovery: 'hamster_discover',
-    instructions: 'llms.txt'
-  }, null, 2)}\n`, 'utf8');
+  await fs.writeFile(path.join(outputRoot, 'ai-capabilities.json'), `${JSON.stringify(createAutomationManifest(packageJson.version), null, 2)}\n`, 'utf8');
   await fs.writeFile(path.join(appDirectory, 'package.json'), `${JSON.stringify({
     name: packageJson.name,
     productName: 'Hamster Archiver',
@@ -186,17 +180,34 @@ async function main() {
     'resources/app/src/core/mcp-capabilities.js',
     'resources/app/src/core/mcp-application-services.js',
     'resources/app/src/core/mcp-user-data-migration-worker.js',
+    'resources/app/src/core/application-task-service.js',
+    'resources/app/src/core/task-contracts.js',
+    'resources/app/src/core/intake-options.js',
+    'resources/app/src/core/automation-definitions.js',
+    'resources/app/src/core/hamster-cli.js',
+    'resources/app/src/core/integration-manager.js',
     'HamsterArchiver-MCP.cmd',
+    'hamster.cmd',
     'ai-capabilities.json',
     'llms.txt',
     'docs/MCP.md',
     'docs/AI-QUICKSTART.md',
+    'docs/CLI.md',
+    'docs/AI-TROUBLESHOOTING.md',
+    'integrations/codex/hamster-archiver/SKILL.md',
+    'integrations/codex/hamster-archiver/agents/openai.yaml',
+    'integrations/workbuddy/connector-meta.json',
+    'integrations/workbuddy/mcp.json',
+    'integrations/workbuddy/icon.svg',
+    'integrations/workbuddy/skills/hamster-archiver/SKILL.md',
+    'integrations/windows-odr/manifest.json',
     'resources/app/src/core/archive-engine.js',
     'resources/app/src/core/media-service.js',
     'resources/app/src/core/paths.js',
     'resources/app/src/core/release-notes.js',
     'resources/app/src/core/startup-integrity.js',
     'resources/app/src/core/integrity-worker.js',
+    'resources/app/src/core/catalog-loader-worker.js',
     'resources/app/src/core/tool-integrity.js',
     'resources/app/src/renderer/startup.html',
     'resources/app/src/renderer/startup.css',

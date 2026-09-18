@@ -53,13 +53,30 @@ test('SQLite repository persists catalog, jobs and pending manifests incremental
     manifest: [{ relativePath: 'movie.mp4', name: 'movie.mp4', size: 123, md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', mediaType: 'video' }]
   };
   const job = { id: 'job-one', displayName: '测试任务', sourcePath: 'E:\\input', status: 'queued' };
+  Object.defineProperties(record.manifest, {
+    directories: { value: ['empty-folder'], enumerable: false },
+    skippedFiles: { value: [], enumerable: false },
+    sourceSnapshot: {
+      value: {
+        schemaVersion: 1, snapshotId: 'snapshot-one', sourcePath: job.sourcePath,
+        sourceType: 'directory', scannedAt: '2026-08-15T10:30:00.000Z',
+        files: [{ relativePath: 'movie.mp4', entryType: 'file', size: 123, modifiedAtMs: 1 }],
+        directories: ['empty-folder'], fileCount: 1, totalBytes: 123, complete: true, errors: []
+      },
+      enumerable: false
+    }
+  });
 
   await store.saveCatalog(repositoryDirectory, [record]);
   await store.saveJobs(repositoryDirectory, [job]);
   await store.savePendingManifest(repositoryDirectory, job.id, record.manifest);
   assert.deepEqual(await store.loadCatalog(repositoryDirectory), [record]);
   assert.deepEqual(await store.loadJobs(repositoryDirectory), [job]);
-  assert.deepEqual(await store.loadPendingManifest(repositoryDirectory, job.id), record.manifest);
+  const pendingManifest = await store.loadPendingManifest(repositoryDirectory, job.id);
+  assert.deepEqual(pendingManifest, record.manifest);
+  assert.deepEqual(pendingManifest.directories, ['empty-folder']);
+  assert.deepEqual(pendingManifest.skippedFiles, []);
+  assert.equal(pendingManifest.sourceSnapshot.snapshotId, 'snapshot-one');
   assert.equal(await store.verifyRepository(repositoryDirectory), true);
   assert.deepEqual(store.findCatalogIdsBySearchTerms(repositoryDirectory, ['char:测']), ['record-one']);
   assert.deepEqual(store.findCatalogIdsByExactName(repositoryDirectory, '测试库存'), ['record-one']);
@@ -137,6 +154,28 @@ test('a first-time zero-byte SQLite file is initialized', async (t) => {
   store.closeAll();
 });
 
+test('catalog records can be loaded in bounded background batches', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-background-catalog-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const repositoryDirectory = path.join(root, 'warehouse');
+  const store = new AppStore(path.join(root, 'user-data'));
+  const records = Array.from({ length: 55 }, (_, index) => ({
+    id: `background-${index}`,
+    title: `后台记录 ${index}`,
+    manifest: [{ relativePath: `file-${index}.bin`, size: index + 1 }]
+  }));
+  await store.saveCatalog(repositoryDirectory, records);
+  const progress = [];
+
+  const loaded = await store.loadCatalogInBackground(repositoryDirectory, (entry) => progress.push(entry));
+
+  assert.deepEqual(loaded, records);
+  assert.equal(progress.at(-1).loaded, records.length);
+  assert.equal(progress.at(-1).total, records.length);
+  assert.equal(progress.length >= 3, true);
+  store.closeAll();
+});
+
 test('a previously initialized zero-byte SQLite repository is rejected without modification', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-empty-sqlite-recovery-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -194,6 +233,25 @@ test('user data layout keeps settings, warehouse and one log under one root', as
   const lines = (await fs.readFile(layout.logPath, 'utf8')).trim().split('\n');
   assert.equal(lines.length, 2);
   assert.equal((await fs.readdir(path.join(root, 'first-warehouse')).catch(() => [])).length, 0);
+});
+
+test('runtime logs preserve write order and reload recent valid history', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-runtime-log-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const layout = makeUserDataLayout(root);
+  const store = new AppStore(layout);
+  const entries = Array.from({ length: 5 }, (_, index) => ({
+    at: new Date(2026, 0, 1, 0, 0, index).toISOString(),
+    level: 'info',
+    message: `entry-${index}`,
+    jobId: null
+  }));
+
+  await Promise.all(entries.map((entry) => store.appendLog(layout.repositoryDirectory, entry)));
+  await fs.appendFile(layout.logPath, '{truncated\n', 'utf8');
+
+  assert.deepEqual((await store.loadLogs(3)).map((entry) => entry.message), ['entry-2', 'entry-3', 'entry-4']);
+  await store.flushLogs();
 });
 
 test('saved user data location becomes the root for every durable data path', () => {

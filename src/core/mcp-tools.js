@@ -1,13 +1,14 @@
 'use strict';
 
 const { createCapabilityService, intakePreferences, jobSummary } = require('./mcp-capabilities');
+const { getApplicationTaskService } = require('./application-task-service');
 
 const text = { type: 'string', minLength: 1, maxLength: 4096 };
 const pagination = { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 100 } };
 const schema = (properties, required = [], additionalProperties = false) => ({ type: 'object', properties, required, additionalProperties });
 
 const definitions = [
-  { name: 'hamster_discover', description: 'Discover Hamster Archiver capabilities by domain or search text. Returns short paginated summaries; use hamster_describe for one schema.', inputSchema: schema({ domain: { type: 'string', enum: ['settings', 'intake', 'queue', 'catalog', 'warehouse', 'similarity', 'app', 'update', 'user_data'] }, query: { type: 'string', maxLength: 128 }, ...pagination }), annotations: { readOnlyHint: true } },
+  { name: 'hamster_discover', description: 'Discover Hamster Archiver capabilities by domain or search text. Known routine actions should call their stable capability directly.', inputSchema: schema({ domain: { type: 'string', enum: ['settings', 'intake', 'task', 'queue', 'catalog', 'warehouse', 'similarity', 'app', 'update', 'user_data'] }, query: { type: 'string', maxLength: 128 }, ...pagination }), annotations: { readOnlyHint: true } },
   { name: 'hamster_describe', description: 'Describe one discovered capability, including its input schema, availability and confirmation risk.', inputSchema: schema({ capability: { type: 'string', minLength: 1, maxLength: 128 } }, ['capability']), annotations: { readOnlyHint: true } },
   { name: 'hamster_call', description: 'Call one described capability. Risky calls first return an impact preview and one-time confirmationToken; repeat the exact call with that token after user authorization.', inputSchema: schema({ capability: { type: 'string', minLength: 1, maxLength: 128 }, input: { type: 'object', additionalProperties: true }, confirmationToken: { type: 'string', minLength: 1, maxLength: 128 } }, ['capability']), annotations: { readOnlyHint: false } }
 ];
@@ -16,7 +17,7 @@ const definitions = [
 const legacyDefinitions = [
   { name: 'hamster_search', inputSchema: schema({ query: { type: 'string', maxLength: 512 }, tag: { type: 'string', maxLength: 200 }, ...pagination }) },
   { name: 'hamster_project', inputSchema: schema({ recordId: text, ...pagination }, ['recordId']) },
-  { name: 'hamster_batch_import', inputSchema: schema({ requestId: { type: 'string', minLength: 1, maxLength: 128 }, paths: { type: 'array', minItems: 1, maxItems: 100, items: text }, mode: { type: 'string', enum: ['archive', 'inventory_only'] }, archiveOutputDirectory: text, sourceDisposition: { type: 'string', enum: ['keep', 'trash', 'move'] }, processedSourceDirectory: text }, ['requestId', 'paths', 'mode']) },
+  { name: 'hamster_batch_import', inputSchema: schema({ requestId: { type: 'string', minLength: 1, maxLength: 128 }, paths: { type: 'array', minItems: 1, maxItems: 100, items: text }, mode: { type: 'string', enum: ['archive', 'inventory_only'] }, archiveOutputDirectory: text, archiveStagingDirectory: text, sourceDisposition: { type: 'string', enum: ['keep', 'trash', 'move'] }, processedSourceDirectory: text }, ['requestId', 'paths', 'mode']) },
   { name: 'hamster_jobs', inputSchema: schema({ requestId: text, ...pagination }) },
   { name: 'hamster_decide', inputSchema: schema({ jobId: text, decisionToken: text, action: { type: 'string', enum: ['continue', 'skip', 'retry'] } }, ['jobId', 'decisionToken', 'action']) }
 ];
@@ -52,10 +53,10 @@ function projectSummary(record) {
 
 function createMcpTools(manager, services = {}) {
   let mutating = false;
-  const capabilityService = createCapabilityService(manager, services);
-  const noUnrelatedWork = () => {
-    if (manager.jobs.some((job) => !job.mcpRequestId && job.intakeModeSelected && job.status === 'queued')) throw new Error('UNRELATED_QUEUE_WORK: finish or pause selected desktop jobs before AI intake.');
-  };
+  const capabilityService = createCapabilityService(manager, {
+    ...services,
+    tasks: services.tasks || getApplicationTaskService(manager)
+  });
   return {
     definitions,
     async call(name, args = {}) {
@@ -74,10 +75,6 @@ function createMcpTools(manager, services = {}) {
         if (name === 'hamster_discover') return capabilityService.discover(args);
         if (name === 'hamster_describe') return capabilityService.describe(args.capability);
         if (name === 'hamster_call') {
-          if (args.capability === 'intake.add_batch') {
-            if (manager.running) throw new Error('QUEUE_RUNNING: wait until the queue is idle before adding an AI batch.');
-            noUnrelatedWork();
-          }
           return await capabilityService.call(args.capability, args.input || {}, args.confirmationToken || '');
         }
         if (name === 'hamster_search') return page(manager.searchCatalog({ query: args.query || '', tag: args.tag || '' }).map(projectSummary), args);
@@ -90,7 +87,6 @@ function createMcpTools(manager, services = {}) {
         if (name === 'hamster_batch_import') {
           const preferences = intakePreferences(manager);
           if (!preferences.configured && !(args.archiveOutputDirectory && args.sourceDisposition)) return preferences;
-          noUnrelatedWork();
           return await capabilityService.call('intake.add_batch', { ...args, start: true });
         }
         const job = manager.findJob(args.jobId);
@@ -98,13 +94,12 @@ function createMcpTools(manager, services = {}) {
         if (jobSummary(job).decisionToken !== args.decisionToken) throw new Error('STALE_DECISION: read hamster_jobs again');
         if (!jobSummary(job).possibleActions.includes(args.action)) throw new Error('Action is not valid for this job state');
         if (manager.running) throw new Error('QUEUE_RUNNING: wait until the queue is idle before deciding');
-        noUnrelatedWork();
         await manager.log('info', `MCP: ${args.action}`, job.id);
-        if (args.action === 'continue') await manager.confirmJob(job.id);
+        if (args.action === 'continue') await manager.confirmJob(job.id, { jobIds: [job.id] });
         if (args.action === 'skip') await manager.cancelJob(job.id);
         if (args.action === 'retry') {
           await manager.retryJob(job.id);
-          void manager.startQueue().catch((error) => manager.emit('automation-error', error));
+          void manager.startQueue([job.id]).catch((error) => manager.emit('automation-error', error));
         }
         return jobSummary(job);
       } finally {

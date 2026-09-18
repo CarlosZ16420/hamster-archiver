@@ -83,7 +83,7 @@ test('real archive publication is recovered when the SQLite catalog commit is re
   const sourceStats = await fs.stat(sourceFile);
   const store = new Proxy(realStore, {
     get(target, property) {
-      if (property === 'saveCatalog') {
+      if (property === 'saveCatalog' || property === 'saveCatalogRecords') {
         return async () => {
           const error = new Error('simulated SQLite commit denial');
           error.code = 'EACCES';

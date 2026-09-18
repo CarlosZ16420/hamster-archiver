@@ -1,10 +1,10 @@
 {
   "name": "hamster-archiver",
-  "version": "4.6.13",
+  "version": "4.6.16",
   "private": true,
   "author": "CarlosZ16420",
   "license": "MIT",
-  "description": "Windows local-first file organizer and media catalog with MCP tools for AI assistants",
+  "description": "Windows local-first file organizer, media library, and verifiable archiver with optional CLI/MCP integration",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/CarlosZ16420/hamster-archiver.git"
@@ -17,6 +17,7 @@
   "scripts": {
     "start": "electron .",
     "mcp": "node src/core/mcp-client.js",
+    "hamster": "node src/core/hamster-cli.js",
     "test": "node --test \"test/**/*.test.js\"",
     "test:full": "node --test \"test/**/*.test.js\"",
     "test:changed": "node scripts/qa-plan.js --execute",
@@ -43,7 +44,7 @@
     "npm": "^10.0.0 || ^11.0.0"
   },
   "devDependencies": {
-    "electron": "43.4.0",
+    "electron": "43.7.1",
     "electron-builder": "26.15.7",
     "resedit": "3.0.2"
   }

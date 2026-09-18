@@ -1,0 +1,6 @@
+interface:
+  display_name: "Hamster Archiver"
+  short_description: "Use the local Hamster Archiver app when the user names it."
+  brand_color: "#B87543"
+policy:
+  allow_implicit_invocation: {{ALLOW_IMPLICIT}}

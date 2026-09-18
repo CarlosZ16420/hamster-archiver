@@ -21,7 +21,16 @@ class FakeStore {
   async saveSettings(settings) { this.settings = structuredClone(settings); }
   async appendLog() {}
   async loadPendingManifest(_library, jobId) { return this.pendingManifests.get(jobId) || null; }
-  async savePendingManifest(_library, jobId, manifest) { this.pendingManifests.set(jobId, structuredClone(manifest)); }
+  async savePendingManifest(_library, jobId, manifest) {
+    const copy = structuredClone(Array.isArray(manifest) ? manifest : []);
+    for (const field of ['directories', 'skippedFiles', 'sourceSnapshot']) {
+      if (manifest?.[field] === undefined) continue;
+      Object.defineProperty(copy, field, {
+        value: structuredClone(manifest[field]), enumerable: false, configurable: true
+      });
+    }
+    this.pendingManifests.set(jobId, copy);
+  }
   async deletePendingManifest(_library, jobId) { this.pendingManifests.delete(jobId); }
 }
 
@@ -47,6 +56,72 @@ function blockingRunner(calls, started) {
     throw new CancelledError();
   };
 }
+
+test('startup restores recent persisted runtime logs', async () => {
+  class LogStore extends FakeStore {
+    async loadLogs() {
+      return [{ at: '2026-01-01T00:00:00.000Z', level: 'info', message: 'previous session', jobId: null }];
+    }
+  }
+  const manager = new QueueManager(new LogStore(), { libraryDir: 'E:\\library' });
+
+  await manager.initialize();
+
+  assert.equal(manager.getState().logs[0].message, 'previous session');
+});
+
+test('settings log names changed fields without recording password contents', async (t) => {
+  class LogStore extends FakeStore {
+    constructor() {
+      super();
+      this.entries = [];
+    }
+    async appendLog(_directory, entry) { this.entries.push(entry); }
+  }
+  const store = new LogStore();
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-settings-log-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const manager = new QueueManager(store, {
+    archivePassword: 'old-secret',
+    archiveFormat: '7z',
+    compressionLevel: 1,
+    archiveOutputDirectory: path.join(root, 'archives'),
+    archiveStagingDirectory: path.join(root, 'archives-staging')
+  });
+
+  await manager.updateConfig({
+    ...manager.config,
+    archivePassword: 'new-secret',
+    archiveFormat: 'zip',
+    compressionLevel: 3
+  }, { recordIntakePreferences: false });
+
+  const message = store.entries.at(-1).message;
+  assert.match(message, /压缩密码（内容未记录）/);
+  assert.match(message, /压缩格式/);
+  assert.match(message, /压缩等级/);
+  assert.doesNotMatch(message, /old-secret|new-secret/);
+});
+
+test('shutdown waiting includes fire-and-forget runtime log writes', async () => {
+  let releaseWrite;
+  let writeStarted;
+  const started = new Promise((resolve) => { writeStarted = resolve; });
+  const store = new FakeStore();
+  store.appendLog = async () => {
+    writeStarted();
+    await new Promise((resolve) => { releaseWrite = resolve; });
+  };
+  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+
+  void manager.log('info', 'pending');
+  await started;
+  assert.equal(manager.hasPendingLogWrites(), true);
+  const waiting = manager.waitForLogWrites();
+  releaseWrite();
+  await waiting;
+  assert.equal(manager.hasPendingLogWrites(), false);
+});
 
 test('shutdown cancels current job and does not start the next queued job', async () => {
   let signalStarted;
@@ -628,7 +703,7 @@ test('a name warning does not require preflight confirmation before automatic ex
   assert.equal(job.stageText, '与仓库内项目完全一致，已自动跳过');
 });
 
-test('scanning never auto-skips from historical metadata even when the source path is unchanged', async (t) => {
+test('direct intake routes a same-path uncompressed directory to explicit update or compression selection', async (t) => {
   for (const archiveState of ['uncompressed', 'compressed']) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), `hamster-auto-skip-reuse-${archiveState}-`));
     t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -652,7 +727,14 @@ test('scanning never auto-skips from historical metadata even when the source pa
     await manager.addSingle(sourcePath);
 
     assert.equal(manager.jobs[0].status, 'queued', archiveState);
-    assert.match(manager.jobs[0].stageText, /名称存在仓库候选/, archiveState);
+    if (archiveState === 'uncompressed') {
+      assert.equal(manager.jobs[0].stageText, '等待选择入库方式');
+      assert.equal(manager.jobs[0].taskKind, 'pending_existing');
+      assert.equal(manager.jobs[0].sourceCatalogRecordId, 'uncompressed-existing');
+    } else {
+      assert.match(manager.jobs[0].stageText, /名称存在仓库候选/);
+      assert.notEqual(manager.jobs[0].taskKind, 'pending_existing');
+    }
     assert.equal(manager.jobs[0].automaticDuplicateCheckPending, false, archiveState);
     assert.equal(manager.jobs[0].exactProjectMatches, undefined);
     assert.equal(await manager.store.loadPendingManifest(manager.config.repositoryDirectory, manager.jobs[0].id), null);
@@ -1385,6 +1467,35 @@ test('empty optional catalog fields normalize safely without null values', async
   assert.deepEqual(record.directories, []);
 });
 
+test('desktop startup can defer catalog parsing and publish loading progress', async () => {
+  class BackgroundCatalogStore extends FakeStore {
+    constructor() {
+      super();
+      this.backgroundLoads = 0;
+    }
+    async loadCatalogInBackground(_repositoryDirectory, onProgress) {
+      this.backgroundLoads += 1;
+      onProgress({ loaded: 1, total: 1 });
+      return [{
+        id: 'background-record', title: '后台记录', displayName: '后台记录',
+        tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: []
+      }];
+    }
+  }
+  const store = new BackgroundCatalogStore();
+  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+
+  await manager.initialize({ deferCatalog: true });
+  assert.equal(manager.getState().catalogLoading, true);
+  assert.deepEqual(manager.catalog, []);
+
+  await manager.waitForCatalogReady();
+  assert.equal(store.backgroundLoads, 1);
+  assert.equal(manager.getState().catalogLoading, false);
+  assert.equal(manager.catalog[0].id, 'background-record');
+  assert.deepEqual(manager.getState().catalogLoadProgress, { loaded: 1, total: 1 });
+});
+
 test('thumbnail limit is configurable within a bounded range', async () => {
   const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
   await manager.updateConfig({ thumbnailLimit: 250 });
@@ -1483,6 +1594,16 @@ test('catalog fuzzy search ranks matches and supports time and filename sorting'
   assert.deepEqual(manager.searchCatalog({ sort: 'inventory_desc' }).map((item) => item.id), ['newer', 'older']);
   assert.deepEqual(manager.searchCatalog({ sort: 'name_asc' }).map((item) => item.id), ['newer', 'older']);
   assert.equal(manager.getCatalogSuggestions('美女台湾')[0].id, 'older');
+});
+
+test('the uncompressed system tag uses the normal exact tag filter', () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.catalog = [
+    { id: 'uncompressed', title: '未压缩项目', tags: ['未压缩', '旅行'], archiveState: 'uncompressed', manifest: [], directories: [] },
+    { id: 'compressed', title: '压缩项目', tags: ['旅行'], archiveState: 'compressed', manifest: [], directories: [] }
+  ];
+
+  assert.deepEqual(manager.searchCatalog({ tag: '未压缩' }).map((record) => record.id), ['uncompressed']);
 });
 
 test('catalog search does not create a second in-memory posting index', () => {
@@ -2888,7 +3009,7 @@ test('inventory-only queue stores a verified manifest without creating an archiv
   assert.equal((await fs.stat(sourcePath)).isDirectory(), true);
 });
 
-test('warehouse compression refuses an uncompressed record whose original manifest changed', async (t) => {
+test('warehouse compression scans at execution time and waits for a decision when the source changed', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-existing-changed-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const sourcePath = path.join(root, 'source-item');
@@ -2914,15 +3035,116 @@ test('warehouse compression refuses an uncompressed record whose original manife
     sourceDisposition: 'kept',
     originalBytes: 6,
     manifest,
-    directories: []
+    directories: [],
+    sourceSnapshot: manifest.sourceSnapshot,
+    sourceTreeSnapshotComplete: true
   }];
 
   const result = await manager.queueCatalogRecordsForCompression(['uncompressed-changed']);
+  assert.equal(result.queuedCount, 1);
+  assert.equal(result.failedCount, 0);
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startArchiveQueue();
+  await idle;
 
-  assert.equal(result.queuedCount, 0);
-  assert.equal(result.failedCount, 1);
-  assert.equal(manager.jobs.length, 0);
-  assert.match(result.failures[0].reason, /源文件发生变化/);
+  assert.equal(manager.jobs[0].status, 'awaiting_source_change_confirmation');
+  assert.equal(manager.catalog[0].manifest[0].md5, manifest[0].md5);
+  const report = await manager.getSourceChangeReport(manager.jobs[0].id);
+  assert.equal(report.summary.modifiedFiles, 1);
+  assert.equal(report.modifiedFiles[0].after.relativePath, 'one.txt');
+  assert.equal('modifiedFiles' in manager.jobs[0].sourceChangeReport, false, 'large details stay in the pending snapshot');
+});
+
+test('refreshing an uncompressed directory replaces the same record only after change confirmation', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-refresh-directory-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source-item');
+  await fs.mkdir(sourcePath);
+  const sourceFile = path.join(sourcePath, 'one.txt');
+  await fs.writeFile(sourceFile, 'before');
+  const originalManifest = await buildManifest(sourcePath, 'directory');
+  await fs.writeFile(sourceFile, 'after with more content');
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    autoSkipExactDuplicates: true
+  });
+  manager.canStartScheduledJob = () => ({ allowed: false, remainingMs: 0, estimatedMs: 60_000 });
+  manager.catalog = [{
+    id: 'refresh-record', jobId: 'original-job', title: '保留标题', displayName: '原始名称',
+    recordType: 'archive', archiveState: 'uncompressed', tags: ['未压缩', '保留标签'],
+    sourceType: 'directory', sourcePath, originalSourcePath: sourcePath, sourceDisposition: 'kept',
+    fileCount: 1, originalBytes: 6, manifest: originalManifest, directories: [],
+    sourceSnapshot: originalManifest.sourceSnapshot, sourceTreeSnapshotComplete: true,
+    archiveFiles: [], notes: '保留备注'
+  }];
+
+  const firstIdle = new Promise((resolve) => manager.once('idle', resolve));
+  const queued = await manager.queueCatalogRecordsForRefresh(['refresh-record']);
+  assert.equal(queued.queuedCount, 1);
+  await firstIdle;
+  const job = manager.jobs[0];
+  assert.equal(job.status, 'awaiting_source_change_confirmation');
+  assert.equal(manager.catalog[0].manifest[0].md5, originalManifest[0].md5);
+
+  const report = await manager.getSourceChangeReport(job.id);
+  assert.equal(report.summary.modifiedFiles, 1);
+  const secondIdle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.resolveSourceChange(job.id, 'overwrite');
+  await secondIdle;
+
+  assert.equal(job.status, 'completed');
+  assert.equal(manager.catalog.length, 1);
+  assert.equal(manager.catalog[0].id, 'refresh-record');
+  assert.equal(manager.catalog[0].archiveState, 'uncompressed');
+  assert.equal(manager.catalog[0].title, '保留标题');
+  assert.equal(manager.catalog[0].notes, '保留备注');
+  assert.equal(manager.catalog[0].tags.includes('保留标签'), true);
+  assert.notEqual(manager.catalog[0].manifest[0].md5, originalManifest[0].md5);
+  assert.equal(await fs.readFile(sourceFile, 'utf8'), 'after with more content');
+});
+
+test('refreshing a directory auto-merges additions, reuses unchanged metadata, and leaves unrelated queue work alone', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-refresh-additions-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source-item');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'old.txt'), 'unchanged');
+  const originalManifest = await buildManifest(sourcePath, 'directory');
+  originalManifest[0].thumbnailPath = 'existing-preview.png';
+  await fs.writeFile(path.join(sourcePath, 'new.txt'), 'addition');
+  let observedManifest;
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse')
+  }, {
+    createThumbnails: async (_job, manifest) => {
+      observedManifest = manifest.map((file) => ({ ...file }));
+      return manifest;
+    }
+  });
+  manager.catalog = [{
+    id: 'addition-record', jobId: 'original-job', title: '增量目录', displayName: '增量目录',
+    recordType: 'archive', archiveState: 'uncompressed', tags: ['未压缩'],
+    sourceType: 'directory', sourcePath, originalSourcePath: sourcePath, sourceDisposition: 'kept',
+    fileCount: 1, originalBytes: 9, manifest: originalManifest, directories: [],
+    sourceSnapshot: originalManifest.sourceSnapshot, sourceTreeSnapshotComplete: true, archiveFiles: []
+  }];
+  const unrelated = { ...queuedJob('unrelated'), intakeModeSelected: true };
+  manager.jobs = [unrelated];
+
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  const queued = await manager.queueCatalogRecordsForRefresh(['addition-record']);
+  await idle;
+  const refreshJob = manager.jobs.find((job) => job.taskKind === 'catalog_refresh');
+
+  assert.equal(queued.queuedCount, 1);
+  assert.equal(refreshJob.status, 'completed');
+  assert.equal(unrelated.status, 'queued');
+  assert.equal(manager.catalog.length, 1);
+  assert.deepEqual(manager.catalog[0].manifest.map((file) => file.name).sort(), ['new.txt', 'old.txt']);
+  assert.equal(manager.catalog[0].manifest.find((file) => file.name === 'old.txt').md5, originalManifest[0].md5);
+  assert.equal(manager.catalog[0].manifest.find((file) => file.name === 'old.txt').thumbnailPath, 'existing-preview.png');
+  assert.equal(observedManifest.find((file) => file.name === 'old.txt').sourceMetadataUnchanged, true);
+  assert.equal(observedManifest.find((file) => file.name === 'new.txt').sourceMetadataUnchanged, undefined);
 });
 
 test('warehouse compression backup location resolution preserves or updates explicit metadata', () => {
@@ -2990,6 +3212,8 @@ test('warehouse compression upgrades the same uncompressed record and removes it
     sourceDisposition: 'kept',
     originalBytes: 10,
     manifest,
+    sourceSnapshot: manifest.sourceSnapshot,
+    sourceTreeSnapshotComplete: true,
     directories: [],
     archiveFiles: []
   }, {
@@ -3454,3 +3678,289 @@ async function pathExistsForTest(targetPath) {
     throw error;
   }
 }
+
+test('source review without a batch never resumes unrelated queued tasks', async () => {
+  const manager = new QueueManager(new FakeStore(), {});
+  const reviewed = { ...queuedJob('review'), status: 'awaiting_source_change_confirmation',
+    sourceChangeReport: { targetRecord: { id: 'target' }, snapshotId: 'snapshot', sameSourceRecords: [{ id: 'same' }] } };
+  manager.jobs = [reviewed, queuedJob('unrelated')];
+  let requested;
+  manager.startQueue = async (ids) => { requested = ids; };
+  await manager.resolveSourceChange('review', 'new_independent');
+  assert.deepEqual(requested, ['review']);
+  assert.equal(reviewed.sourceCatalogRecordId, null);
+  assert.equal(reviewed.taskKind, 'intake');
+  assert.equal(reviewed.duplicatePolicy, 'normal_with_exclusions');
+  assert.deepEqual(reviewed.duplicateOverrideRecordIds, ['target', 'same']);
+});
+
+test('skip review keeps the baseline and discards only the pending plan', async () => {
+  const store = new FakeStore();
+  const manager = new QueueManager(store, {});
+  const original = { id: 'target', title: 'baseline', manifest: [{ relativePath: 'old' }] };
+  manager.catalog = [original];
+  manager.jobs = [{ ...queuedJob('review'), status: 'awaiting_source_change_confirmation',
+    sourceChangeReport: { targetRecord: { id: 'target' }, snapshotId: 'snapshot' } }];
+  store.pendingManifests.set('review', []);
+  manager.startQueue = async () => { throw new Error('skip must not start anything'); };
+  await manager.resolveSourceChange('review', 'skip');
+  assert.equal(manager.jobs[0].status, 'cancelled');
+  assert.equal(store.pendingManifests.has('review'), false);
+  assert.equal(manager.catalog[0], original);
+  assert.equal(original.manifest[0].relativePath, 'old');
+});
+
+test('catalog summary does not transmit the full source snapshot', () => {
+  const manager = new QueueManager(new FakeStore(), {});
+  const summary = manager.summarizeCatalogRecord({ id: 'record', manifest: [], sourceSnapshot: { files: [{ relativePath: 'private' }] } });
+  assert.equal(Object.hasOwn(summary, 'sourceSnapshot'), false);
+});
+
+test('recovery recognizes an already committed result without executing the archive again', async () => {
+  const manager = new QueueManager(new FakeStore(), {}, { archiveRunner: async () => { throw new Error('must not archive again'); } });
+  const job = { ...queuedJob('committed'), intakeModeSelected: true };
+  manager.jobs = [job];
+  manager.catalog = [{ id: 'result', archiveJobId: job.id, completedAt: '2026-09-18T00:00:00Z', sourceDisposition: 'kept', manifest: [] }];
+  await manager.startQueue([job.id]);
+  assert.equal(job.status, 'completed');
+  assert.equal(manager.catalog.length, 1);
+});
+
+test('manual refresh pause survives ticks in the same schedule window and resumes at the next start', async () => {
+  const manager = new QueueManager(new FakeStore(), { scheduleEnabled: true, scheduleStart: '09:00', scheduleEnd: '18:00' });
+  manager.running = true;
+  manager.paused = true;
+  manager.jobs = [{ ...queuedJob('refresh'), status: 'inventorying', taskBatchId: 'batch', ignoreScheduleOnce: true }];
+  const now = new Date(2026, 8, 18, 10, 0);
+  manager.manualPauseScheduleWindowStart = manager.scheduleWindow(now).startAt.getTime();
+  let resumed = 0;
+  manager.resumeCurrent = async () => { resumed += 1; };
+  await manager.handleScheduleTick(now);
+  assert.equal(resumed, 0);
+  await manager.handleScheduleTick(new Date(2026, 8, 19, 9, 0));
+  assert.equal(resumed, 1);
+});
+
+test('position repair rolls back in memory if persistence fails', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-location-rollback-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new FakeStore();
+  store.saveCatalog = async () => { throw new Error('persistence failure'); };
+  const manager = new QueueManager(store, {});
+  const record = { id: 'record', title: 'record', archiveState: 'uncompressed', sourceType: 'directory', sourcePath: 'old', originalSourcePath: 'old', manifest: [] };
+  manager.catalog = [record];
+  await assert.rejects(manager.updateCatalogSourcePath(record.id, root), /persistence failure/);
+  assert.equal(record.sourcePath, 'old');
+  assert.equal(record.originalSourcePath, 'old');
+  assert.equal(record.sourceLocationCheckedAt, undefined);
+});
+
+async function refreshFixture(t) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-refresh-lifecycle-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'item');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'entry.txt'), 'baseline');
+  const manifest = await buildManifest(sourcePath, 'directory');
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'), similarityEnabled: false, autoSkipExactDuplicates: true
+  });
+  const record = { id: 'target', jobId: 'old-job', title: 'organized', tags: ['未压缩', 'user-tag'], notes: 'user-note',
+    archiveState: 'uncompressed', sourceType: 'directory', sourcePath, originalSourcePath: sourcePath,
+    fileCount: 1, originalBytes: 8, manifest, directories: [], sourceSnapshot: manifest.sourceSnapshot,
+    sourceTreeSnapshotComplete: true, sourceDisposition: 'kept', archiveFiles: [] };
+  manager.catalog = [record];
+  return { root, sourcePath, manager, record };
+}
+
+test('unchanged refresh preserves content objects and does not generate previews', async (t) => {
+  const { manager, record } = await refreshFixture(t);
+  manager.services.createThumbnails = async () => { throw new Error('must not create previews'); };
+  const originalManifest = record.manifest;
+  const originalSnapshot = record.sourceSnapshot;
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.queueCatalogRecordsForRefresh([record.id]);
+  await idle;
+  assert.equal(manager.jobs[0].status, 'completed');
+  assert.equal(manager.jobs[0].stageText, '目录未发现变化');
+  assert.equal(manager.jobs[0].unchangedDirectoryTitle, record.title);
+  assert.ok(manager.logs.some((entry) => entry.message.includes(`项目“${record.title}”与本地目录内容一致`)));
+  assert.equal(record.manifest, originalManifest);
+  assert.equal(record.sourceSnapshot, originalSnapshot);
+  assert.ok(record.sourceLocationCheckedAt);
+});
+
+test('individual backup review blocks only conflicts and preserves queued settings and large-task review', async (t) => {
+  const { manager, record } = await refreshFixture(t);
+  manager.config.recordBackupLocation = true;
+  manager.config.backupLocation = 'current-backup';
+  manager.catalog = [
+    { ...record, id: 'keep', backupLocation: 'old-backup' },
+    { ...record, id: 'update', backupLocation: 'another-backup', originalBytes: LARGE_TASK_BYTES + 1 },
+    { ...record, id: 'same', backupLocation: 'current-backup' }
+  ];
+  await manager.queueCatalogRecordsForCompression(['keep', 'update', 'same'], { confirmBackupLocationIndividually: true });
+  const [keep, update, same] = manager.jobs;
+  assert.equal(keep.status, 'awaiting_confirmation');
+  assert.equal(update.status, 'awaiting_confirmation');
+  assert.equal(same.status, 'queued');
+  assert.equal(manager.store.jobs[0].backupLocationConfirmation.currentLocation, 'current-backup');
+  const processed = [];
+  manager.processJob = async (job) => { processed.push(job.id); job.status = 'completed'; };
+  await manager.startQueue();
+  assert.deepEqual(processed, [same.id]);
+  await assert.rejects(manager.confirmJob(keep.id, { autoStart: false }), /请先确认/);
+  manager.config.backupLocation = 'later-setting';
+  await manager.confirmJob(keep.id, { updateBackupLocation: false, autoStart: false });
+  assert.equal(keep.catalogCompressionBackupLocation, 'old-backup');
+  await manager.confirmJob(update.id, { updateBackupLocation: true, autoStart: false });
+  assert.equal(update.catalogCompressionBackupLocation, 'current-backup');
+  assert.equal(update.status, 'awaiting_confirmation');
+  assert.deepEqual(update.confirmationReasons, ['large_task']);
+  await manager.startQueue();
+  assert.deepEqual(processed, [same.id, keep.id]);
+  await manager.confirmJob(update.id, { autoStart: false });
+  await manager.startQueue();
+  assert.deepEqual(processed, [same.id, keep.id, update.id]);
+});
+
+test('refresh reports why a folder already queued for compression cannot be refreshed', async (t) => {
+  const { manager, record } = await refreshFixture(t);
+  await manager.queueCatalogRecordsForCompression([record.id]);
+  const result = await manager.queueCatalogRecordsForRefresh([record.id]);
+  assert.equal(result.queuedCount, 0);
+  assert.equal(result.failedCount, 1);
+  assert.match(result.failures[0].reason, /已在更新或压缩队列中/);
+  assert.equal(manager.jobs.length, 1);
+});
+
+test('independent source review creates its own record without copying human fields or skipping its source baseline', async (t) => {
+  const { sourcePath, manager, record } = await refreshFixture(t);
+  await fs.writeFile(path.join(sourcePath, 'entry.txt'), 'modified content');
+  let idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.queueCatalogRecordsForRefresh([record.id]);
+  await idle;
+  const job = manager.jobs[0];
+  assert.equal(job.status, 'awaiting_source_change_confirmation');
+  const report = await manager.getSourceChangeReport(job.id);
+  assert.equal(report.summary.modifiedFiles, 1);
+  idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.resolveSourceChange(job.id, 'new_independent');
+  await idle;
+  assert.equal(job.status, 'completed');
+  assert.equal(manager.catalog.length, 2);
+  assert.equal(manager.catalog[0], record);
+  const created = manager.catalog[1];
+  assert.notEqual(created.id, record.id);
+  assert.equal(created.notes, '');
+  assert.deepEqual(created.tags, ['未压缩']);
+  assert.equal(created.sourcePath, sourcePath);
+  assert.notEqual(created.manifest[0].md5, record.manifest[0].md5);
+});
+
+test('a new independent item still auto-skips an unrelated exact duplicate', async (t) => {
+  const { root, sourcePath, manager, record } = await refreshFixture(t);
+  await fs.writeFile(path.join(sourcePath, 'entry.txt'), 'modified content');
+  const current = await buildManifest(sourcePath, 'directory');
+  manager.catalog.push({ ...record, id: 'unrelated-exact', sourcePath: path.join(root, 'other'),
+    originalSourcePath: path.join(root, 'other'), manifest: current, sourceSnapshot: current.sourceSnapshot });
+  let idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.queueCatalogRecordsForRefresh([record.id]);
+  await idle;
+  const job = manager.jobs[0];
+  idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.resolveSourceChange(job.id, 'new_independent');
+  await idle;
+  assert.equal(job.status, 'skipped_duplicate');
+  assert.equal(manager.catalog.length, 2);
+  assert.equal(manager.catalog[0], record);
+});
+
+test('confirmation is invalidated when the source changes again and complete empty refresh is supported', async (t) => {
+  const { sourcePath, manager, record } = await refreshFixture(t);
+  await fs.writeFile(path.join(sourcePath, 'entry.txt'), 'first change');
+  let idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.queueCatalogRecordsForRefresh([record.id]);
+  await idle;
+  const job = manager.jobs[0];
+  await fs.unlink(path.join(sourcePath, 'entry.txt'));
+  idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.resolveSourceChange(job.id, 'overwrite');
+  await idle;
+  assert.equal(job.status, 'awaiting_source_change_confirmation');
+  assert.equal(job.sourceChangeReport.summary.deletedFiles, 1);
+  assert.equal(manager.catalog[0], record);
+  idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.resolveSourceChange(job.id, 'overwrite');
+  await idle;
+  assert.equal(job.status, 'completed');
+  assert.equal(manager.catalog[0].id, record.id);
+  assert.deepEqual(manager.catalog[0].manifest, []);
+  assert.equal(manager.catalog[0].sourceSnapshot.complete, true);
+});
+
+test('single-video exact MD5 auto-skip works even when the source filename differs', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-video-exact-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const oldPath = path.join(root, 'old.mp4');
+  const sourcePath = path.join(root, 'renamed.mp4');
+  await fs.writeFile(oldPath, 'same video bytes');
+  await fs.writeFile(sourcePath, 'same video bytes');
+  const manifest = await buildManifest(oldPath, 'video');
+  const manager = new QueueManager(new FakeStore(), { repositoryDirectory: path.join(root, 'warehouse'), autoSkipExactDuplicates: true, smallItemFilter: false });
+  manager.catalog = [{ id: 'video-baseline', sourceType: 'video', archiveState: 'uncompressed', sourcePath: oldPath,
+    originalSourcePath: oldPath, manifest, directories: [], sourceTreeSnapshotComplete: true }];
+  await manager.addSingle(sourcePath);
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startInventoryOnlyQueue();
+  await idle;
+  assert.equal(manager.jobs[0].status, 'skipped_duplicate');
+  assert.equal(manager.jobs[0].sourceChangeReport, undefined);
+  assert.equal(manager.catalog.length, 1);
+});
+
+test('same-source drag and parent scan use cached counts without enumerating the child directory', async (t) => {
+  const { root, sourcePath, manager, record } = await refreshFixture(t);
+  const originalOpenDir = fs.opendir;
+  let enumerations = 0;
+  t.mock.method(fs, 'opendir', (...args) => { enumerations += 1; return originalOpenDir(...args); });
+  await manager.addSingle(sourcePath);
+  await manager.addSingle(sourcePath);
+  assert.equal(enumerations, 0);
+  assert.equal(manager.jobs.length, 1);
+  assert.equal(manager.jobs[0].summaryPending, true);
+  manager.jobs = [];
+  manager.config.repositoryDirectory = path.join(root, 'outside-warehouse');
+  const parent = path.join(root, 'parent');
+  await fs.mkdir(parent);
+  const relocated = path.join(parent, 'item');
+  await fs.rename(sourcePath, relocated);
+  record.sourcePath = record.originalSourcePath = relocated;
+  manager.sameSourcePathIndex = null;
+  await manager.scanSource(parent);
+  assert.equal(enumerations, 0);
+  assert.equal(manager.jobs.length, 1);
+  assert.equal(manager.jobs[0].sourceCatalogRecordId, record.id);
+});
+
+test('shutdown retains unfinished inventory refresh as queued in its original batch', async (t) => {
+  const { manager, record } = await refreshFixture(t);
+  const job = manager.createJob({ sourcePath: record.sourcePath, sourceType: 'directory', displayName: 'refresh',
+    fileCount: 1, totalBytes: 8, processingMode: 'inventory_only', intakeModeSelected: true,
+    taskKind: 'catalog_refresh', sourceCatalogRecordId: record.id, taskBatchId: 'batch', ignoreScheduleOnce: true });
+  manager.jobs = [job];
+  let started;
+  const startSignal = new Promise((resolve) => { started = resolve; });
+  manager.prepareExistingSourceOperation = async () => {
+    started();
+    await new Promise((resolve) => manager.abortController.signal.addEventListener('abort', resolve, { once: true }));
+    throw new CancelledError();
+  };
+  const running = manager.startQueue([job.id]);
+  await startSignal;
+  await manager.stopForShutdown();
+  await running;
+  assert.equal(job.status, 'queued');
+  assert.equal(job.taskBatchId, 'batch');
+  assert.equal(manager.catalog[0], record);
+});

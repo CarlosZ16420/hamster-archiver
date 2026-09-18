@@ -79,12 +79,18 @@ const elements = {
   catalogSearch: document.querySelector('#catalog-search'),
   catalogSuggestions: document.querySelector('#catalog-suggestions'),
   catalogTagFilter: document.querySelector('#catalog-tag-filter'),
+  catalogTagFilterMenu: document.querySelector('#catalog-tag-filter-menu'),
+  catalogTagFilterLabel: document.querySelector('#catalog-tag-filter-label'),
+  catalogTagFilterOptions: document.querySelector('#catalog-tag-filter-options'),
   catalogBackupFilter: document.querySelector('#catalog-backup-filter'),
   catalogRatingFilter: document.querySelector('#catalog-rating-filter'),
   catalogDateFilter: document.querySelector('#catalog-date-filter'),
   catalogSort: document.querySelector('#catalog-sort'),
   catalogListView: document.querySelector('#catalog-list-view'),
   catalogGridView: document.querySelector('#catalog-grid-view'),
+  backToLibraryToolbar: document.querySelector('#back-to-library-toolbar'),
+  libraryToolbar: document.querySelector('.library-toolbar'),
+  warehouseBulkbar: document.querySelector('.warehouse-bulkbar'),
   libraryLayout: document.querySelector('#library-layout'),
   warehousePath: document.querySelector('#warehouse-path'),
   userDataPath: document.querySelector('#user-data-path'),
@@ -93,6 +99,7 @@ const elements = {
   catalogSelectionActions: document.querySelector('#catalog-selection-actions'),
   addTagsSelected: document.querySelector('#add-tags-selected'),
   updateBackupSelected: document.querySelector('#update-backup-selected'),
+  refreshDirectoriesSelected: document.querySelector('#refresh-directories-selected'),
   compressUncompressedSelected: document.querySelector('#compress-uncompressed-selected'),
   undoCatalog: document.querySelector('#undo-catalog'),
   deleteCatalogSelected: document.querySelector('#delete-catalog-selected'),
@@ -126,7 +133,8 @@ const elements = {
   restoreOriginalSourcesHelp: document.querySelector('#restore-original-sources-help'),
   catalogPagination: document.querySelector('#catalog-pagination'),
   catalogPageStatus: document.querySelector('#catalog-page-status'),
-  catalogPageSelect: document.querySelector('#catalog-page-select'),
+  catalogPageInput: document.querySelector('#catalog-page-input'),
+  catalogPageOptions: document.querySelector('#catalog-page-options'),
   catalogPagePrev: document.querySelector('#catalog-page-prev'),
   catalogPageNext: document.querySelector('#catalog-page-next'),
   metricInventory: document.querySelector('#metric-inventory'),
@@ -141,9 +149,13 @@ const elements = {
   warehouseDiscovery: document.querySelector('#warehouse-discovery'),
   warehouseStatisticsDialog: document.querySelector('#warehouse-statistics-dialog'),
   warehouseStatisticsContent: document.querySelector('#warehouse-statistics-content'),
+  warehouseTagsDialog: document.querySelector('#warehouse-tags-dialog'),
+  warehouseTagsContent: document.querySelector('#warehouse-tags-content'),
   thumbnailLightbox: document.querySelector('#thumbnail-lightbox'),
   queueSimilarityReportDialog: document.querySelector('#queue-similarity-report-dialog'),
   queueSimilarityReportContent: document.querySelector('#queue-similarity-report-content'),
+  sourceChangeReportDialog: document.querySelector('#source-change-report-dialog'),
+  sourceChangeReportContent: document.querySelector('#source-change-report-content'),
   similarityWhitelistDialog: document.querySelector('#similarity-whitelist-dialog'),
   similarityWhitelistForm: document.querySelector('#similarity-whitelist-form'),
   similarityWhitelistInput: document.querySelector('#similarity-whitelist-input'),
@@ -179,12 +191,15 @@ const elements = {
   onboardingCelebration: document.querySelector('#onboarding-celebration'),
   intakePreviewSettings: document.querySelector('#intake-preview-settings'),
   smallItemFilterCard: document.querySelector('#small-item-filter-card'),
+  integrationList: document.querySelector('#integration-list'),
+  codexSkillMode: document.querySelector('#codex-skill-mode'),
   toast: document.querySelector('#toast')
 };
 
 const statusLabels = {
   awaiting_confirmation: '等待确认',
   awaiting_duplicate_confirmation: '重复待确认',
+  awaiting_source_change_confirmation: '目录变化待确认',
   awaiting_anomaly_confirmation: '大小异常待核验',
   awaiting_trash_safety_confirmation: '回收站安全警告',
   queued: '等待压缩',
@@ -208,11 +223,14 @@ function jobStatusLabel(job) {
     ? '等待下次入库'
     : job?.status === 'queued' && job?.intakeModeSelected === false
     ? '待选入库方式'
+    : job?.status === 'queued' && job?.taskKind === 'catalog_refresh'
+    ? '等待更新目录'
     : statusLabel(job?.status);
 }
 
 let currentState = null;
 let activeCatalogId = null;
+let activeSourceChangeJobId = null;
 let catalogDetailRequest = 0;
 let nextScanToken = 0;
 let activeScanToken = null;
@@ -231,10 +249,15 @@ let lightboxContext = null;
 let catalogPage = 1;
 let activeActivityDateFilter = '';
 const CATALOG_PAGE_SIZE = 24;
-const CATALOG_GRID_MIN_CARD = 230;
-const CATALOG_GRID_MAX_CARD = 280;
-const CATALOG_GRID_IDEAL_CARD = 252;
-const CATALOG_GRID_GAP = 16;
+const POSSIBLE_DUPLICATE_FILTER = '__possible_duplicate__';
+const UNCOMPRESSED_TAG = '未压缩';
+const CATALOG_GRID_SIZES = {
+  small: { min: 160, max: 200, ideal: 180, gap: 12 },
+  medium: { min: 200, max: 240, ideal: 220, gap: 14 },
+  large: { min: 230, max: 280, ideal: 252, gap: 16 }
+};
+let catalogThumbnailSize = localStorage.getItem('hamster-catalog-thumbnail-size') || 'medium';
+if (!Object.hasOwn(CATALOG_GRID_SIZES, catalogThumbnailSize)) catalogThumbnailSize = 'medium';
 const CATALOG_GRID_ROWS_PER_PAGE = 4;
 let catalogGridColumns = 4;
 let catalogResizeTimer = 0;
@@ -259,6 +282,15 @@ const thumbnailPending = new Map();
 const THUMBNAIL_CACHE_LIMIT = 300;
 const selectedJobIds = new Set();
 const selectedCatalogIds = new Set();
+let catalogSelectionAnchorId = null;
+let cancelCatalogMarquee = null;
+const catalogColumns = window.hamsterCatalogColumns.bind({
+  layout: elements.libraryLayout,
+  list: elements.catalogList,
+  translateDom: node => i18n?.translateDom(node),
+  onStart: () => cancelCatalogMarquee?.()
+});
+let libraryToolbarFrame = 0;
 let onboardingOffered = false;
 let onboardingActive = false;
 let onboardingStep = 0;
@@ -291,6 +323,7 @@ function updateLanguageToggle(locale = i18n?.getLocale?.() || 'zh-CN') {
 function selectInterfaceLanguage(nextLocale) {
   i18n?.setLocale(nextLocale);
   updateLanguageToggle(nextLocale);
+  updateCatalogThumbnailButton();
   updateLocaleSensitiveWarehouseText();
   if (onboardingActive) renderOnboardingStep();
   void saveConfig();
@@ -427,10 +460,25 @@ function confirmUser(message, options = {}) {
   elements.confirmDialogMessage.textContent = t(message);
   elements.acceptConfirmDialog.textContent = t(options.confirmLabel || '继续');
   elements.cancelConfirmDialog.textContent = t(options.cancelLabel || '取消');
+  elements.cancelConfirmDialog.dataset.result = options.cancelResult || '';
+  const extraChoice = document.querySelector('#extra-confirm-dialog');
+  extraChoice.hidden = !options.extraLabel;
+  extraChoice.textContent = t(options.extraLabel || '逐项确认');
   elements.acceptConfirmDialog.className = `button ${options.tone === 'danger' ? 'danger' : 'primary'}`;
+  document.querySelector('#confirm-dialog-suppress-option').hidden = !options.suppressible;
+  document.querySelector('#confirm-dialog-suppress').checked = false;
   elements.confirmDialog.showModal();
   elements.acceptConfirmDialog.focus();
   return new Promise((resolve) => { settleConfirmDialog = resolve; });
+}
+
+async function confirmDirectoryRefresh(message, title = '更新目录') {
+  if (localStorage.getItem('hamster-suppress-directory-refresh-notice') === 'true') return true;
+  const accepted = await confirmUser(message, { title, confirmLabel: '开始检查', suppressible: true });
+  if (accepted && document.querySelector('#confirm-dialog-suppress').checked) {
+    localStorage.setItem('hamster-suppress-directory-refresh-notice', 'true');
+  }
+  return accepted;
 }
 
 const onboardingSteps = [
@@ -580,7 +628,8 @@ function renderOnboardingStep() {
 }
 
 function maybeStartOnboarding(state) {
-  if (onboardingOffered || state?.config?.suppressOnboarding || (state?.catalog || []).length > 0) return;
+  if (onboardingOffered || state?.catalogLoading || state?.catalogLoadError ||
+      state?.config?.suppressOnboarding || Number(state?.catalogCount) > 0 || (state?.catalog || []).length > 0) return;
   onboardingOffered = true;
   onboardingActive = true;
   onboardingStep = 0;
@@ -785,6 +834,7 @@ function makeItemCount(tag, className, count) {
 }
 
 function updateLocaleSensitiveWarehouseText() {
+  updateCatalogSelectionControls();
   for (const node of document.querySelectorAll('[data-catalog-date]')) {
     const rating = node.hasAttribute('data-catalog-rating') ? Number(node.dataset.catalogRating) : null;
     node.textContent = catalogDateText(node.dataset.catalogDate, node.dataset.catalogDateLabel || '', rating);
@@ -797,6 +847,8 @@ function updateLocaleSensitiveWarehouseText() {
   }
   if (currentWarehouseInsights) renderWarehouseInsights(currentWarehouseInsights);
   if (elements.warehouseStatisticsDialog?.open) renderWarehouseStatistics();
+  updateTagFilterOptions(currentState?.catalog || []);
+  if (elements.warehouseTagsDialog?.open) renderWarehouseTags();
 }
 
 function formatDecimalGb(bytes) {
@@ -857,13 +909,14 @@ function updateActivityDateFilterControl() {
 }
 
 async function applyActivityDateFilter(date) {
+  resetCatalogSelection();
   activeActivityDateFilter = String(date || '');
   catalogPage = 1;
   updateActivityDateFilterControl();
   hideActivityTooltip();
   activatePage('library-page');
   await refreshCatalog();
-  document.querySelector('.library-toolbar')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  returnToLibraryToolbar();
 }
 
 function renderWarehouseInsights(insights) {
@@ -1068,6 +1121,58 @@ function openWarehouseStatistics() {
   if (!elements.warehouseStatisticsDialog.open) elements.warehouseStatisticsDialog.showModal();
 }
 
+function warehouseTagEntries(catalog = currentState?.catalog || []) {
+  const counts = new Map();
+  for (const record of catalog) {
+    for (const tag of record.tags || []) {
+      if (!tag || tag === UNCOMPRESSED_TAG || tag === '可能重复') continue;
+      counts.set(tag, (counts.get(tag) || 0) + 1);
+    }
+  }
+  return [
+    {
+      value: POSSIBLE_DUPLICATE_FILTER,
+      label: '可能重复',
+      special: true,
+      count: catalog.filter((record) => Boolean(record.possibleDuplicate)).length
+    },
+    {
+      value: UNCOMPRESSED_TAG,
+      label: UNCOMPRESSED_TAG,
+      special: true,
+      count: catalog.filter((record) => record.archiveState === 'uncompressed').length
+    },
+    ...[...counts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right, 'zh-CN'))
+      .map(([label, count]) => ({ value: label, label, special: false, count }))
+  ];
+}
+
+function appendTagEntryLabel(parent, entry, className = '') {
+  parent.append(entry.special
+    ? make('span', className, entry.label)
+    : makeUserText('span', className, entry.label));
+}
+
+function renderWarehouseTags() {
+  if (!elements.warehouseTagsContent) return;
+  const grid = make('div', 'warehouse-tags-grid');
+  for (const entry of warehouseTagEntries()) {
+    const button = make('button', `warehouse-tag-card${entry.special ? ' special' : ''}`);
+    button.type = 'button';
+    button.dataset.warehouseTagFilter = entry.value;
+    appendTagEntryLabel(button, entry, 'warehouse-tag-name');
+    button.append(makeItemCount('span', 'warehouse-tag-count', entry.count));
+    grid.append(button);
+  }
+  elements.warehouseTagsContent.replaceChildren(grid);
+}
+
+function openWarehouseTags() {
+  renderWarehouseTags();
+  if (!elements.warehouseTagsDialog.open) elements.warehouseTagsDialog.showModal();
+}
+
 elements.activityGrid?.addEventListener('pointerover', (event) => {
   const cell = event.target.closest('.activity-cell');
   if (cell) showActivityTooltip(cell, event.clientX, event.clientY);
@@ -1107,8 +1212,9 @@ if (elements.activityScroll && 'ResizeObserver' in window) {
 }
 
 async function refreshWarehouseInsights(force = false) {
+  if (currentState?.catalogLoading) return null;
   const signature = JSON.stringify((currentState?.catalog || []).map((record) => [
-    record.id, record.inventoryDate, record.originalBytes, record.tags
+    record.id, record.inventoryDate, record.originalBytes, record.archiveState, record.possibleDuplicate, record.tags
   ]));
   if (!force && signature === warehouseInsightsSignature && currentWarehouseInsights) return currentWarehouseInsights;
   const insights = await safely(() => window.archiveApp.getWarehouseInsights());
@@ -1393,6 +1499,7 @@ function updateVolumeControls({ unitChanged = false, normalize = true } = {}) {
 function renderConfig(config) {
   i18n?.setLocale(config.language || 'zh-CN');
   updateLanguageToggle(config.language === 'en-US' ? 'en-US' : 'zh-CN');
+  updateCatalogThumbnailButton();
   elements.intakeDirectory.value = config.intakeDirectory || '';
   elements.archiveOutputDirectory.value = config.archiveOutputDirectory || '';
   elements.archiveStagingDirectory.value = config.archiveStagingDirectory ||
@@ -1516,7 +1623,9 @@ function renderJobs(jobs) {
       aiBadge.title = `${t('AI 请求')}：${job.mcpRequestId}`;
       nameLine.append(aiBadge);
     }
-    if (job.sourceCatalogRecordId) nameLine.append(make('span', 'queue-origin-badge', '库内项目压缩'));
+    if (job.taskKind === 'catalog_refresh') nameLine.append(make('span', 'queue-origin-badge uncompressed', '更新目录'));
+    else if (job.taskKind === 'pending_existing') nameLine.append(make('span', 'queue-origin-badge', '待核对原目录'));
+    else if (job.sourceCatalogRecordId) nameLine.append(make('span', 'queue-origin-badge', '库内项目压缩'));
     else if (job.processingMode === 'inventory_only') nameLine.append(make('span', 'queue-origin-badge uncompressed', '未压缩入库'));
     nameLine.append(copyName, openName);
     nameCell.append(nameLine, makeUserText('small', '', job.sourcePath));
@@ -1548,7 +1657,10 @@ function renderJobs(jobs) {
     if (!job.sourceCatalogRecordId && currentState?.config?.similarityReportEnabled !== false && hasCatalogSimilarity) {
       actionCell.append(actionButton('相似报告', 'similarity-report', job.id, 'ghost'));
     }
-    if (job.status === 'awaiting_confirmation' && job.confirmationReasons?.includes('large_task')) {
+    if (job.status === 'awaiting_confirmation' && job.backupLocationConfirmation) {
+      actionCell.append(actionButton('确认备份位置', 'confirm-backup-location', job.id, 'confirm'));
+    }
+    if (job.status === 'awaiting_confirmation' && !job.backupLocationConfirmation && job.confirmationReasons?.includes('large_task')) {
       const requestedVolumeBytes = Number(job.archiveVolumeBytes);
       const configuredVolumeBytes = job.archiveVolumeEnabled === true &&
         Number.isInteger(requestedVolumeBytes) &&
@@ -1565,6 +1677,9 @@ function renderJobs(jobs) {
         'confirm'
       ));
     }
+    if (job.status === 'awaiting_source_change_confirmation') {
+      actionCell.append(actionButton('查看变化并决定', 'source-change-report', job.id, 'confirm'));
+    }
     if (job.status === 'awaiting_anomaly_confirmation') {
       actionCell.append(
         actionButton('核验后确认入库', 'confirm-anomaly', job.id, 'confirm'),
@@ -1574,7 +1689,7 @@ function renderJobs(jobs) {
     if (job.status === 'awaiting_trash_safety_confirmation') {
       actionCell.append(actionButton('确认安全警告', 'acknowledge-trash-safety', job.id, 'danger-link'));
     }
-    if (['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation', 'inventorying', 'compressing', 'verifying', 'failed'].includes(job.status)) {
+    if (['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation', 'awaiting_source_change_confirmation', 'inventorying', 'compressing', 'verifying', 'failed'].includes(job.status)) {
       actionCell.append(actionButton('取消', 'cancel', job.id));
     }
     if (['failed', 'cancelled'].includes(job.status)) {
@@ -1611,43 +1726,52 @@ function updateCatalogSelectionControls() {
   const pageIds = currentCatalogPageRecords.map((record) => record.id);
   const selectedResultCount = pageIds.filter((id) => selectedCatalogIds.has(id)).length;
   elements.catalogSelectionCount.textContent = t(`已选 ${selectedCatalogIds.size} 项`);
+  const offPageCount = selectedCatalogIds.size - selectedResultCount;
+  if (offPageCount > 0) elements.catalogSelectionCount.textContent += ` · ${t(`其中 ${offPageCount} 项不在当前页`)}`;
+  elements.catalogSelectionCount.title = elements.catalogSelectionCount.textContent;
   elements.addTagsSelected.disabled = selectedCatalogIds.size === 0;
   elements.updateBackupSelected.disabled = selectedCatalogIds.size === 0;
+  elements.refreshDirectoriesSelected.disabled = !(currentState?.catalog || []).some((record) =>
+    selectedCatalogIds.has(record.id) && record.archiveState === 'uncompressed' &&
+    record.sourceType === 'directory' && Boolean(record.originalSourcePath));
   elements.compressUncompressedSelected.disabled = !(currentState?.catalog || []).some((record) =>
     selectedCatalogIds.has(record.id) && record.archiveState === 'uncompressed');
   elements.deleteCatalogSelected.disabled = selectedCatalogIds.size === 0;
   elements.catalogSelectionActions.hidden = false;
   elements.selectAllCatalog.checked = pageIds.length > 0 && selectedResultCount === pageIds.length;
   elements.selectAllCatalog.indeterminate = selectedResultCount > 0 && selectedResultCount < pageIds.length;
+  elements.selectAllCatalog.disabled = Boolean(currentState?.catalogLoading) || pageIds.length === 0;
+  const label = t(elements.selectAllCatalog.checked ? '取消全部选择' : '全选当前页');
+  elements.selectAllCatalog.setAttribute('aria-label', label);
+  elements.selectAllCatalog.title = label;
 }
 
-function catalogGridLayout() {
+function catalogGridLayout(size = catalogThumbnailSize) {
+  const { min, max, ideal, gap } = CATALOG_GRID_SIZES[size];
   let width = elements.catalogList.clientWidth;
   if (!width) width = Math.max(0, window.innerWidth - 88);
-  if (!width) return { columns: catalogGridColumns, cardWidth: CATALOG_GRID_IDEAL_CARD, justify: 'start' };
-  const minimumColumns = Math.max(1, Math.ceil((width + CATALOG_GRID_GAP) /
-    (CATALOG_GRID_MAX_CARD + CATALOG_GRID_GAP)));
-  const maximumColumns = Math.max(1, Math.floor((width + CATALOG_GRID_GAP) /
-    (CATALOG_GRID_MIN_CARD + CATALOG_GRID_GAP)));
+  if (!width) return { columns: catalogGridColumns, cardWidth: ideal, justify: 'start' };
+  const minimumColumns = Math.max(1, Math.ceil((width + gap) / (max + gap)));
+  const maximumColumns = Math.max(1, Math.floor((width + gap) / (min + gap)));
   let columns;
   if (minimumColumns <= maximumColumns) {
-    const idealColumns = Math.round((width + CATALOG_GRID_GAP) /
-      (CATALOG_GRID_IDEAL_CARD + CATALOG_GRID_GAP));
+    const idealColumns = Math.round((width + gap) / (ideal + gap));
     columns = Math.min(Math.max(idealColumns, minimumColumns), maximumColumns);
   } else {
     columns = maximumColumns;
   }
-  let cardWidth = (width - ((columns - 1) * CATALOG_GRID_GAP)) / columns;
+  let cardWidth = (width - ((columns - 1) * gap)) / columns;
   let justify = 'start';
-  if (cardWidth > CATALOG_GRID_MAX_CARD) {
-    cardWidth = CATALOG_GRID_MAX_CARD;
+  if (cardWidth > max) {
+    cardWidth = max;
     justify = 'center';
   }
   return { columns, cardWidth, justify };
 }
 
 function measureCatalogGridColumns() {
-  return catalogViewMode === 'grid' ? catalogGridLayout().columns : 1;
+  // Pagination follows the original large-card layout, independent of display density.
+  return catalogViewMode === 'grid' ? catalogGridLayout('large').columns : 1;
 }
 
 function applyCatalogGridLayout() {
@@ -1667,13 +1791,17 @@ function catalogPageSize() {
 }
 
 function renderCatalog(catalog) {
+  catalogColumns.cancel();
+  cancelCatalogMarquee?.();
   releaseDetailThumbnails(elements.catalogList);
   currentCatalogResults = catalog;
   if (catalog.length === 0) {
     currentCatalogPageRecords = [];
+    catalogSelectionAnchorId = null;
     updateCatalogSelectionControls();
     elements.catalogPagination.hidden = true;
     elements.catalogList.replaceChildren(make('p', 'muted catalog-empty', '没有符合当前条件的仓库内容'));
+    scheduleLibraryToolbarButton();
     return;
   }
   catalogGridColumns = measureCatalogGridColumns();
@@ -1683,21 +1811,22 @@ function renderCatalog(catalog) {
   catalogPage = Math.min(Math.max(1, catalogPage), pageCount);
   const visibleRecords = ordered.slice((catalogPage - 1) * pageSize, catalogPage * pageSize);
   currentCatalogPageRecords = visibleRecords;
+  if (!visibleRecords.some((record) => record.id === catalogSelectionAnchorId)) catalogSelectionAnchorId = null;
   updateCatalogSelectionControls();
   elements.catalogPagination.hidden = pageCount <= 1;
-  elements.catalogPageStatus.textContent = t(`第 ${catalogPage} / ${pageCount} 页 · 共 ${catalog.length} 项`);
+  elements.catalogPageStatus.textContent = t(`/ ${pageCount} 页 · 共 ${catalog.length} 项`);
   elements.catalogPagePrev.disabled = catalogPage <= 1;
   elements.catalogPageNext.disabled = catalogPage >= pageCount;
-  const pageOptions = Array.from({ length: pageCount }, (_, index) => String(index + 1));
-  if ([...elements.catalogPageSelect.options].map((option) => option.value).join(',') !== pageOptions.join(',')) {
-    elements.catalogPageSelect.replaceChildren(...pageOptions.map((page) => new Option(page, page)));
-  }
-  elements.catalogPageSelect.value = String(catalogPage);
+  closeCatalogPageOptions();
+  elements.catalogPageInput.value = String(catalogPage);
   const fragment = document.createDocumentFragment();
   if (catalogViewMode === 'list') {
     const header = make('div', 'catalog-text-header');
-    for (const label of ['', '名称', '类型', '文件', '大小 / 状态', '标签', '备份位置', '入库时间', '星级']) {
-      header.append(make('span', '', label));
+    header.append(make('span', '', ''));
+    for (const { key, label } of window.hamsterCatalogColumns.columns) {
+      const cell = make('span', `catalog-text-${key}`, label);
+      catalogColumns.decorate(cell, key);
+      header.append(cell);
     }
     fragment.append(header);
   }
@@ -1716,11 +1845,13 @@ function renderCatalog(catalog) {
       button.dataset.recordId = record.id;
       const titleCell = make('span', 'catalog-text-title');
       titleCell.append(makeUserText('strong', '', catalogTitle(record)));
+      titleCell.title = catalogTitle(record);
+      titleCell.dataset.i18nUserText = 'true';
       const tagsCell = make('span', 'catalog-text-tags');
-      for (const tag of catalogTags(record).slice(0, 3)) {
-        tagsCell.append(tag === '未压缩'
-          ? make('span', 'uncompressed-tag', tag)
-          : makeUserText('span', '', tag));
+      for (const tag of catalogTags(record).filter((tag) => tag !== '未压缩')) {
+        const chip = makeUserText('span', '', tag);
+        chip.title = tag;
+        tagsCell.append(chip);
       }
       if (record.possibleDuplicate) tagsCell.append(make('span', 'duplicate-tag', '可能重复'));
       const type = record.recordType === 'manual' ? '手动' : record.sourceType === 'video' ? '视频' : '文件夹';
@@ -1745,7 +1876,12 @@ function renderCatalog(catalog) {
         makeCatalogDate('span', 'catalog-text-date', record.inventoryDate || record.completedAt),
         make('span', 'catalog-text-rating', starText(record.rating))
       );
-      row.append(checkbox, button);
+      const copyName = make('button', 'catalog-copy-name', '复制');
+      copyName.type = 'button';
+      copyName.dataset.copyCatalogName = catalogTitle(record);
+      copyName.setAttribute('aria-label', `复制项目名称 ${catalogTitle(record)}`);
+      copyName.title = '复制项目名称';
+      row.append(checkbox, button, copyName);
       fragment.append(row);
       continue;
     }
@@ -1780,8 +1916,10 @@ function renderCatalog(catalog) {
       : `${record.manifestCount} 个文件${volumeCount > 1 ? ` · ${volumeCount} 卷` : ''}`));
 
     const info = make('div', 'catalog-card-info');
+    const title = makeUserText('strong', '', catalogTitle(record));
+    title.title = catalogTitle(record);
     info.append(
-      makeUserText('strong', '', catalogTitle(record)),
+      title,
       make('span', 'catalog-stars', starText(record.rating)),
       make('small', '', record.recordType === 'manual'
         ? '手动库存条目'
@@ -1813,18 +1951,43 @@ function renderCatalog(catalog) {
     fragment.append(card);
   }
   elements.catalogList.replaceChildren(fragment);
+  catalogColumns.refresh();
   requestAnimationFrame(applyCatalogGridLayout);
+  scheduleLibraryToolbarButton();
 }
 
 function updateTagFilterOptions(catalog) {
-  const selected = elements.catalogTagFilter.value;
-  const possibleDuplicateFilter = '__possible_duplicate__';
-  const tags = [...new Set(catalog.flatMap((record) => record.tags || []))]
-    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
-  elements.catalogTagFilter.replaceChildren(new Option('全部标签', ''));
-  elements.catalogTagFilter.append(new Option('可能重复', possibleDuplicateFilter));
-  for (const tag of tags) elements.catalogTagFilter.append(makeUserOption(tag, tag));
-  elements.catalogTagFilter.value = selected === possibleDuplicateFilter || tags.includes(selected) ? selected : '';
+  const entries = [
+    { value: '', label: '全部标签', special: true },
+    ...warehouseTagEntries(catalog).map(({ value, label, special }) => ({ value, label, special }))
+  ];
+  const selected = entries.some((entry) => entry.value === elements.catalogTagFilter.value)
+    ? elements.catalogTagFilter.value
+    : '';
+  elements.catalogTagFilter.value = selected;
+  elements.catalogTagFilterOptions.replaceChildren();
+  for (const entry of entries) {
+    const button = make('button', 'catalog-tag-filter-option');
+    button.type = 'button';
+    button.dataset.catalogTagFilter = entry.value;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(entry.value === selected));
+    appendTagEntryLabel(button, entry);
+    elements.catalogTagFilterOptions.append(button);
+  }
+  const selectedEntry = entries.find((entry) => entry.value === selected) || entries[0];
+  elements.catalogTagFilterLabel.replaceChildren();
+  appendTagEntryLabel(elements.catalogTagFilterLabel, selectedEntry);
+}
+
+async function applyCatalogTagFilter(value, { returnToToolbar = false } = {}) {
+  elements.catalogTagFilter.value = String(value || '');
+  updateTagFilterOptions(currentState?.catalog || []);
+  resetCatalogSelection();
+  catalogPage = 1;
+  activatePage('library-page');
+  await refreshCatalog();
+  if (returnToToolbar) returnToLibraryToolbar();
 }
 
 function syncCatalogItemState() {
@@ -1837,6 +2000,69 @@ function syncCatalogItemState() {
     if (checkbox) checkbox.checked = selected;
   }
   updateCatalogSelectionControls();
+}
+
+function replaceCatalogSelection(ids) {
+  const next = new Set(ids);
+  if (next.size === selectedCatalogIds.size && [...next].every((id) => selectedCatalogIds.has(id))) return;
+  selectedCatalogIds.clear();
+  for (const id of next) selectedCatalogIds.add(id);
+  syncCatalogItemState();
+}
+
+function resetCatalogSelection() {
+  cancelCatalogMarquee?.();
+  catalogSelectionAnchorId = null;
+  replaceCatalogSelection([]);
+}
+
+function libraryHeaderOffset() {
+  return Math.max(0, document.querySelector('.app-bar')?.getBoundingClientRect().bottom || 0) + 8;
+}
+
+function returnToLibraryToolbar() {
+  const top = window.scrollY + elements.libraryToolbar.getBoundingClientRect().top - libraryHeaderOffset();
+  elements.libraryToolbar.focus({ preventScroll: true });
+  window.scrollTo({ top: Math.max(0, top), behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+}
+
+function scheduleLibraryToolbarButton() {
+  if (libraryToolbarFrame) return;
+  libraryToolbarFrame = requestAnimationFrame(() => {
+    libraryToolbarFrame = 0;
+    const hidden = document.querySelector('#library-page').hidden || Boolean(document.querySelector('dialog[open]')) || onboardingActive;
+    const shouldHide = hidden || elements.warehouseBulkbar.getBoundingClientRect().bottom >= libraryHeaderOffset();
+    if (elements.backToLibraryToolbar.hidden !== shouldHide) elements.backToLibraryToolbar.hidden = shouldHide;
+  });
+}
+
+function updateCatalogThumbnailButton() {
+  const rects = catalogThumbnailSize === 'large'
+    ? [[5.25, 5.25, 6.5, 1.4], [12.25, 12.25, 6.5, 1.4]]
+    : catalogThumbnailSize === 'small'
+      ? [6, 10.5, 15].flatMap((y) => [6, 10.5, 15].map((x) => [x, y, 3, 0.8]))
+      : [7, 13].flatMap((y) => [7, 13].map((x) => [x, y, 4, 1]));
+  elements.catalogGridView.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="1" y="1" width="22" height="22" rx="5" fill="#1C1C1F"/>${rects.map(([x, y, size, radius]) => `<rect x="${x}" y="${y}" width="${size}" height="${size}" rx="${radius}" fill="#F7F7F8"/>`).join('')}</svg>`;
+  const label = t(`缩略图视图 · ${catalogThumbnailSize === 'large' ? '大' : catalogThumbnailSize === 'small' ? '小' : '中'} · 再次点击切换大小`);
+  elements.catalogGridView.title = label;
+  elements.catalogGridView.setAttribute('aria-label', label);
+  elements.catalogGridView.dataset.i18nUserText = 'true';
+}
+
+function setCatalogThumbnailSize(size) {
+  if (!Object.hasOwn(CATALOG_GRID_SIZES, size)) return;
+  cancelCatalogMarquee?.();
+  const headerOffset = libraryHeaderOffset();
+  const anchor = catalogViewMode === 'grid' ? [...elements.catalogList.querySelectorAll('[data-catalog-id]')]
+    .find((item) => item.getBoundingClientRect().bottom > headerOffset && item.getBoundingClientRect().top < window.innerHeight) : null;
+  const anchorTop = anchor?.getBoundingClientRect().top;
+  catalogThumbnailSize = size;
+  localStorage.setItem('hamster-catalog-thumbnail-size', size);
+  updateCatalogThumbnailButton();
+  elements.libraryLayout.dataset.thumbnailSize = size;
+  applyCatalogGridLayout();
+  if (anchor) window.scrollBy({ top: anchor.getBoundingClientRect().top - anchorTop, behavior: 'instant' });
+  scheduleLibraryToolbarButton();
 }
 
 function updateBackupLocationFilterOptions(catalog) {
@@ -1897,6 +2123,8 @@ async function refreshCatalogSuggestions() {
 }
 
 function setCatalogView(mode) {
+  cancelCatalogMarquee?.();
+  catalogSelectionAnchorId = null;
   catalogViewMode = mode === 'grid' ? 'grid' : 'list';
   localStorage.setItem('hamster-catalog-view-v2', catalogViewMode);
   elements.libraryLayout.classList.toggle('grid-mode', catalogViewMode === 'grid');
@@ -1904,7 +2132,8 @@ function setCatalogView(mode) {
   elements.catalogGridView.classList.toggle('active', catalogViewMode === 'grid');
   elements.catalogListView.setAttribute('aria-pressed', String(catalogViewMode === 'list'));
   elements.catalogGridView.setAttribute('aria-pressed', String(catalogViewMode === 'grid'));
-  catalogPage = 1;
+  elements.libraryLayout.dataset.thumbnailSize = catalogThumbnailSize;
+  updateCatalogThumbnailButton();
   renderCatalog(currentCatalogResults);
   requestAnimationFrame(applyCatalogGridLayout);
 }
@@ -2804,6 +3033,13 @@ function renderCatalogDetail(record) {
       openSource.title = sourceLocation.inTrash ? '从回收站复原到原位置' : '打开原文件当前位置';
       sourceLine.append(openSource);
     }
+    if (record.archiveState === 'uncompressed' && record.recordType !== 'manual') {
+      const relocate = make('button', 'mini-copy-button source-open-button', '修改');
+      relocate.type = 'button';
+      relocate.dataset.relocateCatalogSource = record.id;
+      relocate.dataset.sourceType = record.sourceType;
+      sourceLine.append(relocate);
+    }
     heading.append(sourceLine);
   }
   if (record.recordType !== 'manual') {
@@ -2811,7 +3047,7 @@ function renderCatalogDetail(record) {
     const archiveNames = archiveFileNames.join('、');
     const archiveLine = make('p', 'archive-name-line');
     archiveLine.append(document.createTextNode(record.archiveState === 'uncompressed'
-      ? '压缩包：未生成（未压缩）'
+      ? '压缩包：未压缩'
       : `压缩包：${archiveNames || record.archiveBaseName || '无'}`));
     if (archiveNames || record.archiveBaseName) {
       const copy = make('button', 'mini-copy-button', '复制');
@@ -2840,6 +3076,23 @@ function renderCatalogDetail(record) {
     stats.append(backupStat);
   }
   heading.append(stats);
+  if (record.archiveState === 'uncompressed' && record.recordType !== 'manual') {
+    const actions = make('div', 'catalog-detail-actions');
+    if (record.canRefreshDirectory) {
+      const refresh = make('button', 'button secondary', '更新目录');
+      refresh.type = 'button';
+      refresh.dataset.refreshCatalogDirectory = record.id;
+      actions.append(refresh);
+    }
+    const compress = make('button', 'button primary', '压缩入库');
+    compress.type = 'button';
+    compress.dataset.compressCatalogRecord = record.id;
+    actions.append(compress);
+    heading.append(actions);
+    if (record.sourceSnapshotUpdatedAt) heading.append(make('p', 'muted', `目录更新于：${formatCatalogDate(record.sourceSnapshotUpdatedAt)}`));
+    if (record.sourceLocationCheckedAt) heading.append(make('p', 'muted', `上次检查于：${formatCatalogDate(record.sourceLocationCheckedAt)}`));
+  }
+  if (record.coverNeedsReplacement) heading.append(make('p', 'muted', '原自动封面已失效，请选择新的封面。'));
   elements.catalogDetail.append(heading);
   elements.catalogDetail.append(renderCatalogEditor(record));
   elements.catalogDetail.append(renderSimilarProjects(record));
@@ -2938,7 +3191,7 @@ function renderSummary(state) {
   const currentJob = jobs.find((job) => job.id === state.currentJobId);
   document.querySelector('#summary-total').textContent = String(jobs.length);
   document.querySelector('#summary-confirm').textContent = String(jobs.filter((job) => [
-    'awaiting_confirmation', 'awaiting_duplicate_confirmation', 'awaiting_anomaly_confirmation',
+    'awaiting_confirmation', 'awaiting_duplicate_confirmation', 'awaiting_source_change_confirmation', 'awaiting_anomaly_confirmation',
     'awaiting_trash_safety_confirmation'
   ].includes(job.status)).length);
   document.querySelector('#summary-queued').textContent = String(jobs.filter((job) => job.status === 'queued').length);
@@ -2956,7 +3209,7 @@ function renderSummary(state) {
   document.querySelector('#start-queue').disabled = state.running || !jobs.some((job) =>
     ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
   document.querySelector('#start-inventory-only').disabled = state.running || !jobs.some((job) =>
-    !job.sourceCatalogRecordId && ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
+    job.taskKind !== 'catalog_compress' && ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
   if (state.safetyHalt) document.querySelector('#start-queue').disabled = true;
   if (state.safetyHalt) document.querySelector('#start-inventory-only').disabled = true;
   document.querySelector('#scan-source').disabled = Boolean(activeScanToken);
@@ -3009,10 +3262,21 @@ function renderSummary(state) {
 }
 
 function render(state, includeConfig = false) {
+  const catalogWasLoading = Boolean(currentState?.catalogLoading);
   const previousJobs = currentState?.jobs || [];
   const mergedState = currentState
     ? { ...currentState, ...state, catalog: state.catalog || currentState.catalog }
     : state;
+  if (currentState) {
+    const previousById = new Map(previousJobs.map((job) => [job.id, job]));
+    for (const job of mergedState.jobs || []) {
+      if (job.unchangedDirectoryTitle && job.status === 'completed' && previousById.get(job.id)?.status !== 'completed') {
+        const characters = Array.from(job.unchangedDirectoryTitle);
+        const title = characters.length > 15 ? `${characters.slice(0, 15).join('')}…` : job.unchangedDirectoryTitle;
+        showToast(`${title}与本地目录内容一致`);
+      }
+    }
+  }
   for (const jobId of uiState.newlyAutoSkippedJobIds(previousJobs, mergedState.jobs || [])) {
     selectedJobIds.delete(jobId);
   }
@@ -3023,29 +3287,137 @@ function render(state, includeConfig = false) {
   renderJobs(state.jobs);
   renderLogs(state.logs);
   updateCatalogSelectionControls();
-  void refreshWarehouseInsights();
-  if (discoveryMode === 'loading') {
-    void showRandomWalk(false);
-  } else if (discoveryMode === 'empty' && state.catalog.length > 0) {
-    void showRandomWalk(false);
-  } else if (discoveryMode === 'random' && currentDiscoveryRecordIds.some((id) =>
-    !state.catalog.some((record) => record.id === id))) {
-    void showRandomWalk(false);
+  const catalogControls = [elements.catalogSearch, elements.catalogTagFilter, elements.catalogBackupFilter,
+    elements.catalogRatingFilter, elements.catalogSort];
+  for (const control of catalogControls) control.disabled = Boolean(state.catalogLoading);
+  elements.catalogTagFilterMenu.classList.toggle('disabled', Boolean(state.catalogLoading));
+  elements.catalogTagFilterMenu.querySelector('summary')
+    ?.setAttribute('aria-disabled', String(Boolean(state.catalogLoading)));
+  if (state.catalogLoading) elements.catalogTagFilterMenu.removeAttribute('open');
+  if (state.catalogLoading) elements.selectAllCatalog.disabled = true;
+  else updateCatalogSelectionControls();
+  if (state.catalogLoading) {
+    const loaded = Number(state.catalogLoadProgress?.loaded) || 0;
+    const total = Number(state.catalogLoadProgress?.total) || 0;
+    const detail = total > 0 ? `（${loaded}/${total}）` : '';
+    elements.catalogPagination.hidden = true;
+    elements.catalogList.replaceChildren(make('p', 'muted catalog-empty', `正在后台加载仓库${detail}…`));
+  } else if (state.catalogLoadError) {
+    elements.catalogPagination.hidden = true;
+    elements.catalogList.replaceChildren(make('p', 'muted catalog-empty', `仓库加载失败：${state.catalogLoadError}`));
+  } else {
+    void refreshWarehouseInsights();
+    if (catalogWasLoading && Number(state.catalogCount) === 0) renderCatalog([]);
+  }
+  if (!state.catalogLoading && !state.catalogLoadError) {
+    if (discoveryMode === 'loading') {
+      void showRandomWalk(false);
+    } else if (discoveryMode === 'empty' && state.catalog.length > 0) {
+      void showRandomWalk(false);
+    } else if (discoveryMode === 'random' && currentDiscoveryRecordIds.some((id) =>
+      !state.catalog.some((record) => record.id === id))) {
+      void showRandomWalk(false);
+    }
   }
   const nextCatalogSignature = JSON.stringify(state.catalog.map((record) => [
     record.id, record.metadataUpdatedAt, record.completedAt, record.coverThumbnailPath,
-    record.backupLocation, record.rating, record.tags
+    record.backupLocation, record.rating, record.archiveState, record.possibleDuplicate, record.tags
   ]));
   if (nextCatalogSignature !== catalogStateSignature) {
     catalogStateSignature = nextCatalogSignature;
     catalogRefreshDirty = true;
     updateTagFilterOptions(state.catalog);
     updateBackupLocationFilterOptions(state.catalog);
-      if (currentCatalogResults.length === 0 && state.catalog.length > 0) void refreshCatalog();
+    if (!state.catalogLoading && currentCatalogResults.length === 0 && state.catalog.length > 0) void refreshCatalog();
   }
   i18n?.translateDom(document.body);
   if (onboardingActive && state.catalog.length > 0) closeOnboarding();
-  else maybeStartOnboarding(state);
+  else if (!state.catalogLoading) maybeStartOnboarding(state);
+}
+
+function renderSourceChangeReport(report) {
+  elements.sourceChangeReportContent.replaceChildren();
+  const summary = report.summary || {};
+  const overview = make('section', 'queue-similarity-overview');
+  overview.append(
+    makeUserText('h3', '', report.targetRecord?.title || report.displayName),
+    make('p', '', `新增 ${summary.addedFiles || 0} 个文件 · 修改 ${summary.modifiedFiles || 0} 个文件 · 删除 ${summary.deletedFiles || 0} 个文件`),
+    make('p', '', `新增目录 ${summary.addedDirectories || 0} 个 · 删除目录 ${summary.deletedDirectories || 0} 个 · 未变化 ${summary.unchangedFiles || 0} 个文件`)
+  );
+  const location = make('div', 'queue-similarity-location');
+  location.append(make('span', '', '本地内容'), makeUserText('code', '', report.sourcePath));
+  overview.append(location);
+  if ((report.sameSourceRecords || []).length > 0) {
+    overview.append(make('p', 'muted', `另有 ${report.sameSourceRecords.length} 个仓库项目使用相同的原文件位置。`));
+    const related = make('details', 'queue-similarity-directory');
+    related.append(make('summary', '', '查看同源项目'));
+    for (const record of report.sameSourceRecords) {
+      const entry = make('p', 'muted');
+      entry.append(makeUserText('strong', '', record.title),
+        document.createTextNode(` · ${formatCatalogDate(record.updatedAt)} · ${record.fileCount || 0} · ${formatBytes(record.totalBytes)} · ${t('未压缩')}`));
+      related.append(entry);
+    }
+    overview.append(related);
+  }
+  overview.append(make('p', 'muted', report.processingMode === 'inventory_only'
+    ? '将按本地当前内容更新仓库目录及必要预览，不会修改原文件。'
+    : '将按本地当前内容压缩，并按现有设置在流程完成后处理原文件。'));
+  overview.append(make('p', 'muted', '覆盖仓库记录，保留标签、备注等整理信息；不会把旧文件写回本地。'));
+  elements.sourceChangeReportContent.append(overview);
+  const changes = [
+    ...(report.addedFiles || []).map((file) => ({ type: '新增', path: file.relativePath })),
+    ...(report.modifiedFiles || []).map((file) => ({ type: '修改', path: file.after?.relativePath || file.before?.relativePath })),
+    ...(report.deletedFiles || []).map((file) => ({ type: '删除', path: file.relativePath })),
+    ...(report.addedDirectories || []).map((path) => ({ type: '新增目录', path })),
+    ...(report.deletedDirectories || []).map((path) => ({ type: '删除目录', path }))
+  ];
+  const section = make('section', 'queue-similarity-directory');
+  section.append(make('h3', '', '变化明细'));
+  if (changes.length === 0) section.append(make('p', 'muted', '旧清单信息不足，请确认是否采用本次完整扫描结果。'));
+  else {
+    const list = make('div', 'source-change-list');
+    let page = 0;
+    const controls = make('div', 'dialog-actions');
+    const previous = make('button', 'button ghost', '上一页');
+    const next = make('button', 'button ghost', '下一页');
+    previous.type = next.type = 'button';
+    const label = make('span', 'muted');
+    const drawPage = () => {
+      list.replaceChildren();
+      for (const change of changes.slice(page * 200, (page + 1) * 200)) {
+        const row = make('div', 'source-change-row');
+        row.append(make('strong', '', change.type), makeUserText('code', '', change.path));
+        list.append(row);
+      }
+      previous.disabled = page === 0;
+      next.disabled = (page + 1) * 200 >= changes.length;
+      label.textContent = `${page + 1} / ${Math.ceil(changes.length / 200)}`;
+    };
+    previous.addEventListener('click', () => { page -= 1; drawPage(); });
+    next.addEventListener('click', () => { page += 1; drawPage(); });
+    controls.append(previous, label, next);
+    drawPage();
+    section.append(list, controls);
+  }
+  elements.sourceChangeReportContent.append(section);
+}
+
+async function loadSourceChangeReport(jobId) {
+  activeSourceChangeJobId = jobId;
+  elements.sourceChangeReportContent.replaceChildren(make('p', 'muted', '正在读取对比报告…'));
+  if (!elements.sourceChangeReportDialog.open) elements.sourceChangeReportDialog.showModal();
+  const report = await safely(() => window.archiveApp.getSourceChangeReport(jobId));
+  if (!report || activeSourceChangeJobId !== jobId) return;
+  renderSourceChangeReport(report);
+}
+
+async function resolveSourceChange(action) {
+  if (!activeSourceChangeJobId) return;
+  const state = await safely(() => window.archiveApp.resolveSourceChange(activeSourceChangeJobId, action));
+  if (!state) return;
+  elements.sourceChangeReportDialog.close();
+  activeSourceChangeJobId = null;
+  render(state);
 }
 
 async function saveConfig() {
@@ -3072,13 +3444,18 @@ async function prepareQueueIntake() {
 }
 
 function activatePage(pageId) {
+  catalogColumns.cancel();
+  cancelCatalogMarquee?.();
   const button = document.querySelector(`.nav-button[data-page="${pageId}"]`);
   if (!button) return;
     document.querySelectorAll('.nav-button').forEach((item) => item.classList.toggle('active', item === button));
     document.querySelectorAll('.app-page').forEach((page) => { page.hidden = page.id !== button.dataset.page; });
     if (button.dataset.page === 'library-page' && currentState) {
       if (catalogRefreshDirty || Date.now() - lastCatalogRefreshAt > 10_000) void refreshCatalog();
-      requestAnimationFrame(applyCatalogGridLayout);
+      requestAnimationFrame(() => {
+        applyCatalogGridLayout();
+        catalogColumns.refresh();
+      });
     }
     if (button.dataset.page === 'workspace-page' && suspendedQueueSimilarityReport && activeQueueSimilarityReportJobId) {
       suspendedQueueSimilarityReport = false;
@@ -3086,6 +3463,7 @@ function activatePage(pageId) {
         if (!elements.queueSimilarityReportDialog.open) elements.queueSimilarityReportDialog.showModal();
       });
     }
+    scheduleLibraryToolbarButton();
 }
 
 document.querySelectorAll('.nav-button').forEach((button) => {
@@ -3101,6 +3479,9 @@ document.querySelectorAll('.action-menu').forEach((menu) => {
 document.addEventListener('pointerdown', (event) => {
   for (const menu of document.querySelectorAll('.action-menu[open]')) {
     if (!menu.contains(event.target)) menu.removeAttribute('open');
+  }
+  if (elements.catalogTagFilterMenu.open && !elements.catalogTagFilterMenu.contains(event.target)) {
+    elements.catalogTagFilterMenu.removeAttribute('open');
   }
   if (similarityWhitelistPopover &&
       !similarityWhitelistPopover.contains(event.target) &&
@@ -3138,6 +3519,61 @@ document.querySelectorAll('[data-pick]').forEach((button) => {
 document.querySelector('.settings-col').addEventListener('input', updateSettingsDigests);
 document.querySelector('.settings-col').addEventListener('change', updateSettingsDigests);
 document.querySelector('#save-settings').addEventListener('click', saveConfig);
+async function refreshIntegrationStatus() {
+  const statuses = await safely(() => window.archiveApp.getIntegrationStatus());
+  if (!statuses) return;
+  for (const status of statuses) {
+    const card = elements.integrationList?.querySelector(`[data-integration="${CSS.escape(status.id)}"]`);
+    if (!card) continue;
+    card.dataset.enabled = String(status.enabled);
+    card.dataset.modified = String(status.modified);
+    card.dataset.missing = String(status.missing);
+    const label = card.querySelector('.integration-status');
+    const button = card.querySelector('.integration-toggle');
+    if (status.modified) label.textContent = t('检测到用户修改');
+    else if (status.missing) label.textContent = t('需要修复');
+    else if (status.enabled) label.textContent = t('已启用');
+    else if (status.id === 'windows-odr') label.textContent = status.available ? t('可以启用预览') : t('当前不可安全启用');
+    else label.textContent = t('未启用');
+    if (status.modified) {
+      button.textContent = t('请先检查');
+      button.disabled = true;
+    } else if (status.missing) {
+      button.textContent = t('修复');
+      button.disabled = false;
+    } else if (status.id === 'windows-odr') {
+      button.textContent = t('检测');
+      button.disabled = !status.available;
+    } else {
+      button.textContent = status.enabled ? t('禁用') : t(status.id === 'generic-mcp' ? '生成' : '启用');
+      button.disabled = false;
+    }
+    if (status.id === 'codex-skill' && status.explicitOnly !== undefined) {
+      elements.codexSkillMode.value = status.explicitOnly ? 'explicit' : 'named';
+    }
+  }
+  i18n?.translateDom(elements.integrationList);
+}
+elements.integrationList?.addEventListener('click', async (event) => {
+  const button = event.target.closest('.integration-toggle');
+  if (!button) return;
+  const card = button.closest('[data-integration]');
+  const adapterId = card.dataset.integration;
+  button.disabled = true;
+  const enabled = card.dataset.enabled === 'true';
+  const modified = card.dataset.modified === 'true';
+  const missing = card.dataset.missing === 'true';
+  const adapterOptions = adapterId === 'codex-skill'
+    ? { explicitOnly: elements.codexSkillMode.value === 'explicit' }
+    : {};
+  const result = missing && !modified
+    ? await safely(() => window.archiveApp.repairIntegration(adapterId, adapterOptions))
+    : enabled
+    ? await safely(() => window.archiveApp.uninstallIntegration(adapterId))
+    : await safely(() => window.archiveApp.installIntegration(adapterId, adapterOptions));
+  if (result) showToast(missing ? '实验接入已修复' : enabled ? '接入已关闭；仓库和用户资料未更改' : '实验接入已启用');
+  await refreshIntegrationStatus();
+});
 window.archiveApp.onUpdateProgress((progress) => {
   if (!elements.updateStatusChip || progress?.stage === 'prepared') return;
   elements.updateStatusChip.dataset.state = 'checking';
@@ -3151,6 +3587,14 @@ window.archiveApp.onUpdateProgress((progress) => {
   const dialogProgress = document.querySelector('.update-dialog-error[data-busy="true"]');
   if (dialogProgress) dialogProgress.textContent = elements.updateStatusLabel.textContent;
 });
+elements.backToLibraryToolbar.addEventListener('click', returnToLibraryToolbar);
+window.addEventListener('scroll', scheduleLibraryToolbarButton, { passive: true });
+window.addEventListener('resize', scheduleLibraryToolbarButton, { passive: true });
+new MutationObserver(scheduleLibraryToolbarButton).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['open', 'hidden'] });
+if ('ResizeObserver' in window) {
+  const toolbarResizeObserver = new ResizeObserver(scheduleLibraryToolbarButton);
+  for (const element of [elements.libraryToolbar, elements.warehouseBulkbar, elements.catalogList, document.querySelector('.app-bar')]) toolbarResizeObserver.observe(element);
+}
 elements.updateStatusChip?.addEventListener('click', async () => {
   const result = await runUpdateCheck();
   if (result?.launchFailed) showToast(t('自动更新未能启动，程序仍停留在当前版本'));
@@ -3167,7 +3611,8 @@ elements.confirmDialogForm.addEventListener('submit', (event) => {
   event.preventDefault();
   closeConfirmDialog(true);
 });
-elements.cancelConfirmDialog.addEventListener('click', () => closeConfirmDialog(false));
+elements.cancelConfirmDialog.addEventListener('click', () => closeConfirmDialog(elements.cancelConfirmDialog.dataset.result || false));
+document.querySelector('#extra-confirm-dialog').addEventListener('click', () => closeConfirmDialog('individual'));
 document.querySelector('#close-confirm-dialog').addEventListener('click', () => closeConfirmDialog(false));
 elements.confirmDialog.addEventListener('cancel', (event) => {
   event.preventDefault();
@@ -3432,7 +3877,10 @@ document.addEventListener('paste', async (event) => {
 
 document.querySelector('#start-queue').addEventListener('click', async () => {
   const state = await safely(() => window.archiveApp.startQueue());
-  if (state) render(state);
+  if (state) {
+    render(state);
+    if (state.archiveStartNotice) showToast(state.archiveStartNotice, true);
+  }
 });
 
 async function beginInventoryOnlyQueue() {
@@ -3531,6 +3979,17 @@ elements.taskList.addEventListener('click', async (event) => {
     if (action === 'similarity-report') {
       await loadQueueSimilarityReport(jobId);
       return;
+    }
+    if (action === 'source-change-report') {
+      await loadSourceChangeReport(jobId);
+      return;
+    }
+    if (action === 'confirm-backup-location') {
+      const job = currentState?.jobs?.find((candidate) => candidate.id === jobId);
+      if (!job?.backupLocationConfirmation) return;
+      const choice = await chooseBackupLocation(job.backupLocationConfirmation.originalLocation, job.backupLocationConfirmation.currentLocation);
+      if (choice !== true && choice !== 'keep') return;
+      state = await safely(() => window.archiveApp.confirmTask(jobId, { updateBackupLocation: choice === true }));
     }
     if (action === 'confirm') state = await safely(() => window.archiveApp.confirmTask(jobId));
     if (action === 'confirm-anomaly') {
@@ -3650,31 +4109,75 @@ elements.catalogList.addEventListener('change', (event) => {
   updateCatalogSelectionControls();
 });
 
-elements.catalogList.addEventListener('click', async (event) => {
-  if (Date.now() < suppressSelectionClickUntil) return;
-  const button = event.target.closest('button[data-record-id]');
-  if (!button) return;
-  if (event.ctrlKey || event.metaKey) {
-    if (selectedCatalogIds.has(button.dataset.recordId)) selectedCatalogIds.delete(button.dataset.recordId);
-    else selectedCatalogIds.add(button.dataset.recordId);
-    syncCatalogItemState();
+document.querySelector('#close-source-change-report').addEventListener('click', () => {
+  elements.sourceChangeReportDialog.close();
+  activeSourceChangeJobId = null;
+});
+elements.sourceChangeReportDialog.addEventListener('cancel', () => { activeSourceChangeJobId = null; });
+document.querySelector('#skip-source-change').addEventListener('click', () => { void resolveSourceChange('skip'); });
+document.querySelector('#new-source-change').addEventListener('click', () => { void resolveSourceChange('new_independent'); });
+document.querySelector('#overwrite-source-change').addEventListener('click', () => { void resolveSourceChange('overwrite'); });
+
+// Route modified clicks before the native checkbox default or the detail-opening handler.
+elements.catalogList.addEventListener('click', (event) => {
+  if (Date.now() < suppressSelectionClickUntil || currentState?.catalogLoading) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
     return;
   }
-  await loadCatalogDetails(button.dataset.recordId);
-  if (catalogViewMode === 'grid') {
-    elements.catalogDetail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (event.target.closest('button[data-copy-catalog-name]')) return;
+  const item = event.target.closest('[data-catalog-id]');
+  if (!item) {
+    if (!event.target.closest('input, button, a, select, textarea, .catalog-text-header')) resetCatalogSelection();
+    return;
   }
+  const id = item.dataset.catalogId;
+  const toggle = event.ctrlKey || event.metaKey;
+  if (event.shiftKey || toggle) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (event.shiftKey) {
+      const pageIds = currentCatalogPageRecords.map((record) => record.id);
+      replaceCatalogSelection(uiState.catalogRangeSelection(pageIds, catalogSelectionAnchorId, id, selectedCatalogIds, toggle));
+      if (!pageIds.includes(catalogSelectionAnchorId)) catalogSelectionAnchorId = id;
+    } else {
+      if (selectedCatalogIds.has(id)) selectedCatalogIds.delete(id);
+      else selectedCatalogIds.add(id);
+      catalogSelectionAnchorId = id;
+      syncCatalogItemState();
+    }
+    // Canceling a checkbox click restores its native checked state after dispatch.
+    queueMicrotask(syncCatalogItemState);
+    return;
+  }
+  catalogSelectionAnchorId = id;
+}, true);
+
+elements.catalogList.addEventListener('click', async (event) => {
+  if (Date.now() < suppressSelectionClickUntil) return;
+  const copyName = event.target.closest('button[data-copy-catalog-name]');
+  if (copyName) {
+    const copied = await safely(() => window.archiveApp.copyText(copyName.dataset.copyCatalogName));
+    if (copied) showToast('项目名称已复制');
+    return;
+  }
+  const button = event.target.closest('button[data-record-id]');
+  if (!button) return;
+  await loadCatalogDetails(button.dataset.recordId);
+  elements.catalogDetail.scrollIntoView({ behavior: 'smooth', block: 'start' });
 });
 
 let searchTimer;
 function runCatalogSearchNow() {
   clearTimeout(searchTimer);
+  resetCatalogSelection();
   catalogPage = 1;
   void refreshCatalog();
   void refreshCatalogSuggestions();
 }
 elements.catalogSearch.addEventListener('input', () => {
   clearTimeout(searchTimer);
+  resetCatalogSelection();
   catalogPage = 1;
   searchTimer = setTimeout(runCatalogSearchNow, 280);
 });
@@ -3686,6 +4189,7 @@ elements.catalogSuggestions.addEventListener('mousedown', (event) => {
   event.preventDefault();
   elements.catalogSearch.value = button.dataset.suggestionTitle;
   elements.catalogSuggestions.hidden = true;
+  resetCatalogSelection();
   catalogPage = 1;
   void refreshCatalog();
 });
@@ -3693,12 +4197,34 @@ elements.catalogSearch.addEventListener('blur', () => {
   setTimeout(() => { elements.catalogSuggestions.hidden = true; }, 150);
 });
 
-for (const filter of [elements.catalogTagFilter, elements.catalogBackupFilter, elements.catalogRatingFilter, elements.catalogSort]) {
-  filter.addEventListener('change', () => { catalogPage = 1; void refreshCatalog(); });
+for (const filter of [elements.catalogBackupFilter, elements.catalogRatingFilter]) {
+  filter.addEventListener('change', () => { resetCatalogSelection(); catalogPage = 1; void refreshCatalog(); });
 }
+elements.catalogTagFilterMenu.querySelector('summary').addEventListener('click', (event) => {
+  if (!elements.catalogTagFilterMenu.classList.contains('disabled')) return;
+  event.preventDefault();
+});
+elements.catalogTagFilterOptions.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-catalog-tag-filter]');
+  if (!button || elements.catalogTagFilterMenu.classList.contains('disabled')) return;
+  elements.catalogTagFilterMenu.removeAttribute('open');
+  void applyCatalogTagFilter(button.dataset.catalogTagFilter);
+});
+elements.catalogSort.addEventListener('change', () => {
+  cancelCatalogMarquee?.();
+  catalogSelectionAnchorId = null;
+  catalogPage = 1;
+  void refreshCatalog();
+});
 elements.catalogDateFilter?.addEventListener('click', () => { void applyActivityDateFilter(''); });
 elements.catalogListView.addEventListener('click', () => setCatalogView('list'));
-elements.catalogGridView.addEventListener('click', () => setCatalogView('grid'));
+elements.catalogGridView.addEventListener('click', () => {
+  if (catalogViewMode !== 'grid') setCatalogView('grid');
+  else {
+    const cycle = ['large', 'medium', 'small'];
+    setCatalogThumbnailSize(cycle[(cycle.indexOf(catalogThumbnailSize) + 1) % cycle.length]);
+  }
+});
 window.addEventListener('resize', () => {
   hideSimilarityWhitelistAction();
   if (catalogViewMode !== 'grid') return;
@@ -3733,7 +4259,7 @@ document.querySelector('#refresh-catalog').addEventListener('click', async () =>
 document.querySelector('#set-warehouse-location').addEventListener('click', async () => {
   const result = await safely(() => window.archiveApp.changeWarehouseLocation());
   if (!result) return;
-  selectedCatalogIds.clear();
+  resetCatalogSelection();
   activeCatalogId = null;
   catalogDetailRequest += 1;
   catalogStateSignature = '';
@@ -3750,7 +4276,7 @@ document.querySelector('#export-warehouse').addEventListener('click', async () =
   if (result) showToast(`仓库压缩包已导出：${result.path}`);
 });
 document.querySelector('#import-warehouse').addEventListener('click', async () => {
-  if (!await confirmUser('选择外部仓库压缩包（.zip）后，会把其中的仓库记录、缩略图和解压密码记录一并并入当前仓库。相同 ID 的记录会跳过；外部压缩包实体不会被移动或删除。是否继续？', { title: '并入外部仓库', confirmLabel: '选择并导入' })) return;
+  if (!await confirmUser('选择外部仓库压缩包（.zip）后，会把其中的仓库记录、缩略图和解压密码记录一并并入当前仓库。相同 ID 的记录会跳过；外部压缩包实体不会被移动或删除。是否继续？', { title: '导入仓库', confirmLabel: '选择并导入' })) return;
   const result = await safely(() => window.archiveApp.importWarehouse());
   if (!result) return;
   render(result.state);
@@ -3833,31 +4359,127 @@ window.archiveApp.onSimilarityRebuildProgress((progress) => {
     }, 2500);
   }
 });
-elements.catalogPagePrev.addEventListener('click', () => {
-  if (catalogPage <= 1) return;
-  catalogPage -= 1;
+function changeCatalogPage(targetPage, { scrollToList = true } = {}) {
+  const pageCount = Math.max(1, Math.ceil(currentCatalogResults.length / catalogPageSize()));
+  const nextPage = Math.min(pageCount, Math.max(1, targetPage));
+  if (nextPage === catalogPage) return;
+  const scrollPosition = { left: window.scrollX, top: window.scrollY };
+  cancelCatalogMarquee?.();
+  catalogSelectionAnchorId = null;
+  catalogPage = nextPage;
   renderCatalog(currentCatalogResults);
-  elements.catalogList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (scrollToList) {
+    elements.catalogList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else {
+    requestAnimationFrame(() => window.scrollTo(scrollPosition.left, scrollPosition.top));
+  }
+}
+elements.catalogPagePrev.addEventListener('click', () => {
+  changeCatalogPage(catalogPage - 1);
 });
 elements.catalogPageNext.addEventListener('click', () => {
-  catalogPage += 1;
-  renderCatalog(currentCatalogResults);
-  elements.catalogList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  changeCatalogPage(catalogPage + 1);
 });
-elements.catalogPageSelect.addEventListener('change', () => {
-  catalogPage = Math.max(1, Number(elements.catalogPageSelect.value) || 1);
-  renderCatalog(currentCatalogResults);
-  elements.catalogList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+function jumpToEnteredCatalogPage() {
+  closeCatalogPageOptions();
+  const pageCount = Math.max(1, Math.ceil(currentCatalogResults.length / catalogPageSize()));
+  const entered = elements.catalogPageInput.value.trim();
+  const number = Number(entered);
+  if (!/^[+-]?\d+$/.test(entered) || !Number.isSafeInteger(number)) {
+    elements.catalogPageInput.value = String(catalogPage);
+    return;
+  }
+  const targetPage = Math.min(pageCount, Math.max(1, number));
+  elements.catalogPageInput.value = String(targetPage);
+  changeCatalogPage(targetPage);
+}
+let activeCatalogPageOption = null;
+function closeCatalogPageOptions() {
+  elements.catalogPageOptions.hidden = true;
+  elements.catalogPageInput.setAttribute('aria-expanded', 'false');
+  elements.catalogPageInput.removeAttribute('aria-activedescendant');
+  activeCatalogPageOption = null;
+}
+function activateCatalogPageOption(page) {
+  activeCatalogPageOption = page;
+  for (const option of elements.catalogPageOptions.children) {
+    option.classList.toggle('active', Number(option.dataset.page) === page);
+  }
+  const option = elements.catalogPageOptions.querySelector(`[data-page="${page}"]`);
+  elements.catalogPageInput.setAttribute('aria-activedescendant', option.id);
+  const panel = elements.catalogPageOptions;
+  if (option.offsetTop < panel.scrollTop) panel.scrollTop = option.offsetTop;
+  else if (option.offsetTop + option.offsetHeight > panel.scrollTop + panel.clientHeight) {
+    panel.scrollTop = option.offsetTop + option.offsetHeight - panel.clientHeight;
+  }
+}
+function openCatalogPageOptions() {
+  const pageCount = Math.max(1, Math.ceil(currentCatalogResults.length / catalogPageSize()));
+  const fragment = document.createDocumentFragment();
+  for (let page = 1; page <= pageCount; page += 1) {
+    const option = make('button', 'catalog-page-option', String(page));
+    option.type = 'button';
+    option.tabIndex = -1;
+    option.id = `catalog-page-option-${page}`;
+    option.dataset.page = String(page);
+    option.setAttribute('role', 'option');
+    option.setAttribute('aria-selected', String(page === catalogPage));
+    fragment.append(option);
+  }
+  elements.catalogPageOptions.replaceChildren(fragment);
+  elements.catalogPageOptions.hidden = false;
+  elements.catalogPageInput.setAttribute('aria-expanded', 'true');
+  const currentOption = elements.catalogPageOptions.querySelector(`[data-page="${catalogPage}"]`);
+  elements.catalogPageOptions.scrollTop = Math.max(0, currentOption.offsetTop - elements.catalogPageOptions.clientHeight / 2);
+}
+elements.catalogPageInput.addEventListener('focus', openCatalogPageOptions);
+elements.catalogPageInput.addEventListener('click', () => {
+  if (elements.catalogPageOptions.hidden) openCatalogPageOptions();
+});
+elements.catalogPageInput.addEventListener('blur', jumpToEnteredCatalogPage);
+elements.catalogPageInput.addEventListener('input', () => {
+  closeCatalogPageOptions();
+  openCatalogPageOptions();
+});
+elements.catalogPageOptions.addEventListener('mousedown', (event) => {
+  if (event.target.closest('button[data-page]')) event.preventDefault();
+});
+elements.catalogPageOptions.addEventListener('click', (event) => {
+  const option = event.target.closest('button[data-page]');
+  if (!option) return;
+  elements.catalogPageInput.value = option.dataset.page;
+  jumpToEnteredCatalogPage();
+});
+elements.catalogPageInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeCatalogPageOptions();
+    elements.catalogPageInput.value = String(catalogPage);
+    return;
+  }
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (elements.catalogPageOptions.hidden) openCatalogPageOptions();
+    const pageCount = Math.max(1, Math.ceil(currentCatalogResults.length / catalogPageSize()));
+    activateCatalogPageOption(Math.min(pageCount, Math.max(1, (activeCatalogPageOption ?? catalogPage) + (event.key === 'ArrowDown' ? 1 : -1))));
+    return;
+  }
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  if (activeCatalogPageOption !== null) elements.catalogPageInput.value = String(activeCatalogPageOption);
+  jumpToEnteredCatalogPage();
 });
 document.addEventListener('keydown', (event) => {
   if (!['ArrowLeft', 'ArrowRight'].includes(event.key) || event.defaultPrevented ||
       event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
   if (document.querySelector('#library-page')?.hidden || document.querySelector('dialog[open]')) return;
   if (event.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
-  const target = event.key === 'ArrowLeft' ? elements.catalogPagePrev : elements.catalogPageNext;
+  const previous = event.key === 'ArrowLeft';
+  const target = previous ? elements.catalogPagePrev : elements.catalogPageNext;
   if (elements.catalogPagination.hidden || target.disabled) return;
   event.preventDefault();
-  target.click();
+  changeCatalogPage(catalogPage + (previous ? -1 : 1), { scrollToList: false });
 });
 
 document.addEventListener('click', (event) => {
@@ -3920,6 +4542,17 @@ document.querySelector('#random-walk').addEventListener('click', async () => {
 for (const selector of ['#open-inventory-statistics', '#open-storage-statistics']) {
   document.querySelector(selector).addEventListener('click', openWarehouseStatistics);
 }
+document.querySelector('#open-warehouse-tags').addEventListener('click', openWarehouseTags);
+document.querySelector('#close-warehouse-tags').addEventListener('click', () => elements.warehouseTagsDialog.close());
+elements.warehouseTagsDialog.addEventListener('click', (event) => {
+  if (event.target === elements.warehouseTagsDialog) elements.warehouseTagsDialog.close();
+});
+elements.warehouseTagsContent.addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-warehouse-tag-filter]');
+  if (!button) return;
+  elements.warehouseTagsDialog.close();
+  void applyCatalogTagFilter(button.dataset.warehouseTagFilter, { returnToToolbar: true });
+});
 document.querySelector('#close-warehouse-statistics').addEventListener('click', () => elements.warehouseStatisticsDialog.close());
 elements.warehouseStatisticsDialog.addEventListener('click', (event) => {
   if (event.target === elements.warehouseStatisticsDialog) elements.warehouseStatisticsDialog.close();
@@ -3937,6 +4570,52 @@ elements.warehouseDiscovery.addEventListener('click', (event) => {
 });
 
 elements.catalogDetail.addEventListener('click', (event) => {
+  const refreshDirectory = event.target.closest('button[data-refresh-catalog-directory]');
+  if (refreshDirectory) {
+    void (async () => {
+      if (!await confirmDirectoryRefresh(
+        '检查原地址的文件与仓库是否一致，不会改动原文件。若有新增内容，则更新至仓库。若有修改与删除，则需要您手动确认才会更新至仓库。',
+        '更新目录'
+      )) return;
+      const result = await safely(() => window.archiveApp.queueCatalogRecordsForRefresh([refreshDirectory.dataset.refreshCatalogDirectory]));
+      if (!result) return;
+      render(result.state);
+      if (result.failedCount > 0) showToast(result.failures?.[0]?.reason || `${result.failedCount} 个项目未能更新；${result.queuedCount} 个已开始检查`, true);
+      else showToast('已开始检查目录变化');
+    })();
+    return;
+  }
+  const relocateSource = event.target.closest('button[data-relocate-catalog-source]');
+  if (relocateSource) {
+    void (async () => {
+      const sourceType = relocateSource.dataset.sourceType === 'video' ? 'video' : 'directory';
+      const selected = sourceType === 'video'
+        ? await safely(() => window.archiveApp.chooseSingle('video'))
+        : await safely(() => window.archiveApp.chooseDirectory(''));
+      if (!selected) return;
+      if (!await confirmUser(
+        '这里只会更新仓库记录指向的原文件位置，不会立即重建清单。下次更新目录或压缩入库时会重新核对内容。',
+        { title: '重新设置原文件位置', confirmLabel: '更新位置' }
+      )) return;
+      const updated = await safely(() => window.archiveApp.updateCatalogSourcePath(
+        relocateSource.dataset.relocateCatalogSource,
+        selected,
+        sourceType
+      ));
+      if (!updated) return;
+      renderCatalogDetail(updated);
+      const state = await safely(() => window.archiveApp.getState());
+      if (state) render(state);
+      await refreshCatalog(true);
+      showToast('原文件位置已更新');
+    })();
+    return;
+  }
+  const compressRecord = event.target.closest('button[data-compress-catalog-record]');
+  if (compressRecord) {
+    void queueUncompressedRecords([compressRecord.dataset.compressCatalogRecord]);
+    return;
+  }
   const openSource = event.target.closest('button[data-open-source]');
   if (openSource) {
     void safely(() => window.archiveApp.openCatalogSource(openSource.dataset.openSource)).then(async (result) => {
@@ -4036,11 +4715,30 @@ document.addEventListener('click', (event) => {
 });
 
 elements.selectAllCatalog.addEventListener('change', () => {
-  for (const record of currentCatalogPageRecords) {
-    if (elements.selectAllCatalog.checked) selectedCatalogIds.add(record.id);
-    else selectedCatalogIds.delete(record.id);
-  }
+  if (currentState?.catalogLoading || currentCatalogPageRecords.length === 0) return;
+  cancelCatalogMarquee?.();
+  catalogSelectionAnchorId = null;
+  const allSelected = currentCatalogPageRecords.every((record) => selectedCatalogIds.has(record.id));
+  if (allSelected) selectedCatalogIds.clear();
+  else for (const record of currentCatalogPageRecords) selectedCatalogIds.add(record.id);
   syncCatalogItemState();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.defaultPrevented || document.querySelector('#library-page').hidden || document.querySelector('dialog[open]')) return;
+  if (event.key === 'Escape' && cancelCatalogMarquee) {
+    event.preventDefault();
+    cancelCatalogMarquee();
+    return;
+  }
+  if (event.target.closest('input:not([type="checkbox"]), textarea, select, [contenteditable="true"]') || currentState?.catalogLoading) return;
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'a' && elements.catalogList.contains(event.target)) {
+    event.preventDefault();
+    for (const record of currentCatalogPageRecords) selectedCatalogIds.add(record.id);
+    syncCatalogItemState();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    resetCatalogSelection();
+  }
 });
 
 function closeBulkTagsDialog() {
@@ -4077,31 +4775,37 @@ elements.updateBackupSelected.addEventListener('click', () => {
   elements.bulkBackupInput.focus();
 });
 
-async function queueSelectedUncompressedRecords() {
+function chooseBackupLocation(originalLocation, currentLocation) {
+  return confirmUser(`原项目记录的备份位置为：${originalLocation}，当前压缩设置的备份位置为：${currentLocation}，备份位置是否更新？`, {
+    title: '更新备份位置', confirmLabel: '更新并继续', cancelLabel: '保留原位置', cancelResult: 'keep'
+  });
+}
+
+async function queueUncompressedRecords(recordIds) {
+  const selectedIds = new Set(recordIds || []);
   const configuredLocation = currentState?.config?.recordBackupLocation
     ? String(currentState.config.backupLocation || '').trim()
     : '';
   const conflicts = configuredLocation
     ? (currentState?.catalog || []).filter((record) =>
-      selectedCatalogIds.has(record.id) &&
+      selectedIds.has(record.id) &&
       record.archiveState === 'uncompressed' &&
       String(record.backupLocation || '').trim() &&
       String(record.backupLocation || '').trim() !== configuredLocation)
     : [];
-  const updateExistingBackupLocation = conflicts.length > 0
-    ? await confirmUser(
-      `所选未压缩项目中有 ${conflicts.length} 项已经记录了不同的备份位置。本次压缩入库设置为「${configuredLocation}」。是否用本次设置更新这些项目的备份位置？`,
-      {
-        title: '更新备份位置',
-        confirmLabel: '更新并继续',
-        cancelLabel: '保留原位置并继续',
-        tone: 'warning'
-      }
-    )
-    : false;
+  let backupChoice = 'keep';
+  if (conflicts.length > 0) {
+    backupChoice = selectedIds.size === 1
+      ? await chooseBackupLocation(conflicts[0].backupLocation, configuredLocation)
+      : await confirmUser(
+        `所选项目有${conflicts.length}项的备份位置与当前压缩设置不同，当前压缩设置为“备份位置：${configuredLocation}”，是否将项目备份位置更新为当前设置？`,
+        { title: '更新备份位置', confirmLabel: '更新并继续', cancelLabel: '保留原位置', cancelResult: 'keep', extraLabel: '逐项确认' }
+      );
+    if (backupChoice !== true && backupChoice !== 'keep' && backupChoice !== 'individual') return;
+  }
   const result = await safely(() => window.archiveApp.queueCatalogRecordsForCompression(
-    [...selectedCatalogIds],
-    { updateExistingBackupLocation }
+    [...selectedIds],
+    { updateExistingBackupLocation: backupChoice === true, confirmBackupLocationIndividually: backupChoice === 'individual' }
   ));
   if (!result) return;
   render(result.state);
@@ -4114,6 +4818,32 @@ async function queueSelectedUncompressedRecords() {
     showToast('所选内容中没有可加入队列的未压缩项目', true);
   }
 }
+
+async function queueSelectedUncompressedRecords() {
+  return queueUncompressedRecords([...selectedCatalogIds]);
+}
+
+elements.refreshDirectoriesSelected.addEventListener('click', () => {
+  void (async () => {
+    const eligible = (currentState?.catalog || []).filter((record) =>
+      selectedCatalogIds.has(record.id) && record.archiveState === 'uncompressed' &&
+      record.sourceType === 'directory' && Boolean(record.originalSourcePath));
+    if (eligible.length === 0) return;
+    const excludedCount = selectedCatalogIds.size - eligible.length;
+    const excludedNote = excludedCount > 0 ? `；另有 ${excludedCount} 项不是可更新的未压缩目录，将自动排除` : '';
+    if (!await confirmDirectoryRefresh(
+      `将检查 ${eligible.length} 个目录与仓库清单的差异${excludedNote}。更新不会修改、移动或删除原文件。`,
+      '批量更新目录'
+    )) return;
+    const result = await safely(() => window.archiveApp.queueCatalogRecordsForRefresh(eligible.map((record) => record.id)));
+    if (!result) return;
+    render(result.state);
+    if (result.failedCount > 0) {
+      const firstReason = result.failures?.[0]?.reason ? `：${result.failures[0].reason}` : '';
+      showToast(`${result.failedCount} 个项目未能开始${firstReason}；${result.queuedCount} 个已开始检查`, true);
+    } else showToast(`已开始检查 ${result.queuedCount} 个目录`);
+  })();
+});
 
 elements.compressUncompressedSelected.addEventListener('click', () => {
   if (currentState?.config?.suppressCatalogCompressionRisk) {
@@ -4338,13 +5068,113 @@ enableMarqueeSelection(
   selectedJobIds,
   () => renderJobs(currentState?.jobs || [])
 );
-enableMarqueeSelection(
-  elements.catalogList,
-  '.catalog-card[data-catalog-id]',
-  (item) => item.dataset.catalogId,
-  selectedCatalogIds,
-  syncCatalogItemState
-);
+function enableCatalogMarqueeSelection() {
+  const container = elements.catalogList;
+  container.addEventListener('dragstart', (event) => event.preventDefault());
+  container.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || event.pointerType !== 'mouse' || currentState?.catalogLoading || document.querySelector('dialog[open]')) return;
+    if (event.target.closest('input, a, select, textarea, [contenteditable="true"], .catalog-text-header') ||
+        (event.target.closest('button') && !event.target.closest('button[data-record-id]'))) return;
+    cancelCatalogMarquee?.();
+    const initialSelection = new Set(selectedCatalogIds);
+    const initialAnchor = catalogSelectionAnchorId;
+    const mode = event.ctrlKey || event.metaKey ? 'toggle' : event.shiftKey ? 'add' : 'replace';
+    const start = { x: event.clientX + window.scrollX, y: event.clientY + window.scrollY, scrollLeft: container.scrollLeft };
+    let pointer = { x: event.clientX, y: event.clientY };
+    let active = false;
+    let frame = 0;
+    let marquee = null;
+    let lastHitIds = [];
+    event.preventDefault();
+    (event.target.closest('button[data-record-id]') || container).focus({ preventScroll: true });
+
+    const update = () => {
+      const bounds = container.getBoundingClientRect();
+      const originX = start.x - window.scrollX - (container.scrollLeft - start.scrollLeft);
+      const originY = start.y - window.scrollY;
+      const left = Math.max(bounds.left, Math.min(originX, pointer.x));
+      const top = Math.min(originY, pointer.y);
+      const right = Math.min(bounds.right, Math.max(originX, pointer.x));
+      const bottom = Math.max(originY, pointer.y);
+      Object.assign(marquee.style, { left: `${left}px`, top: `${top}px`, width: `${Math.max(0, right - left)}px`, height: `${bottom - top}px` });
+      lastHitIds = [];
+      for (const item of container.querySelectorAll('[data-catalog-id]')) {
+        const rect = item.getBoundingClientRect();
+        if (left < right && rect.left < right && rect.right > left && rect.top < bottom && rect.bottom > top) lastHitIds.push(item.dataset.catalogId);
+      }
+      replaceCatalogSelection(uiState.catalogMarqueeSelection(initialSelection, lastHitIds, mode));
+    };
+    const tick = () => {
+      if (!active) return;
+      const bounds = container.getBoundingClientRect();
+      const header = libraryHeaderOffset();
+      if (pointer.x >= bounds.left && pointer.x <= bounds.right) {
+        const edge = 48;
+        const speed = pointer.y < header + edge ? -Math.min(18, (header + edge - pointer.y) / 3)
+          : pointer.y > window.innerHeight - edge ? Math.min(18, (pointer.y - window.innerHeight + edge) / 3) : 0;
+        if (speed) window.scrollBy({ top: speed, behavior: 'instant' });
+      }
+      update();
+      frame = requestAnimationFrame(tick);
+    };
+    const finish = (cancelled = false) => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('blur', cancel);
+      container.removeEventListener('lostpointercapture', cancel);
+      cancelAnimationFrame(frame);
+      cancelCatalogMarquee = null;
+      if (container.hasPointerCapture(event.pointerId)) container.releasePointerCapture(event.pointerId);
+      marquee?.remove();
+      document.body.classList.remove('marquee-selecting');
+      if (!active) return;
+      suppressSelectionClickUntil = Date.now() + 250;
+      if (cancelled) {
+        catalogSelectionAnchorId = initialAnchor;
+        replaceCatalogSelection(initialSelection);
+      } else catalogSelectionAnchorId = lastHitIds.at(-1) || null;
+      active = false;
+      syncCatalogItemState();
+    };
+    const move = (moveEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return;
+      if (!(moveEvent.buttons & 1)) { finish(); return; }
+      pointer = { x: moveEvent.clientX, y: moveEvent.clientY };
+      if (!active && Math.hypot(pointer.x + window.scrollX - start.x, pointer.y + window.scrollY - start.y) < 6) return;
+      moveEvent.preventDefault();
+      if (!active) {
+        active = true;
+        marquee = make('div', 'selection-marquee');
+        document.body.append(marquee);
+        document.body.classList.add('marquee-selecting');
+        container.setPointerCapture(event.pointerId);
+        frame = requestAnimationFrame(tick);
+      }
+      update();
+    };
+    const up = (upEvent) => {
+      if (upEvent.pointerId !== event.pointerId) return;
+      if (active) {
+        pointer = { x: upEvent.clientX, y: upEvent.clientY };
+        update();
+      }
+      finish();
+    };
+    const cancel = (cancelEvent) => {
+      if (cancelEvent?.pointerId != null && cancelEvent.pointerId !== event.pointerId) return;
+      finish(true);
+    };
+    cancelCatalogMarquee = cancel;
+    window.addEventListener('pointermove', move, { passive: false });
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('blur', cancel);
+    container.addEventListener('lostpointercapture', cancel);
+  });
+}
+
+enableCatalogMarqueeSelection();
 
 window.archiveApp.onStateChanged((state) => render(state));
 window.archiveApp.onTaskProgress((progress) => {
@@ -4372,6 +5202,8 @@ window.archiveApp.onCatalogChanged((catalog) => {
   if (!currentState) return;
   currentState.catalog = catalog;
   catalogRefreshDirty = true;
+  updateTagFilterOptions(catalog);
+  if (elements.warehouseTagsDialog.open) renderWarehouseTags();
   updateCatalogSelectionControls();
   void refreshWarehouseInsights();
   const libraryVisible = !document.querySelector('#library-page').hidden;
@@ -4388,6 +5220,7 @@ document.querySelector('.post-processing-group')?.setAttribute('open', '');
 safely(async () => {
   const state = await window.archiveApp.getState();
   render(state, true);
+  await refreshIntegrationStatus();
 });
 // Check silently after the first render so a slow or unavailable network never
 // delays opening the workbench. The checker itself aborts after a short timeout.

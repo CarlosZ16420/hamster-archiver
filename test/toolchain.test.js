@@ -16,7 +16,7 @@ test('runtime ranges stay synchronized while dependencies and third-party source
   assert.equal(report.node, process.versions.node);
   assert.equal(report.supportedNode, '^22.12.0 || ^24.0.0');
   assert.equal(report.supportedNpm, '^10.0.0 || ^11.0.0');
-  assert.equal(report.packages.electron, '43.4.0');
+  assert.equal(report.packages.electron, '43.7.1');
   assert.equal(report.packages.resedit, '3.0.2');
   for (const tool of Object.values(dependencyLock.bundledTools)) {
     assert.match(tool.source.sha256, /^[a-f0-9]{64}$/);

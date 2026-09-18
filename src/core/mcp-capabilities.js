@@ -4,7 +4,6 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { isVideoFile } = require('./constants');
-const { normalizeForComparison } = require('./paths');
 
 const MAX_PAGE = 100;
 const SOURCE_DISPOSITIONS = ['keep', 'trash', 'move'];
@@ -144,7 +143,8 @@ function jobSummary(job) {
       exactDuplicateMatches: (job.exactDuplicateMatches || []).slice(0, 5),
       nameDuplicateMatches: (job.nameDuplicateMatches || []).slice(0, 5),
       possibleActions,
-      needsDesktop: ['awaiting_anomaly_confirmation', 'awaiting_trash_safety_confirmation'].includes(status)
+      sourceChangeReport: job.sourceChangeReport || null,
+      needsDesktop: ['awaiting_source_change_confirmation', 'awaiting_anomaly_confirmation', 'awaiting_trash_safety_confirmation'].includes(status)
     }),
     decisionToken: decisionToken(job)
   };
@@ -152,10 +152,6 @@ function jobSummary(job) {
 
 function compactState(manager) {
   return queueSummary(manager);
-}
-
-function intakeRequestFingerprint(value) {
-  return crypto.createHash('sha256').update(JSON.stringify(stable(value))).digest('hex');
 }
 
 function pathsOverlap(left, right) {
@@ -274,13 +270,20 @@ const capabilities = [
   ['settings.get', 'settings', 'Read all user settings and directories with password status only.', {}, true],
   ['settings.patch', 'settings', 'Update only the supplied common settings through product validation. Byte fields use binary units. Password text is accepted but never returned; an empty password clears it for future archives.', { patch: objectSchema(settingsPatchProperties) }, false, ['patch']],
   ['settings.intake_preferences', 'settings', 'Save the archive output and keep/trash/move preference used by future AI intake.', {
-    archiveOutputDirectory: stringSchema(), sourceDisposition: { type: 'string', enum: SOURCE_DISPOSITIONS }, processedSourceDirectory: stringSchema()
+    archiveOutputDirectory: stringSchema(), archiveStagingDirectory: stringSchema(),
+    sourceDisposition: { type: 'string', enum: SOURCE_DISPOSITIONS }, processedSourceDirectory: stringSchema()
   }, false, ['archiveOutputDirectory', 'sourceDisposition']],
   ['intake.plan', 'intake', 'Inspect explicit source boundaries and required preferences without scanning, hashing, queuing or changing settings.', {
     paths: { type: 'array', minItems: 1, maxItems: 100, items: stringSchema() },
     mode: { type: 'string', enum: ['archive', 'inventory_only'] }
   }, true, ['paths', 'mode']],
   ['intake.scan', 'intake', 'Scan an intake directory and add discovered items to the real product queue. This is not a read-only probe.', { directory: stringSchema(), scanToken: { type: 'string', maxLength: 128 } }, false, ['directory']],
+  ['intake.submit', 'intake', 'Submit one complete inventory or archive request. The application validates, queues, restores and returns a trustworthy task receipt.', {
+    requestId: optionalStringSchema(128), paths: { type: 'array', minItems: 1, maxItems: 100, items: stringSchema() },
+    mode: { type: 'string', enum: ['archive', 'inventory_only'] },
+    archiveOutputDirectory: stringSchema(), archiveStagingDirectory: stringSchema(),
+    sourceDisposition: { type: 'string', enum: SOURCE_DISPOSITIONS }, processedSourceDirectory: stringSchema()
+  }, false, ['paths', 'mode']],
   ['intake.add_batch', 'intake', 'Add up to 100 folders or videos and optionally start their selected mode.', {
     requestId: stringSchema(128), paths: { type: 'array', minItems: 1, maxItems: 100, items: stringSchema() },
     mode: { type: 'string', enum: ['archive', 'inventory_only'] }, start: { type: 'boolean' },
@@ -288,6 +291,15 @@ const capabilities = [
   }, false, ['requestId', 'paths', 'mode']],
   ['queue.state', 'queue', 'Read compact, paginated queue state. Filter by requestId or jobId when polling to avoid unrelated jobs.', { requestId: optionalStringSchema(128), jobId: optionalStringSchema(128), ...pageProperties }, true],
   ['queue.request', 'queue', 'Read the retained receipt for one AI request, including jobs removed from the visible queue.', { requestId: stringSchema(128) }, true, ['requestId']],
+  ['task.get', 'task', 'Read one application task receipt.', { taskId: stringSchema(128) }, true, ['taskId']],
+  ['task.wait', 'task', 'Wait for one task for a bounded time. Timeout ends waiting and never cancels the task.', {
+    taskId: stringSchema(128), timeoutSeconds: { type: 'integer', minimum: 0, maximum: 60 }
+  }, true, ['taskId']],
+  ['task.resolve', 'task', 'Resolve only the pending jobs that belong to this task.', {
+    taskId: stringSchema(128), jobId: optionalStringSchema(128), action: { type: 'string', enum: ['continue', 'skip'] }
+  }, false, ['taskId', 'action']],
+  ['task.retry', 'task', 'Retry only failed or cancelled jobs in this task.', { taskId: stringSchema(128) }, false, ['taskId']],
+  ['task.cancel', 'task', 'Safely cancel unfinished jobs in this task.', { taskId: stringSchema(128) }, false, ['taskId']],
   ['queue.start_archive', 'queue', 'Choose archive mode and start eligible jobs.', {}, false],
   ['queue.start_inventory', 'queue', 'Choose inventory-only mode and start eligible jobs.', {}, false],
   ['queue.pause', 'queue', 'Pause the current safe processing stage.', {}, false],
@@ -342,8 +354,8 @@ const capabilities = [
   ['user_data.preflight_move', 'user_data', 'Inspect a user-data relocation without writing.', { targetDirectory: stringSchema() }, true, ['targetDirectory']],
   ['user_data.move', 'user_data', 'Schedule or perform a validated user-data relocation with app-exit safeguards.', { targetDirectory: stringSchema() }, false, ['targetDirectory']]
 ].map(([name, domain, description, properties, readOnly, required = []]) => {
-  const conditional = ['settings.patch', 'settings.intake_preferences', 'intake.add_batch', 'similarity.reload'];
-  const confirmation = ['catalog.delete', 'catalog.restore_source', 'queue.confirm', 'queue.confirm_all_duplicates', 'queue.confirm_anomaly', 'queue.discard_anomaly', 'queue.acknowledge_trash_safety', 'warehouse.change_directory', 'warehouse.export', 'warehouse.import', 'update.install', 'update.install_package', 'user_data.move', 'similarity.rebuild', 'queue.clear', 'catalog.delete_thumbnail'];
+  const conditional = ['settings.patch', 'settings.intake_preferences', 'intake.submit', 'intake.add_batch', 'task.resolve', 'similarity.reload'];
+  const confirmation = ['task.cancel', 'catalog.delete', 'catalog.restore_source', 'queue.confirm', 'queue.confirm_all_duplicates', 'queue.confirm_anomaly', 'queue.discard_anomaly', 'queue.acknowledge_trash_safety', 'warehouse.change_directory', 'warehouse.export', 'warehouse.import', 'update.install', 'update.install_package', 'user_data.move', 'similarity.rebuild', 'queue.clear', 'catalog.delete_thumbnail'];
   return {
     name, domain, description, readOnly, inputSchema: objectSchema(properties, required),
     risk: conditional.includes(name) ? 'conditional' : confirmation.includes(name) ? 'confirmation' : 'none'
@@ -369,7 +381,7 @@ function createCapabilityService(manager, services = {}) {
     if (entry.name === 'catalog.add_image' && typeof manager.services?.storeCatalogImage !== 'function') {
       return { available: false, reason: 'Product image storage service is not installed.' };
     }
-    if (entry.name === 'intake.add_batch') {
+    if (['intake.submit', 'intake.add_batch'].includes(entry.name)) {
       const preferences = intakePreferences(manager);
       return {
         available: true,
@@ -387,7 +399,7 @@ function createCapabilityService(manager, services = {}) {
       if (input.sourceDisposition === 'keep') return null;
       return { target: input.sourceDisposition === 'move' ? input.processedSourceDirectory : 'Windows recycle bin', impact: `After successful archive verification, each AI-created source will be ${input.sourceDisposition === 'move' ? 'moved' : 'recycled'}.`, recovery: input.sourceDisposition === 'move' ? 'Catalog source restore can move it back if the original path is free.' : 'Catalog source restore can ask Windows to restore the recycle-bin item.' };
     }
-    if (name === 'intake.add_batch' && input.mode === 'archive' && input.sourceDisposition && input.sourceDisposition !== 'keep') {
+    if (['intake.submit', 'intake.add_batch'].includes(name) && input.mode === 'archive' && input.sourceDisposition && input.sourceDisposition !== 'keep') {
       return { target: input.paths, impact: `After verified archive completion, sources will be ${input.sourceDisposition === 'move' ? 'moved' : 'sent to the recycle bin'}.`, recovery: 'Use catalog.restore_source while the destination/original path remains recoverable.' };
     }
     if (name === 'settings.patch') {
@@ -497,59 +509,31 @@ function createCapabilityService(manager, services = {}) {
       };
     }
     if (name === 'intake.scan') return compactState(await manager.scanSource(path.resolve(input.directory), input.scanToken || 'mcp'));
-    if (name === 'intake.add_batch') {
-      if (manager.running) throw new Error('QUEUE_RUNNING: wait until the queue is idle before adding an AI batch');
-      if ((manager.jobs || []).some((job) => !job.mcpRequestId && job.intakeModeSelected && job.status === 'queued')) {
-        throw new Error('UNRELATED_QUEUE_WORK: finish or pause selected desktop jobs before AI intake');
-      }
-      let preferences = input.mode === 'inventory_only'
-        ? { configured: true, archiveOutputDirectory: '', sourceDisposition: 'keep', processedSourceDirectory: '', evidence: 'inventory_only' }
-        : intakePreferences(manager);
-      let preferencePatch = null;
-      if (input.mode === 'archive' && (input.archiveOutputDirectory || input.sourceDisposition || input.processedSourceDirectory)) {
-        preferencePatch = sourceDispositionPatch(input);
-        preferences = {
-          configured: true,
-          evidence: 'request',
-          archiveOutputDirectory: preferencePatch.archiveOutputDirectory,
-          sourceDisposition: input.sourceDisposition,
-          processedSourceDirectory: preferencePatch.processedSourceDirectory
-        };
-      }
-      if (!preferences.configured) return preferences;
-      const normalizedPaths = [...new Set(input.paths.map((entry) => {
-        if (!path.isAbsolute(entry) || entry.includes('\0')) throw new Error('Each source must be an absolute local path');
-        return path.normalize(entry);
-      }))];
-      const fingerprint = intakeRequestFingerprint({
-        mode: input.mode,
-        paths: normalizedPaths.map(normalizeForComparison).sort((left, right) => left.localeCompare(right, 'en-US')),
-        archiveOutputDirectory: preferences.archiveOutputDirectory ? normalizeForComparison(preferences.archiveOutputDirectory) : '',
-        sourceDisposition: input.mode === 'inventory_only' ? 'keep' : preferences.sourceDisposition,
-        processedSourceDirectory: preferences.processedSourceDirectory ? normalizeForComparison(preferences.processedSourceDirectory) : ''
-      });
-      const retained = manager.findAutomationRequest?.(input.requestId);
-      if (retained && retained.fingerprint !== fingerprint) throw new Error('REQUEST_ID_CONFLICT');
-      const previous = manager.jobs.filter((job) => job.mcpRequestId === input.requestId);
-      const normalizedPathKeys = new Set(normalizedPaths.map(normalizeForComparison));
-      if (previous.some((job) => job.processingMode !== input.mode || !normalizedPathKeys.has(normalizeForComparison(job.sourcePath)))) throw new Error('REQUEST_ID_CONFLICT');
-      const retainedPaths = new Set((retained?.jobs || []).map((job) => normalizeForComparison(job.sourcePath)));
-      if (preferencePatch) {
-        await manager.updateConfig({ ...manager.config, ...preferencePatch }, { source: 'mcp', recordIntakePreferences: true });
-        preferences = intakePreferences(manager);
-      }
-      const failures = [];
-      for (const source of normalizedPaths.filter((entry) => !previous.some((job) => normalizeForComparison(job.sourcePath) === normalizeForComparison(entry)) && !retainedPaths.has(normalizeForComparison(entry)))) {
-        try {
-          await manager.addSingle(source, { requestId: input.requestId, mode: input.mode, sourceDisposition: preferences.sourceDisposition, processedSourceDirectory: preferences.processedSourceDirectory });
-        } catch (error) { failures.push({ source, code: error.code || 'INTAKE_FAILED', message: error.message }); }
-      }
-      const jobs = manager.jobs.filter((job) => job.mcpRequestId === input.requestId);
-      const receipt = await manager.recordAutomationRequest?.({ requestId: input.requestId, fingerprint, mode: input.mode, paths: normalizedPaths, jobs, failures });
-      if (input.start !== false && jobs.length && !manager.running) void manager.startQueue(jobs.map((job) => job.id)).catch((error) => manager.emit('automation-error', error));
-      const visibleJobs = jobs.length ? jobs.map(jobSummary) : (receipt?.jobs || retained?.jobs || []);
-      return { jobs: visibleJobs, failures, reused: failures.length === 0 && (retainedPaths.size > 0 || jobs.length === previous.length), retained: Boolean(retained && jobs.length === 0) };
+    if (name === 'intake.submit') {
+      if (!services.tasks) throw new Error('CAPABILITY_UNAVAILABLE: application task service is not installed');
+      return services.tasks.submit({ ...input, waitMilliseconds: 1500 });
     }
+    if (name === 'intake.add_batch') {
+      if (!services.tasks) throw new Error('CAPABILITY_UNAVAILABLE: application task service is not installed');
+      const existing = manager.findAutomationRequest?.(input.requestId);
+      const receipt = await services.tasks.submit({
+        ...input,
+        waitMilliseconds: input.start === false ? 0 : 1500
+      });
+      return {
+        taskId: receipt.task.id,
+        jobs: receipt.jobs,
+        failures: receipt.failures,
+        reused: Boolean(existing),
+        retained: Boolean(existing && !(manager.jobs || []).some((job) => job.mcpRequestId === input.requestId)),
+        receipt
+      };
+    }
+    if (name === 'task.get') return services.tasks.get(input.taskId);
+    if (name === 'task.wait') return services.tasks.wait(input.taskId, (input.timeoutSeconds ?? 20) * 1000);
+    if (name === 'task.resolve') return services.tasks.resolve(input.taskId, input);
+    if (name === 'task.retry') return services.tasks.retry(input.taskId);
+    if (name === 'task.cancel') return services.tasks.cancel(input.taskId);
     if (name === 'queue.state') {
       const jobs = (manager.jobs || []).filter((job) =>
         (!input.requestId || job.mcpRequestId === input.requestId) && (!input.jobId || job.id === input.jobId));

@@ -223,6 +223,20 @@
                   <label class="path-field advanced-path-field"><span>用户数据区</span><div><input id="user-data-path" type="text" spellcheck="false" readonly><button id="select-user-data" type="button">切换</button></div><small>切换时保留旧目录，确认后重启应用生效</small></label>
                   <label class="path-field advanced-path-field"><span>压缩暂存目录</span><div><input id="archive-staging-directory" type="text"><button data-pick="archive-staging-directory" type="button">选择</button></div><small>默认在压缩包存储点同目录下新建 staging 文件夹</small></label>
                 </div>
+                <details id="ai-integrations" class="experimental-settings">
+                  <summary><strong>实验功能 · AI 助手接入</strong><span>默认关闭</span></summary>
+                  <div class="experimental-settings-body">
+                    <p class="safety-note">Hamster Archiver 不会把媒体文件上传到在线模型；启用后，AI 客户端会看到工具返回的路径、标题、标签、备注等元数据。每种接入可单独关闭。</p>
+                    <label class="integration-mode"><span>Codex Skill 调用方式</span><select id="codex-skill-mode"><option value="named">点名应用时允许自动触发</option><option value="explicit">仅显式选择时使用</option></select></label>
+                    <div id="integration-list" class="integration-list">
+                      <article class="integration-card" data-integration="codex-skill"><div><strong>Codex / ChatGPT Desktop</strong><small>短 Skill + 本机 CLI</small></div><span class="integration-status">未启用</span><button class="button ghost integration-toggle" type="button">启用</button></article>
+                      <article class="integration-card" data-integration="codex-mcp"><div><strong>Codex MCP</strong><small>可选的本机 stdio MCP</small></div><span class="integration-status">未启用</span><button class="button ghost integration-toggle" type="button">启用</button></article>
+                      <article class="integration-card" data-integration="workbuddy"><div><strong>WorkBuddy</strong><small>本机 MCP + Skill</small></div><span class="integration-status">未启用</span><button class="button ghost integration-toggle" type="button">启用</button></article>
+                      <article class="integration-card" data-integration="generic-mcp"><div><strong>通用 MCP</strong><small>生成可导入的本机配置</small></div><span class="integration-status">未启用</span><button class="button ghost integration-toggle" type="button">生成</button></article>
+                      <article class="integration-card" data-integration="windows-odr"><div><strong>Windows ODR 自动发现</strong><small>安全预览；需要包身份，不降低系统保护</small></div><span class="integration-status">预览</span><button class="button ghost integration-toggle" type="button">检测</button></article>
+                    </div>
+                  </div>
+                </details>
                 <div class="settings-utility-actions">
                   <button id="save-settings" class="button primary">保存设置</button>
                 </div>
@@ -304,13 +318,13 @@
                 <h2 id="warehouse-overview-title">仓库概览</h2>
                 <div class="discovery-actions">
                   <button id="export-warehouse" class="button ghost" type="button">导出仓库</button>
-                  <button id="import-warehouse" class="button ghost" type="button">并入外部仓库</button>
+                  <button id="import-warehouse" class="button ghost" type="button">导入仓库</button>
                   <button id="random-walk" class="button secondary" type="button">随机漫步</button>
                 </div>
               </div>
               <div class="warehouse-metrics">
                 <button id="open-inventory-statistics" class="warehouse-metric interactive" type="button" aria-label="查看库存记录统计"><strong id="metric-inventory">0</strong><span>库存</span></button>
-                <div class="warehouse-metric"><strong id="metric-tags">0</strong><span>标签</span></div>
+                <button id="open-warehouse-tags" class="warehouse-metric interactive" type="button" aria-label="查看全部标签"><strong id="metric-tags">0</strong><span>标签</span></button>
                 <button id="open-storage-statistics" class="warehouse-metric interactive" type="button" aria-label="查看仓库容量统计"><strong id="metric-gb">0</strong><span>GB</span></button>
                 <div class="warehouse-metric"><strong id="metric-week">0</strong><span>本周入库</span></div>
               </div>
@@ -336,25 +350,29 @@
           </div>
         </section>
 
-        <div class="library-toolbar" aria-label="仓库筛选与视图工具">
+        <div class="library-toolbar" aria-label="仓库筛选与视图工具" tabindex="-1">
           <div class="catalog-search-wrap search-wrap">
             <svg class="search-icon" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.6"></circle><path d="m10.6 10.6 3 3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"></path></svg>
             <input id="catalog-search" class="search-input" type="search" autocomplete="off" placeholder="模糊搜索标题、标签、备份位置、路径…">
             <div id="catalog-suggestions" class="catalog-suggestions" hidden></div>
           </div>
-          <select id="catalog-tag-filter" class="filter-select" aria-label="按标签筛选"><option value="">全部标签</option></select>
+          <details id="catalog-tag-filter-menu" class="catalog-tag-filter-menu">
+            <summary class="filter-select catalog-tag-filter-summary" aria-label="按标签筛选"><span id="catalog-tag-filter-label">全部标签</span></summary>
+            <div id="catalog-tag-filter-options" class="catalog-tag-filter-options" role="listbox" aria-label="按标签筛选"></div>
+          </details>
+          <input id="catalog-tag-filter" type="hidden" value="">
           <select id="catalog-backup-filter" class="filter-select" aria-label="按备份位置筛选"><option value="">全部备份位置</option></select>
           <select id="catalog-rating-filter" class="filter-select" aria-label="按星级筛选">
             <option value="">全部星级</option><option value="5">★★★★★</option><option value="4">★★★★</option><option value="3">★★★</option><option value="2">★★</option><option value="1">★</option><option value="0">未评分</option>
           </select>
           <button id="catalog-date-filter" class="activity-date-filter" type="button" aria-label="清除入库日期筛选" hidden></button>
           <span class="toolbar-spacer"></span>
-          <select id="catalog-sort" class="filter-select" aria-label="仓库排序">
-            <option value="inventory_desc">入库时间：新到旧</option><option value="inventory_asc">入库时间：旧到新</option><option value="name_asc">文件名：正序</option><option value="name_desc">文件名：倒序</option>
+          <select id="catalog-sort" class="filter-select catalog-sort-select" aria-label="仓库排序">
+            <option value="inventory_desc">入库时间 ↓</option><option value="inventory_asc">入库时间 ↑</option><option value="name_asc">名称 A–Z</option><option value="name_desc">名称 Z–A</option>
           </select>
           <div class="view-switch" role="group" aria-label="仓库视图">
             <button id="catalog-list-view" class="view-button" type="button" title="文本列表" aria-label="文本列表"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h11" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path></svg></button>
-            <button id="catalog-grid-view" class="view-button active" type="button" title="大缩略图" aria-label="大缩略图"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.2" width="5" height="5" rx="1.2"></rect><rect x="8.8" y="2.2" width="5" height="5" rx="1.2"></rect><rect x="2.2" y="8.8" width="5" height="5" rx="1.2"></rect><rect x="8.8" y="8.8" width="5" height="5" rx="1.2"></rect></svg></button>
+            <button id="catalog-grid-view" class="view-button active" type="button" title="缩略图视图" aria-label="缩略图视图"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.2" width="5" height="5" rx="1.2"></rect><rect x="8.8" y="2.2" width="5" height="5" rx="1.2"></rect><rect x="2.2" y="8.8" width="5" height="5" rx="1.2"></rect><rect x="8.8" y="8.8" width="5" height="5" rx="1.2"></rect></svg></button>
           </div>
           <details class="action-menu library-tools-menu">
             <summary class="button ghost">仓库工具</summary>
@@ -368,28 +386,40 @@
         <div class="warehouse-path-row" hidden><span id="warehouse-path" class="warehouse-path"></span></div>
 
         <div class="warehouse-bulkbar">
-          <label class="warehouse-select-all"><input id="select-all-catalog" type="checkbox">选择当前页</label>
+          <label class="warehouse-select-all"><input id="select-all-catalog" type="checkbox" data-i18n-user-text="true" aria-label="全选当前页" title="全选当前页"></label>
           <div id="catalog-selection-actions" class="context-actions">
             <span id="catalog-selection-count" class="selection-count">已选 0 项</span>
-            <button id="add-tags-selected" class="button ghost" type="button" disabled>批量追加标签</button>
-            <button id="update-backup-selected" class="button ghost" type="button" disabled>批量修改备份位置</button>
-            <button id="compress-uncompressed-selected" class="button ghost" type="button" disabled>压缩入库</button>
-            <button id="delete-catalog-selected" class="button danger" type="button" disabled>删除所选</button>
+            <div class="warehouse-selection-buttons">
+              <details class="action-menu warehouse-batch-menu">
+                <summary class="button ghost">批量操作</summary>
+                <div class="action-menu-popover">
+                  <button id="add-tags-selected" class="menu-button" type="button" disabled>批量追加标签</button>
+                  <button id="update-backup-selected" class="menu-button" type="button" disabled>批量修改备份位置</button>
+                  <button id="refresh-directories-selected" class="menu-button" type="button" disabled>批量更新目录</button>
+                </div>
+              </details>
+              <button id="compress-uncompressed-selected" class="button ghost" type="button" disabled>压缩入库</button>
+              <button id="delete-catalog-selected" class="button danger" type="button" disabled>删除所选</button>
+            </div>
           </div>
-          <span class="toolbar-spacer"></span>
-          <button id="undo-catalog" class="button ghost" type="button" disabled>撤回</button>
-          <button id="add-manual-catalog" class="button secondary" type="button">手动新增库存</button>
+          <div class="warehouse-primary-actions">
+            <button id="undo-catalog" class="button ghost" type="button" disabled>撤回</button>
+            <button id="add-manual-catalog" class="button secondary" type="button">手动新增库存</button>
+          </div>
         </div>
 
         <div id="library-layout" class="library-layout">
-          <section id="catalog-list" class="catalog-list" aria-label="仓库内容"><p class="muted">仓库中暂无归档记录</p></section>
+          <section id="catalog-list" class="catalog-list" aria-label="仓库内容" tabindex="0"><p class="muted">仓库中暂无归档记录</p></section>
           <nav id="catalog-pagination" class="catalog-pagination" aria-label="仓库分页" hidden>
             <button id="catalog-page-prev" class="button ghost" type="button">上一页</button>
-            <span id="catalog-page-status">第 1 / 1 页</span>
-            <label class="catalog-page-jump">跳到
-              <select id="catalog-page-select" aria-label="选择仓库页码"><option value="1">1</option></select>
-              页
-            </label>
+            <div class="catalog-page-jump">
+              <span>第</span>
+              <div class="catalog-page-combobox">
+                <input id="catalog-page-input" type="text" value="1" inputmode="numeric" autocomplete="off" role="combobox" aria-label="输入仓库页码" aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false" aria-controls="catalog-page-options">
+                <div id="catalog-page-options" class="catalog-page-options" role="listbox" aria-label="仓库页码候选" hidden></div>
+              </div>
+              <span id="catalog-page-status">/ 1 页 · 共 0 项</span>
+            </div>
             <button id="catalog-page-next" class="button ghost" type="button">下一页</button>
           </nav>
           <section id="catalog-detail" class="catalog-detail">
@@ -402,6 +432,10 @@
       </section>
     </div>
   </main>
+
+  <button id="back-to-library-toolbar" class="back-to-library-toolbar" type="button" title="返回仓库工具栏" aria-label="返回仓库工具栏" hidden>
+    <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5 12 5-5 5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+  </button>
 
   <footer class="app-footer">
     <span>Hamster Archiver · 本地优先的归档工具</span>
@@ -449,6 +483,15 @@
       <button data-statistics-mode="year" type="button">年</button>
     </div>
     <div id="warehouse-statistics-content" class="warehouse-statistics-content"></div>
+  </dialog>
+
+  <dialog id="warehouse-tags-dialog" class="warehouse-statistics-dialog warehouse-tags-dialog">
+    <div class="warehouse-statistics-heading">
+      <h2>全部标签</h2>
+      <button id="close-warehouse-tags" class="dialog-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <p class="warehouse-tags-intro">选择标签以筛选仓库内容</p>
+    <div id="warehouse-tags-content" class="warehouse-statistics-content warehouse-tags-content"></div>
   </dialog>
 
   <dialog id="manual-catalog-dialog" class="manual-dialog">
@@ -564,7 +607,7 @@
       <section><b>01</b><div><strong>把资源添加到仓库</strong><p>在归档工作台中，扫描需要备份的目录，按需选择入库方式，建立本地仓库。</p></div></section>
       <section><b>02</b><div><strong>手动云备份压缩包</strong><p>本工具只负责本地记录，您可以将压缩包存放点设置为云盘自动同步的目录，或自行上传压缩包。</p></div></section>
       <section><b>03</b><div><strong>按需处理单个资源</strong><p>也可以把单个文件夹或视频直接拖入应用，单独加入任务列表。</p></div></section>
-      <p class="usage-guide-note">本应用会跳过主目录中的零散图片和其他文件。如需处理，请先把它们收纳到文件夹中。</p>
+      <p class="usage-guide-note">不压缩入库会保存目录清单、预览和整理信息，原文件仍在原位置；更新目录不会修改、移动或删除原文件。本应用会跳过主目录中的零散图片和其他文件，如需处理，请先把它们收纳到文件夹中。</p>
     </div>
     <div class="dialog-actions"><button id="confirm-usage-guide" class="button primary" type="button">知道了</button></div>
   </dialog>
@@ -576,6 +619,20 @@
     </div>
     <div id="queue-similarity-report-content" class="queue-similarity-report-content"><p class="muted">正在生成相似报告…</p></div>
     <div class="dialog-actions"><button id="done-queue-similarity-report" class="button primary" type="button">完成</button></div>
+  </dialog>
+
+  <dialog id="source-change-report-dialog" class="manual-dialog queue-similarity-report-dialog">
+    <div class="dialog-heading">
+      <div><p class="step">目录检查 / SOURCE CHANGES</p><h2>目录内容发生变化</h2></div>
+      <button id="close-source-change-report" class="dialog-close" type="button" aria-label="关闭">×</button>
+    </div>
+    <div id="source-change-report-content" class="queue-similarity-report-content"><p class="muted">正在读取对比报告…</p></div>
+    <p class="dialog-help">新建独立项目只新增仓库记录，不会复制原文件。</p>
+    <div class="dialog-actions">
+      <button id="skip-source-change" class="button ghost" type="button">跳过</button>
+      <button id="new-source-change" class="button secondary" type="button">新建独立项目</button>
+      <button id="overwrite-source-change" class="button primary" type="button">覆盖原项目</button>
+    </div>
   </dialog>
 
   <dialog id="similarity-whitelist-dialog" class="manual-dialog compact-dialog similarity-whitelist-dialog">
@@ -594,7 +651,8 @@
     <form id="confirm-dialog-form">
       <div class="confirm-dialog-hero"><span class="confirm-dialog-icon" aria-hidden="true">?</span><div><p class="step">操作确认 / CONFIRM</p><h2 id="confirm-dialog-title">请确认操作</h2></div><button id="close-confirm-dialog" class="dialog-close" type="button" aria-label="关闭">×</button></div>
       <p id="confirm-dialog-message" class="confirm-dialog-message"></p>
-      <div class="dialog-actions"><button id="cancel-confirm-dialog" class="button ghost" type="button">取消</button><button id="accept-confirm-dialog" class="button primary" type="submit">继续</button></div>
+      <label id="confirm-dialog-suppress-option" class="check-row" hidden><input id="confirm-dialog-suppress" type="checkbox"><span>不再提醒</span></label>
+      <div class="dialog-actions"><button id="cancel-confirm-dialog" class="button ghost" type="button">取消</button><button id="extra-confirm-dialog" class="button ghost" type="button" hidden>逐项确认</button><button id="accept-confirm-dialog" class="button primary" type="submit">继续</button></div>
     </form>
   </dialog>
 
@@ -618,6 +676,7 @@
   <script src="i18n.js"></script>
   <script src="tag-autocomplete.js"></script>
   <script src="update-dialog.js"></script>
+  <script src="catalog-columns.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

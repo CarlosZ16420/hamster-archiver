@@ -2,21 +2,21 @@
 
 <img src="README.assets/iconC_cropped_1022x1022.png" alt="Hamster Archiver icon" width="96">
 
-# Hamster Archiver 仓鼠症大结局
+# Hamster Archiver
 
 ### Enjoy collecting. Enjoy organizing, too.
 
-Windows local-first file organizer, media catalog and verified batch archiver with MCP tools for AI assistants.
+Windows local-first file organizer, media library, and verifiable batch archiver. Optional local CLI/MCP interfaces support capable AI agents as an experimental feature.
 
-![Version](https://img.shields.io/badge/version-4.6.13-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.16-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
-**[Download for Windows](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[Use with AI](docs/AI-QUICKSTART.md)** · [简体中文](README.md) · [Report an issue](https://github.com/CarlosZ16420/hamster-archiver/issues)
+**[Download for Windows](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · [简体中文](README.md) · [Report an issue](https://github.com/CarlosZ16420/hamster-archiver/issues)
 
 </div>
 
-[Quick start](#quick-start) · [Use with AI](#let-ai-organize-it-for-you) · [Features](#everyday-ease-supported-by-careful-details) · [FAQ](#frequently-asked-questions) · [Documentation and contributions](#documentation-and-contributions)
+[Quick start](#quick-start) · [Features](#everyday-ease-supported-by-careful-details) · [Experimental AI integration](#experimental-features) · [FAQ](#frequently-asked-questions) · [Documentation and contributions](#documentation-and-contributions)
 
 Downloads keep piling up, your drive is almost full, and organizing everything never gets done?
 
@@ -41,7 +41,9 @@ Downloads keep piling up, your drive is almost full, and organizing everything n
 
 The app packages files and records them; you or your sync tool handles cloud uploads. Local organization uses catalog metadata such as tags and does not automatically rearrange folders on disk.
 
-Intake previews show media counts and video-frame progress, with up to two images processed concurrently. Attempt and video processing limits reduce time spent on problematic media; successful previews are retained with a warning, while complete manifests and archive verification remain intact.
+Refresh an uncompressed folder from its details or a selected batch. Additions merge into the same record; modifications and deletions require a source-change review. Dropping the same original folder again continues its latest content record, with an explicit choice to replace, create an independent record, or skip when review is needed. Valid previews and fingerprints are reused, and relocating an original only changes the association until your next operation.
+
+Intake automatically detects duplicates and can skip existing content while still providing a similarity report. Large directories remain responsive, and the whole library is quick to search.
 
 ## Quick start
 
@@ -51,25 +53,15 @@ For **Windows x64**, with English and Chinese interfaces. To use the app, choose
 2. In the archive workbench, scan a directory or drop folders and videos, then review the pending resources. Try one small folder for your first run.
 3. For **local organization**, choose uncompressed intake. To **prepare backups**, set the archive output directory and start compressed intake. Open the library afterward to browse and organize the results.
 
-Keep the full portable directory, such as `HamsterArchiver-v4.6.13-win-x64/`; do not copy only the EXE. Compression and video-preview tools are included, and no separate Node.js installation is needed.
+Compression and video-preview tools are included, and no separate Node.js installation is needed.
+
+Keep all included files in the portable directory, `HamsterArchiver-v4.6.16-win-x64/`.
 
 [![Batch archiving, progress tracking and duplicate review](assets/readme/archive-showcase.en-US.png)](assets/readme/archive-showcase.en-US.png)
 
-## Let AI organize it for you
+### Ready for modern local workflows
 
-An AI assistant with local command execution or local MCP access on the target Windows computer can search your collection, add tags, submit intake tasks and track results. A chat assistant with web search alone can provide instructions but cannot access your local files. The project exposes tools for AI assistants; it does not bundle an online content-recognition model.
-
-Send this to an assistant with local access, replacing the folder with your own:
-
-> Please use Hamster Archiver (https://github.com/CarlosZ16420/hamster-archiver) to catalog D:\Downloads\Sample Project without compression, keeping the originals. First read the project's AI quick start and reuse an existing installation; if installation is needed, download and verify a Windows release package. Follow the workflow supported by the installed package, complete read-only connection checks, then perform the task and verify its final result.
-
-**Versions and capabilities:** Downloads and current source may be at different stages. `Unreleased` in the [changelog](CHANGELOG.md) means changes have not been released. Startup diagnostics, intake planning and tray task access depend on what the installed package actually provides.
-
-The AI should first read the package's `ai-capabilities.json`: run `doctor` only when `schemaVersion` is `2` and `cliCommands` includes it. For older packages without that declaration, follow their bundled or versioned `docs/MCP.md`; do not probe with unknown commands. See the [AI quick start](docs/AI-QUICKSTART.md) for configuration, examples and troubleshooting.
-
-After connecting, the AI determines the intake mode, reusing an explicit choice in your request. Inventory-only intake always keeps originals and needs no archive destination or password. Compressed intake reuses saved preferences and asks only for a missing destination and source-handling choice; a password is always optional. Builds supporting intake planning check the scope before submission and track submitted tasks to a final state.
-
-On builds with tray task access, open the workbench at any time to view tasks marked “AI request.” Results should include successful, skipped and failed counts, library records and archive locations. The app itself does not upload media; returned titles, paths and other metadata enter your chosen AI client's context.
+Beyond the desktop interface, Hamster Archiver offers optional CLI/MCP automation for scripts and AI agents with local tool access. This is an experimental feature and does not affect the default local desktop workflow.
 
 ## Store the backup elsewhere. Keep its contents in view.
 
@@ -106,6 +98,7 @@ Browse covers and build your own organization habits with tags, ratings and note
 - Tag completion reuses existing categories; accept suggestions with Tab. Selection updates in place to reduce flicker and layout jumps.
 - Frames from the same video stay grouped, and portrait media remains fully visible. Change covers or add supplementary images from files or the clipboard.
 - Read large-project details on demand. Load nearby visible media with bounded concurrent reads, and render directory trees virtually to reduce unnecessary work.
+- Both views support marquee selection, Ctrl toggling and Shift ranges, with one-click clearing across pages. Warehouse tools offer small, medium and large thumbnails; a floating button returns to search and bulk actions after scrolling down.
 - Store thumbnails instead of another complete copy of original media; preview counts are configurable.
 - Choose from five themes and Chinese or English, with continuing refinements to dark menus, text contrast and dynamic messages.
 
@@ -142,6 +135,22 @@ Choose 7z/ZIP, passwords and custom split volumes. Queue batches, pause or sched
 
 </details>
 
+## Experimental features
+
+### AI / agent integration (CLI · MCP · discovery preview)
+
+Hamster Archiver offers experimental local integration for modern AI/agent workflows. Once enabled, assistants with local command or MCP access can search the library, add tags, and submit inventory-only or compressed archive tasks.
+
+AI integration is off by default. The Setup EXE is recommended because it provides a stable application path and managed upgrade/uninstall lifecycle; portable ZIP builds can still use CLI/MCP manually.
+
+Under **More settings → Experimental → AI assistant integration**, enable Codex / ChatGPT Desktop, optional Codex MCP, WorkBuddy, generic MCP, or the ODR discovery preview independently. Each adapter can also be disabled independently.
+
+For routine use, state the goal directly—for example: “Use Hamster Archiver to catalog `D:\Downloads\Sample` without compression and keep the originals.” The application owns validation, queueing, archive verification, and result persistence. The assistant needs extra steps only when input is missing, confirmation is required, or a real error occurs.
+
+> This is experimental. The AI client can see returned paths, titles, tags, notes, and other metadata; Hamster Archiver itself does not upload media to an online model. Availability depends on the selected client, operating system, and permissions.
+
+[AI quick start](docs/AI-QUICKSTART.md) · [CLI reference](docs/CLI.md) · [MCP reference](docs/MCP.md) · [Troubleshooting](docs/AI-TROUBLESHOOTING.md)
+
 ## Frequently asked questions
 
 <details>
@@ -163,6 +172,13 @@ The application does not upload resources; you or your sync tool handles uploads
 </details>
 
 <details>
+<summary>Can I view runtime logs after closing the app?</summary>
+
+Yes. Runtime logs remain in `logs/app.log` inside the active user-data area, and the next launch restores the latest 300 valid entries in the interface. Logs cover task processing, changed setting fields, user-data-area switches, update actions, and critical errors, but never password values or routine searching, browsing, and copying.
+
+</details>
+
+<details>
 <summary>How do I update? Does a warehouse export include my originals?</summary>
 
 Open Check for updates to read release notes and update. If networking is unavailable, download a newer release and choose Manual update: select a ZIP for portable builds or a Setup EXE for installed builds.
@@ -176,7 +192,7 @@ If an older version has no working updater, export the warehouse and import it i
 | What you need | Where to go |
 | --- | --- |
 | Downloads and published versions | [Releases](https://github.com/CarlosZ16420/hamster-archiver/releases) |
-| AI setup, call examples and troubleshooting | [AI quick start](docs/AI-QUICKSTART.md) · [MCP reference](docs/MCP.md) |
+| Experimental AI / CLI / MCP integration | [AI quick start](docs/AI-QUICKSTART.md) · [CLI reference](docs/CLI.md) · [MCP reference](docs/MCP.md) · [Troubleshooting](docs/AI-TROUBLESHOOTING.md) |
 | Feature changes | [Changelog](CHANGELOG.md) (`Unreleased` marks changes awaiting release) |
 | Bug reports or feature suggestions | [Issues](https://github.com/CarlosZ16420/hamster-archiver/issues): include the version, steps and error details; redact private paths and passwords |
 | Code or documentation contributions | [Contributing](CONTRIBUTING.md) · [Development guide](docs/DEVELOPMENT.md) |

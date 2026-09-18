@@ -8,10 +8,38 @@ const path = require('node:path');
 const test = require('node:test');
 const {
   buildManifest,
+  compareSourceSnapshots,
   completeManifestMd5,
   createFingerprintPlan,
+  scanSourceSnapshot,
+  validateManifestUnchanged,
   verifyManifestMd5AgainstCompleteCandidates
 } = require('../src/core/manifest');
+
+test('existing compression validation detects newly added files and empty directories', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-source-set-check-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, 'old.txt'), 'old');
+  const manifest = await buildManifest(root, 'directory');
+  await validateManifestUnchanged(root, 'directory', manifest);
+  await fs.writeFile(path.join(root, 'new.txt'), 'new');
+  await assert.rejects(validateManifestUnchanged(root, 'directory', manifest), { code: 'SOURCE_CHANGED' });
+  await fs.unlink(path.join(root, 'new.txt'));
+  await fs.mkdir(path.join(root, 'empty'));
+  await assert.rejects(validateManifestUnchanged(root, 'directory', manifest), { code: 'SOURCE_CHANGED' });
+});
+
+test('refresh does not fill historical MD5 gaps and keeps files when optional MD5 cannot be read', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-fingerprint-gap-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, 'entry.txt'), 'entry');
+  const snapshot = await scanSourceSnapshot(root, 'directory');
+  const withoutMd5 = await buildManifest(root, 'directory', { preparedSnapshot: snapshot, reuseManifest: snapshot.files });
+  assert.equal(withoutMd5.length, 1);
+  assert.equal(withoutMd5[0].md5, undefined);
+  await fs.unlink(path.join(root, 'entry.txt'));
+  await assert.rejects(buildManifest(root, 'directory', { preparedSnapshot: snapshot }), { code: 'SOURCE_CHANGED' });
+});
 
 test('large-folder planning selects a stable representative set of 200 files', () => {
   const files = Array.from({ length: 1000 }, (_, index) => ({
@@ -167,4 +195,57 @@ test('manifest generation skips and records a file that becomes unreadable', asy
   assert.equal(manifest.length, 2);
   assert.ok(secondManifest.length >= 1);
   assert.ok(skipped.some((item) => item.path === 'z-removed.bin'));
+});
+
+test('source snapshots report additions, modifications, deletions, and directory changes', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-source-snapshot-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'removed-directory'));
+  await fs.writeFile(path.join(root, 'changed.txt'), 'before');
+  await fs.writeFile(path.join(root, 'deleted.txt'), 'deleted');
+  const before = await scanSourceSnapshot(root, 'directory');
+
+  await fs.writeFile(path.join(root, 'changed.txt'), 'after with a different size');
+  await fs.rm(path.join(root, 'deleted.txt'));
+  await fs.rm(path.join(root, 'removed-directory'), { recursive: true });
+  await fs.mkdir(path.join(root, 'added-directory'));
+  await fs.writeFile(path.join(root, 'added.txt'), 'added');
+  const after = await scanSourceSnapshot(root, 'directory');
+  const difference = compareSourceSnapshots(before, after);
+
+  assert.equal(difference.comparable, true);
+  assert.equal(difference.changed, true);
+  assert.equal(difference.onlyAdded, false);
+  assert.deepEqual(difference.summary, {
+    addedFiles: 1,
+    modifiedFiles: 1,
+    deletedFiles: 1,
+    unchangedFiles: 0,
+    addedDirectories: 1,
+    deletedDirectories: 1
+  });
+});
+
+test('manifest refresh reuses unchanged MD5 and preview metadata while hashing additions', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-manifest-reuse-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, 'unchanged.txt'), 'same');
+  const previous = await buildManifest(root, 'directory');
+  previous[0].thumbnailPath = 'existing-preview.png';
+  await fs.writeFile(path.join(root, 'added.txt'), 'new');
+  const snapshot = await scanSourceSnapshot(root, 'directory');
+
+  const refreshed = await buildManifest(root, 'directory', {
+    preparedSnapshot: snapshot,
+    reuseManifest: previous
+  });
+  const unchanged = refreshed.find((file) => file.name === 'unchanged.txt');
+  const added = refreshed.find((file) => file.name === 'added.txt');
+
+  assert.equal(unchanged.md5, previous[0].md5);
+  assert.equal(unchanged.thumbnailPath, 'existing-preview.png');
+  assert.equal(unchanged.sourceMetadataUnchanged, true);
+  assert.match(added.md5, /^[a-f0-9]{32}$/);
+  assert.equal(added.sourceMetadataUnchanged, undefined);
+  assert.equal(refreshed.sourceSnapshot.snapshotId, snapshot.snapshotId);
 });

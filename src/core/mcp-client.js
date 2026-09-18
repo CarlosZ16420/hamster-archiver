@@ -454,5 +454,6 @@ module.exports = {
   startOrConnect,
   waitForReady,
   validateDoctorResults,
+  withSession,
   writeOutput
 };

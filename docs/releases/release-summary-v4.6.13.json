@@ -3,12 +3,22 @@
   "version": "4.6.13",
   "notes": {
     "zh-CN": [
+      "本地后续维护（未升版）：简化仓库工具与选择按钮，支持输入页号，修复缩略图顶部留白和列表列对齐。",
+      "修复 Windows 回收站中文路径及超过 100 个路径的批量查询，避免压缩项目撤回被误报为文件不存在，保留同名文件保护。",
+      "本地后续维护（未升版）：Electron 更新到 43.7.1 稳定版，同步依赖与运行时完整性锁定，其他依赖和资料格式不变。",
+      "本地后续维护（未升版）：统一两种仓库视图的框选与 Ctrl/Shift 多选，支持直接清空及三态复选框取消全部跨页选择。",
+      "仓库工具可调整并记住缩略图大小，向下浏览后可一键返回搜索与批量操作栏。",
       "仓库条目删除可在本次运行的撤回历史中恢复，关联压缩包和图片继续使用 Windows 回收站，不新增应用内回收站。",
       "关闭窗口或退出时会等待正在进行的删除或撤回安全收尾。",
       "已结束的历史队列项不再导致新任务重复待确认；删除失效候选后会释放相关任务。",
       "微调“01 · 收纳设置”与右侧步骤标题的视觉对齐；不更改仓库格式或资料位置。"
     ],
     "en-US": [
+      "Same-version local maintenance simplifies Warehouse tools and selection controls, adds typed page numbers, and fixes cover gaps and list column alignment.",
+      "Fixes Recycle Bin batch queries for Chinese paths and more than 100 paths, preventing false missing-file reports during archive undo while protecting existing destinations.",
+      "Same-version local maintenance updates Electron to stable 43.7.1 with synchronized dependency and runtime integrity locks; other dependencies and data formats are unchanged.",
+      "Same-version local maintenance unifies marquee and Ctrl/Shift selection in both views, with direct clearing and a three-state page checkbox that can deselect all pages.",
+      "Warehouse tools remember thumbnail size, and a floating button returns to search and bulk actions after scrolling down.",
       "Warehouse deletion can be undone during the current session, restoring associated archives and images from the Windows Recycle Bin without an in-app recycle bin.",
       "Window close and application exit wait for an active delete or undo operation to finish safely.",
       "Finished queue history no longer triggers duplicate review for new work, and deleting a stale candidate releases affected tasks.",

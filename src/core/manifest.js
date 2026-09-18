@@ -17,6 +17,126 @@ const DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES = 5 * 1024;
 const MIN_TINY_FILE_MD5_THRESHOLD_BYTES = 1024;
 const MAX_TINY_FILE_MD5_THRESHOLD_BYTES = 1024 ** 3;
 const TINY_FILE_MD5_MIN_BYTES = DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES;
+const SOURCE_SNAPSHOT_SCHEMA_VERSION = 1;
+
+function attachManifestMetadata(manifest, { directories = [], skippedFiles = [], sourceSnapshot = null } = {}) {
+  Object.defineProperty(manifest, 'directories', { value: [...directories], enumerable: false, configurable: true });
+  Object.defineProperty(manifest, 'skippedFiles', { value: [...skippedFiles], enumerable: false, configurable: true });
+  if (sourceSnapshot) {
+    Object.defineProperty(manifest, 'sourceSnapshot', { value: sourceSnapshot, enumerable: false, configurable: true });
+  }
+  return manifest;
+}
+
+function sourceSnapshotFromManifest(sourcePath, sourceType, manifest, directories = [], options = {}) {
+  const files = (manifest || []).map((file) => ({
+    relativePath: portableRelativePath(String(file.relativePath || file.name || '')),
+    entryType: 'file',
+    size: Number(file.size) || 0,
+    modifiedAtMs: file.modifiedAtMs != null && Number.isFinite(Number(file.modifiedAtMs))
+      ? Number(file.modifiedAtMs)
+      : Date.parse(String(file.modifiedAt || ''))
+  }));
+  const errors = Array.isArray(options.errors) ? options.errors.map((error) => ({ ...error })) : [];
+  return {
+    schemaVersion: SOURCE_SNAPSHOT_SCHEMA_VERSION,
+    snapshotId: options.snapshotId || crypto.randomUUID(),
+    sourcePath: String(sourcePath || ''),
+    sourceType: sourceType === 'video' ? 'video' : 'directory',
+    scannedAt: options.scannedAt || new Date().toISOString(),
+    files,
+    directories: Array.isArray(directories) ? [...directories] : [],
+    fileCount: files.length,
+    totalBytes: files.reduce((sum, file) => sum + file.size, 0),
+    complete: options.complete !== false && errors.length === 0 && Array.isArray(directories) &&
+      files.every((file) => file.relativePath && Number.isFinite(file.modifiedAtMs)),
+    errors
+  };
+}
+
+function normalizeSourceSnapshot(snapshot) {
+  if (!snapshot || snapshot.schemaVersion !== SOURCE_SNAPSHOT_SCHEMA_VERSION || !Array.isArray(snapshot.files)) return null;
+  return sourceSnapshotFromManifest(snapshot.sourcePath, snapshot.sourceType, snapshot.files, snapshot.directories, {
+    snapshotId: snapshot.snapshotId,
+    scannedAt: snapshot.scannedAt,
+    complete: snapshot.complete === true && Array.isArray(snapshot.directories),
+    errors: snapshot.errors
+  });
+}
+
+async function scanSourceSnapshot(sourcePath, sourceType, options = {}) {
+  const errors = [];
+  const files = await collectFiles(sourcePath, sourceType, {
+    signal: options.signal,
+    pauseController: options.pauseController,
+    onSkippedFile: (item) => {
+      const error = {
+        relativePath: String(item.path || '.'),
+        code: String(item.code || 'READ_FAILED'),
+        kind: item.type === 'file' ? 'file' : 'directory'
+      };
+      errors.push(error);
+      options.onSkippedFile?.(item);
+    }
+  });
+  return sourceSnapshotFromManifest(sourcePath, sourceType, files, files.directories || [], {
+    complete: errors.length === 0,
+    errors
+  });
+}
+
+function compareSourceSnapshots(baseline, current) {
+  const next = normalizeSourceSnapshot(current);
+  if (!next) return { comparable: false, complete: false, reason: 'missing_snapshot' };
+  const previous = normalizeSourceSnapshot(baseline) || sourceSnapshotFromManifest(
+    next.sourcePath, next.sourceType, [], [], { complete: false }
+  );
+  if (!next.complete) return { comparable: true, complete: false, reason: 'incomplete_scan', errors: next.errors };
+  const previousFiles = new Map(previous.files.map((file) => [file.relativePath, file]));
+  const currentFiles = new Map(next.files.map((file) => [file.relativePath, file]));
+  const addedFiles = [];
+  const modifiedFiles = [];
+  const deletedFiles = [];
+  const unchangedFiles = [];
+  for (const file of next.files) {
+    const before = previousFiles.get(file.relativePath);
+    if (!before) addedFiles.push(file);
+    else if (before.entryType !== file.entryType || before.size !== file.size || before.modifiedAtMs !== file.modifiedAtMs) {
+      modifiedFiles.push({ before, after: file });
+    } else unchangedFiles.push(file);
+  }
+  for (const file of previous.files) {
+    if (!currentFiles.has(file.relativePath)) deletedFiles.push(file);
+  }
+  const previousDirectories = new Set(previous.directories || []);
+  const currentDirectories = new Set(next.directories || []);
+  const addedDirectories = [...currentDirectories].filter((directory) => !previousDirectories.has(directory));
+  const deletedDirectories = [...previousDirectories].filter((directory) => !currentDirectories.has(directory));
+  const changed = addedFiles.length + modifiedFiles.length + deletedFiles.length +
+    addedDirectories.length + deletedDirectories.length > 0;
+  const destructive = modifiedFiles.length + deletedFiles.length + deletedDirectories.length > 0;
+  return {
+    comparable: previous.complete === true,
+    baselineComplete: previous.complete === true,
+    complete: true,
+    changed,
+    onlyAdded: changed && !destructive,
+    addedFiles,
+    modifiedFiles,
+    deletedFiles,
+    unchangedFiles,
+    addedDirectories,
+    deletedDirectories,
+    summary: {
+      addedFiles: addedFiles.length,
+      modifiedFiles: modifiedFiles.length,
+      deletedFiles: deletedFiles.length,
+      unchangedFiles: unchangedFiles.length,
+      addedDirectories: addedDirectories.length,
+      deletedDirectories: deletedDirectories.length
+    }
+  };
+}
 
 function selectRepresentativeFiles(files, limit = LARGE_FOLDER_MD5_SAMPLE_LIMIT) {
   if (files.length <= limit) return [...files];
@@ -52,7 +172,7 @@ function createFingerprintPlan(files, sourceType, options = {}) {
       Number(options.largeFolderMd5SampleLimit) <= MAX_LARGE_FOLDER_MD5_SAMPLE_LIMIT
     ? Number(options.largeFolderMd5SampleLimit)
     : DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT;
-  const skipTinyMd5Files = options.skipTinyMd5Files === true;
+  const skipTinyMd5Files = sourceType === 'directory' && options.skipTinyMd5Files === true;
   const simplified = sourceType === 'directory' && options.largeFolderSimplification === true && files.length > threshold;
   const md5Candidates = files.filter((file) => !skipTinyMd5Files || file.size >= tinyFileMd5ThresholdBytes);
   const selectedFiles = simplified
@@ -170,8 +290,26 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
     skippedFiles.push(item);
     onSkippedFile(item);
   };
-  const files = await collectFiles(sourcePath, sourceType, { signal, pauseController, onSkippedFile: recordSkipped });
-  const directories = Array.isArray(files.directories) ? files.directories : [];
+  const preparedSnapshot = normalizeSourceSnapshot(options.preparedSnapshot);
+  const files = preparedSnapshot
+    ? preparedSnapshot.files.map((file) => ({
+        ...file,
+        absolutePath: sourceType === 'video'
+          ? sourcePath
+          : path.join(sourcePath, ...file.relativePath.split('/')),
+        name: path.basename(file.relativePath),
+        extension: path.extname(file.relativePath).toLowerCase(),
+        modifiedAt: new Date(file.modifiedAtMs).toISOString(),
+        mediaType: isVideoFile(file.relativePath) ? 'video' : isImageFile(file.relativePath) ? 'image' : 'file'
+      }))
+    : await collectFiles(sourcePath, sourceType, { signal, pauseController, onSkippedFile: recordSkipped });
+  if (preparedSnapshot) {
+    for (const error of preparedSnapshot.errors || []) {
+      recordSkipped({ path: error.relativePath, code: error.code, type: error.kind, reason: error.code });
+    }
+  }
+  const directories = preparedSnapshot?.directories || (Array.isArray(files.directories) ? files.directories : []);
+  const reusable = new Map((options.reuseManifest || []).map((file) => [String(file.relativePath || ''), file]));
   const skipTinyMd5Files = options.skipTinyMd5Files === true;
   const plan = createFingerprintPlan(files, sourceType, options);
   const { md5Candidates, selectedFiles, selectedPaths, simplified, sampleLimit, tinyFileMd5ThresholdBytes, threshold } = plan;
@@ -203,26 +341,43 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
     const selectedForMd5 = selectedPaths.has(file.relativePath);
     let md5;
     let afterStats;
-    if (selectedForMd5) {
+    const reusableFile = reusable.get(file.relativePath);
+    const canReuse = reusableFile && Number(reusableFile.size) === Number(file.size) &&
+      Number(reusableFile.modifiedAtMs) === Number(file.modifiedAtMs);
+    if (selectedForMd5 && canReuse && /^[a-f0-9]{32}$/i.test(String(reusableFile.md5 || ''))) {
+      md5 = String(reusableFile.md5).toLowerCase();
+      processedBytes += file.size;
+      processedFiles += 1;
+    } else if (selectedForMd5 && !canReuse) {
       try {
         md5 = await hashFileMd5(file.absolutePath, signal, pauseController);
         afterStats = await fs.stat(file.absolutePath);
       } catch (error) {
         if (error instanceof CancelledError || error.code === 'TASK_CANCELLED' || error.code === 'SOURCE_CHANGED') throw error;
+        if (preparedSnapshot && error.code === 'ENOENT') {
+          const changed = new Error(`散列期间源文件发生变化：${file.relativePath}`);
+          changed.code = 'SOURCE_CHANGED';
+          throw changed;
+        }
         recordSkipped({ path: file.relativePath, reason: error.message, code: error.code || 'READ_FAILED', type: 'file', size: file.size });
-        processedBytes += file.size;
-        processedFiles += 1;
-        continue;
+        md5 = undefined;
+        // Keep the complete source listing even when its optional fingerprint fails.
       }
-      if (afterStats.size !== file.size || afterStats.mtimeMs !== file.modifiedAtMs) {
+      if (afterStats && (afterStats.size !== file.size || afterStats.mtimeMs !== file.modifiedAtMs)) {
         const error = new Error(`散列期间源文件发生变化：${file.relativePath}`);
         error.code = 'SOURCE_CHANGED';
         throw error;
       }
       processedBytes += file.size;
       processedFiles += 1;
+    } else if (selectedForMd5) {
+      // An unchanged historical entry without MD5 is not a reason to read it now.
+      processedBytes += file.size;
+      processedFiles += 1;
     }
     manifest.push({
+      ...(canReuse ? reusableFile : {}),
+      ...(canReuse && Array.isArray(reusableFile.thumbnails) ? { thumbnails: reusableFile.thumbnails.map((thumbnail) => ({ ...thumbnail })) } : {}),
       relativePath: file.relativePath,
       name: file.name,
       extension: file.extension,
@@ -230,6 +385,7 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
       modifiedAt: file.modifiedAt,
       modifiedAtMs: file.modifiedAtMs,
       mediaType: file.mediaType,
+      ...(canReuse ? { sourceMetadataUnchanged: true } : {}),
       ...(md5 ? { md5 } : {}),
       ...(!selectedForMd5 ? {
         md5SkippedReason: skipTinyMd5Files && file.size < tinyFileMd5ThresholdBytes
@@ -252,9 +408,11 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
   if (selectedFiles.length === 0) {
     onProgress({ processedFiles: 0, totalFiles: 0, processedBytes: 0, totalBytes: 0, percent: 100 });
   }
-  Object.defineProperty(manifest, 'skippedFiles', { value: skippedFiles, enumerable: false });
-  Object.defineProperty(manifest, 'directories', { value: directories, enumerable: false });
-  return manifest;
+  const sourceSnapshot = preparedSnapshot || sourceSnapshotFromManifest(sourcePath, sourceType, manifest, directories, {
+    complete: skippedFiles.length === 0,
+    errors: skippedFiles.map((item) => ({ relativePath: item.path, code: item.code, kind: item.type }))
+  });
+  return attachManifestMetadata(manifest, { skippedFiles, directories, sourceSnapshot });
 }
 
 async function completeManifestMd5(sourcePath, sourceType, manifest, options = {}) {
@@ -505,7 +663,17 @@ async function verifyManifestMd5AgainstReference(sourcePath, sourceType, candida
   return { matches: true, budgetExceeded: false, hashedFiles, hashedBytes };
 }
 
-async function validateManifestUnchanged(sourcePath, sourceType, manifest, signal, pauseController) {
+async function validateManifestUnchanged(sourcePath, sourceType, manifest, signal, pauseController, sourceSnapshot) {
+  const baseline = normalizeSourceSnapshot(sourceSnapshot || manifest.sourceSnapshot);
+  if (baseline?.complete) {
+    const current = await scanSourceSnapshot(sourcePath, sourceType, { signal, pauseController });
+    if (!current.complete || compareSourceSnapshots(baseline, current).changed) {
+      const changed = new Error('压缩期间源文件或目录集合发生变化。');
+      changed.code = 'SOURCE_CHANGED';
+      throw changed;
+    }
+    return;
+  }
   for (const file of manifest) {
     await pauseController?.waitIfPaused(signal);
     if (signal?.aborted) throw new CancelledError();
@@ -567,13 +735,19 @@ module.exports = {
   MIN_LARGE_FOLDER_MD5_SAMPLE_LIMIT,
   MIN_TINY_FILE_MD5_THRESHOLD_BYTES,
   TINY_FILE_MD5_MIN_BYTES,
+  SOURCE_SNAPSHOT_SCHEMA_VERSION,
+  attachManifestMetadata,
   buildManifest,
+  compareSourceSnapshots,
   completeManifestMd5,
   collectDirectories,
   collectFiles,
   createFingerprintPlan,
   hashFileMd5,
+  normalizeSourceSnapshot,
+  scanSourceSnapshot,
   selectRepresentativeFiles,
+  sourceSnapshotFromManifest,
   validateManifestUnchanged,
   verifyManifestMd5AgainstCompleteCandidates,
   verifyManifestMd5AgainstReference

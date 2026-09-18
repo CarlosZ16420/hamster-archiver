@@ -10,9 +10,31 @@ async function createThumbnails(job, manifest, config, options = {}, nativeImage
   const thumbnailDir = path.join(config.repositoryDirectory, 'thumbnails', job.id);
   await fs.mkdir(thumbnailDir, { recursive: true });
   const limit = Math.max(1, Math.min(500, Number(config.thumbnailLimit) || 100));
-  const candidates = manifest.filter((file) => IMAGE_EXTENSIONS.has(file.extension) || isVideoFile(file.name));
+  const previewProfile = `${Boolean(config.videoFrameBackup)}:${Number(config.videoFrameCount) || 6}`;
+  const repairCandidates = new Set();
+  for (const file of manifest) {
+    const previews = file.thumbnails?.length ? file.thumbnails : file.thumbnailPath ? [{ thumbnailPath: file.thumbnailPath }] : [];
+    if (previews.length === 0) continue;
+    const exists = await Promise.all(previews.map(async (preview) => {
+      const previewPath = path.isAbsolute(preview.thumbnailPath || '') ? preview.thumbnailPath
+        : path.join(config.repositoryDirectory, 'thumbnails', preview.thumbnailPath || '');
+      try { return (await fs.stat(previewPath)).isFile(); } catch { return false; }
+    }));
+    if (exists.every(Boolean) && (!file.previewProfile || file.previewProfile === previewProfile)) continue;
+    delete file.thumbnailPath;
+    delete file.thumbnails;
+    repairCandidates.add(file);
+  }
+  const existingPreviewCount = manifest.reduce((sum, file) => {
+    if (Array.isArray(file.thumbnails) && file.thumbnails.length > 0) return sum + file.thumbnails.length;
+    return sum + (file.thumbnailPath ? 1 : 0);
+  }, 0);
+  const candidates = manifest.filter((file) =>
+    (IMAGE_EXTENSIONS.has(file.extension) || isVideoFile(file.name)) &&
+    (file.sourceMetadataUnchanged !== true || repairCandidates.has(file)) &&
+    !file.thumbnailPath && !(Array.isArray(file.thumbnails) && file.thumbnails.length > 0));
   const attemptLimit = Math.max(30, limit * 3);
-  let outputCount = 0;
+  let outputCount = Math.min(limit, existingPreviewCount);
   let processed = 0;
   let nextFileIndex = 0;
   const report = (file, frame, frameCount) => options.onProgress?.({
@@ -28,7 +50,23 @@ async function createThumbnails(job, manifest, config, options = {}, nativeImage
     report(file);
     const sourcePath = job.sourceType === 'video' ? job.sourcePath
       : path.join(job.sourcePath, ...file.relativePath.split('/'));
+    const ensureSourceUnchanged = async () => {
+      if (!Number.isFinite(file.modifiedAtMs)) return;
+      let stats;
+      try { stats = await fs.stat(sourcePath); } catch (cause) {
+        const error = new Error(`生成预览期间源文件消失：${file.relativePath}`);
+        error.code = 'SOURCE_CHANGED';
+        error.cause = cause;
+        throw error;
+      }
+      if (stats.size !== file.size || stats.mtimeMs !== file.modifiedAtMs) {
+        const error = new Error(`生成预览期间源文件发生变化：${file.relativePath}`);
+        error.code = 'SOURCE_CHANGED';
+        throw error;
+      }
+    };
     try {
+      await ensureSourceUnchanged();
       if (frameCount) {
         let extracted = { frames: [], mediaInfo: null };
         try {
@@ -36,13 +74,15 @@ async function createThumbnails(job, manifest, config, options = {}, nativeImage
             ...options, onFrameProgress: (frame, count) => report(file, frame, count)
           });
         } catch (error) {
-          if (error instanceof CancelledError || options.signal?.aborted) throw error;
+          if (error instanceof CancelledError || error.code === 'SOURCE_CHANGED' || options.signal?.aborted) throw error;
           options.onLog?.(`FFmpeg 视频抽帧失败，改用系统缩略图：${path.basename(sourcePath)} · ${error.message}`);
         }
         file.mediaInfo = extracted.mediaInfo;
         file.thumbnails = extracted.frames.map((frame) => ({ ...frame, videoGroup: file.relativePath }));
         if (file.thumbnails.length) {
           file.thumbnailPath = file.thumbnails[0].thumbnailPath;
+          await ensureSourceUnchanged();
+          file.previewProfile = previewProfile;
           return file.thumbnails.length;
         }
       }
@@ -56,12 +96,14 @@ async function createThumbnails(job, manifest, config, options = {}, nativeImage
         await fs.writeFile(thumbnailPath, thumbnail.toPNG());
         file.thumbnailPath = thumbnailPath;
         file.thumbnails = [{ thumbnailPath, type: 'image', frameIndex: null }];
+        await ensureSourceUnchanged();
+        file.previewProfile = previewProfile;
         return 1;
       } finally {
         options.onTiming?.('system-thumbnail', Date.now() - startedAt);
       }
     } catch (error) {
-      if (error instanceof CancelledError || options.signal?.aborted) throw error;
+      if (error instanceof CancelledError || error.code === 'SOURCE_CHANGED' || options.signal?.aborted) throw error;
       options.onLog?.(`已跳过无法生成预览的媒体：${path.basename(sourcePath)} · ${error.message}`);
       return 0;
     }

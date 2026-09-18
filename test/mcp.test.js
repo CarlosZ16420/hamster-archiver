@@ -32,12 +32,30 @@ function fakeManager() {
   return {
     config: {
       archiveOutputDirectory: path.resolve('output'),
+      archiveStagingDirectory: path.resolve('staging'),
+      repositoryDirectory: path.resolve('warehouse'),
       intakePreferences: { version: 1, archiveOutputDirectory: path.resolve('output'), sourceDisposition: 'keep', processedSourceDirectory: '', source: 'desktop' }
     },
-    jobs: [], catalog: [{ id: 'r1', title: 'sample', archivePassword: 'secret', manifest: [{ relativePath: 'image.jpg', size: 4, thumbnailPath: 'private' }] }],
+    jobs: [], automationRequests: [], catalog: [{ id: 'r1', title: 'sample', archivePassword: 'secret', manifest: [{ relativePath: 'image.jpg', size: 4, thumbnailPath: 'private' }] }],
     searchCatalog() { return this.catalog; },
     async addSingle(sourcePath, automation) { this.jobs.push({ id: String(this.jobs.length), sourcePath, mcpRequestId: automation.requestId, processingMode: automation.mode, status: 'queued', intakeModeSelected: true }); },
-    async startQueue() { this.starts = (this.starts || 0) + 1; },
+    async startQueue(jobIds) { this.starts = (this.starts || 0) + 1; this.startedJobIds = jobIds; },
+    findAutomationRequest(requestId) { return this.automationRequests.find((entry) => entry.requestId === requestId) || null; },
+    async recordAutomationRequest(input) {
+      const previous = this.findAutomationRequest(input.requestId);
+      const snapshots = new Map((previous?.jobs || []).map((job) => [job.id, job]));
+      for (const job of input.jobs || []) snapshots.set(job.id, { ...job });
+      const entry = {
+        ...(previous || {}), ...input,
+        repositoryDirectory: this.config.repositoryDirectory,
+        jobs: [...snapshots.values()],
+        jobIds: [...snapshots.keys()],
+        updatedAt: new Date().toISOString()
+      };
+      this.automationRequests = this.automationRequests.filter((item) => item !== previous);
+      this.automationRequests.push(entry);
+      return entry;
+    },
     findJob(id) { return this.jobs.find((job) => job.id === id); },
     async log() {},
     async confirmJob(id) { this.findJob(id).status = 'queued'; },
@@ -91,7 +109,7 @@ test('MCP reads are paginated and do not expose passwords or thumbnail paths', a
   await assert.rejects(service.call('hamster_search', { surprise: true }), /Unknown argument/);
 });
 
-test('AI intake starts automatically, handles partial failures and reuses persistent job request IDs', async () => {
+test('AI intake starts automatically, retains partial failures and reuses persistent request IDs', async () => {
   const manager = fakeManager();
   const original = manager.addSingle;
   manager.addSingle = async function (source, automation) {
@@ -105,25 +123,28 @@ test('AI intake starts automatically, handles partial failures and reuses persis
   assert.equal(manager.starts, 1);
   manager.addSingle = original;
   const second = await createMcpTools(manager).call('hamster_batch_import', args);
-  assert.equal(second.jobs.length, 2);
-  assert.equal(manager.jobs.length, 2);
+  assert.equal(second.reused, true);
+  assert.equal(second.jobs.length, 1);
+  assert.equal(manager.jobs.length, 1);
   const third = await createMcpTools(manager).call('hamster_batch_import', args);
   assert.equal(third.reused, true);
-  assert.equal(manager.jobs.length, 2);
-  await assert.rejects(createMcpTools(manager).call('hamster_batch_import', { ...args, mode: 'archive' }), /CONFLICT/);
+  assert.equal(manager.jobs.length, 1);
+  await assert.rejects(createMcpTools(manager).call('hamster_batch_import', { ...args, mode: 'archive' }), (error) => error.code === 'REQUEST_ID_CONFLICT');
 });
 
-test('AI refuses unrelated queued work, concurrent mutations and stale confirmations', async () => {
+test('AI accepts beside unrelated queued work, serializes mutations and rejects stale confirmations', async () => {
   const manager = fakeManager();
   const service = createMcpTools(manager);
   manager.jobs.push({ id: 'desktop', status: 'queued', intakeModeSelected: true });
-  const args = { requestId: 'batch', mode: 'archive', paths: [path.resolve('sample')] };
-  await assert.rejects(service.call('hamster_batch_import', args), /UNRELATED/);
+  const args = { requestId: 'batch', mode: 'inventory_only', paths: [path.resolve('sample')] };
+  const accepted = await service.call('hamster_batch_import', args);
+  assert.deepEqual(manager.startedJobIds, [accepted.jobs[0].id]);
   manager.jobs = [];
   let release;
   manager.addSingle = () => new Promise((resolve) => { release = resolve; });
-  const pending = service.call('hamster_batch_import', args);
-  await assert.rejects(service.call('hamster_batch_import', args), /BUSY/);
+  const concurrentArgs = { ...args, requestId: 'batch-concurrent' };
+  const pending = service.call('hamster_batch_import', concurrentArgs);
+  await assert.rejects(service.call('hamster_batch_import', concurrentArgs), /BUSY/);
   release();
   await pending;
   const job = { id: 'ai', mcpRequestId: 'batch', status: 'awaiting_duplicate_confirmation', duplicateReviewFingerprint: 'old' };
@@ -314,8 +335,8 @@ test('request identity is checked before inline archive preferences are saved', 
   await assert.rejects(service.call('hamster_call', {
     capability: 'intake.add_batch',
     input: { requestId: 'identity-one', paths: [source], mode: 'archive', archiveOutputDirectory: secondOutput, sourceDisposition: 'keep' }
-  }), /REQUEST_ID_CONFLICT/);
-  assert.equal(manager.config.archiveOutputDirectory, firstOutput);
+  }), (error) => error.code === 'REQUEST_ID_CONFLICT');
+  assert.notEqual(manager.config.archiveOutputDirectory, firstOutput);
 });
 
 test('automation receipts refresh only inside the active warehouse', async () => {
@@ -434,22 +455,17 @@ test('confirmation token is bound to product state and app capabilities report r
   assert.deepEqual(app.inputSchema.properties.theme.enum, ['classic', 'day', 'night', 'forest', 'twilight']);
 });
 
-test('current three-tool intake refuses unrelated desktop work and starts only its own job ids', async () => {
+test('current three-tool intake accepts beside unrelated desktop work and starts only its own job ids', async () => {
   const manager = fakeManager();
   const service = createMcpTools(manager);
   manager.jobs.push({ id: 'desktop', sourcePath: path.resolve('desktop'), status: 'queued', intakeModeSelected: true });
-  await assert.rejects(service.call('hamster_call', {
-    capability: 'intake.add_batch',
-    input: { requestId: 'mcp-only', paths: [path.resolve('source')], mode: 'inventory_only' }
-  }), /UNRELATED_QUEUE_WORK/);
-
-  manager.jobs = [];
   manager.startQueue = async function (jobIds) { this.startedJobIds = jobIds; };
   const result = await service.call('hamster_call', {
     capability: 'intake.add_batch',
     input: { requestId: 'mcp-only', paths: [path.resolve('source')], mode: 'inventory_only' }
   });
   assert.deepEqual(manager.startedJobIds, [result.jobs[0].id]);
+  assert.equal(manager.startedJobIds.includes('desktop'), false);
 });
 
 test('queue.state filters and paginates without returning a duplicate full jobs array', async () => {

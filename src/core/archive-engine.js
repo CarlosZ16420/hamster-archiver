@@ -544,6 +544,8 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
     const manifest = hooks.preparedManifest || await buildManifest(job.sourcePath, job.sourceType, {
         signal,
         pauseController,
+        preparedSnapshot: hooks.preparedSnapshot,
+        reuseManifest: hooks.reuseManifest,
         largeFolderSimplification: job.largeFolderSimplification ?? config.largeFolderSimplification,
         largeFolderFileThreshold: job.largeFolderFileThreshold ?? config.largeFolderFileThreshold,
         largeFolderMd5SampleLimit: job.largeFolderMd5SampleLimit ?? config.largeFolderMd5SampleLimit,
@@ -569,7 +571,7 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
     }
     if (manifest.length === 0) throw new Error('没有可安全读取并归档的文件。');
 
-    if (hooks.preparedManifest) {
+    if (hooks.preparedManifest && !hooks.preparedManifestValidated) {
       await validateManifestUnchanged(job.sourcePath, job.sourceType, manifest, signal, pauseController);
     }
 

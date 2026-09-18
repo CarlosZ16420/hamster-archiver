@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.14",
+  "notes": {
+    "zh-CN": [
+      "标签筛选固定把“可能重复”和“未压缩”放在“全部标签”之后，超过 20 行时在面板内滚动；特殊标签随界面语言切换。",
+      "仓库概览的“标签”指标可打开全部标签视图，展示项目数并可直接应用筛选。",
+      "键盘左右方向键翻页保留当前滚动位置，仓库排序选择改为更紧凑的字段与方向显示。",
+      "列表支持一键复制项目名称并收紧列距；全选框移除重复说明，搜索框收缩并在聚焦时展开，窄窗口队列统计保持一行。",
+      "运行日志跨应用重启保留并恢复最近 300 条有效记录，补记关键维护、迁移和错误动作；设置日志不记录密码内容。",
+      "不更改 SQLite 仓库格式、用户资料位置或现有记录，无需迁移或重建数据。"
+    ],
+    "en-US": [
+      "The tag filter keeps Possible duplicate and Uncompressed directly after All tags, scrolls internally beyond 20 rows, and translates app-provided special tags with the interface.",
+      "The Tags metric opens an all-tags view with item counts and direct Warehouse filtering.",
+      "Left and right arrow pagination preserves the current scroll position, and Warehouse sort choices use compact field and direction labels.",
+      "List rows support copying item names and use tighter columns; select-all omits its repeated explanation, search shrinks and expands on focus, and queue statistics stay in one row at narrow widths.",
+      "Runtime logs persist across app restarts, restore the latest 300 valid entries, and cover key maintenance, migration, and failure events without recording password values.",
+      "The SQLite Warehouse format, user-data locations, and existing records are unchanged; no migration or rebuild is required."
+    ]
+  }
+}

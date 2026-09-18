@@ -110,6 +110,42 @@ if (!rendererDir) {
     assert.equal(i18n.translate('1 个文件 · 1 卷'), '1 file · 1 volume');
     assert.equal(i18n.translate('1 小时 1 分钟'), '1 hour 1 minute');
     assert.equal(i18n.translate('发现 1 个相似候选'), 'Found 1 similar candidate');
+    assert.equal(
+      i18n.translate('设置已保存；变更：压缩格式、压缩密码（内容未记录）。'),
+      'Settings saved; changed: archive format, archive password (value not logged).'
+    );
+    assert.equal(
+      i18n.translate('用户数据区切换完成：D:\\Old → E:\\New；方式：复制当前数据。'),
+      'User data area switched: D:\\Old → E:\\New; mode: copied current data.'
+    );
+    assert.equal(
+      i18n.translate('已重新载入 3 个排除词，并更新相似项目关系。'),
+      'Reloaded 3 ignore terms; similarity updated.'
+    );
+  });
+
+  test('folder feedback and backup confirmation keep user names and locations intact in English', () => {
+    i18n.setLocale('en-US');
+    assert.equal(i18n.translate('压缩包：未压缩'), 'Archive: uncompressed');
+    assert.equal(i18n.translate('逐项确认'), 'Review Each Item');
+    assert.equal(i18n.translate('缩略图视图 · 中 · 再次点击切换大小'), 'Thumbnail View · Medium · Click again to change size');
+    assert.equal(i18n.translate('仓库与本地目录内容一致'), '仓库 matches the local folder contents');
+    assert.equal(i18n.translate('项目“仓库”与本地目录内容一致；未重建预览，也未改写仓库内容。'), '“仓库” matches the local folder contents; previews and Warehouse contents were not rebuilt.');
+    assert.equal(i18n.translate('原项目记录的备份位置为：旧盘，当前压缩设置的备份位置为：新盘，备份位置是否更新？'), 'The item’s original backup location is: 旧盘. The current compression backup location is: 新盘. Update the backup location?');
+    assert.equal(i18n.translate('所选项目有2项的备份位置与当前压缩设置不同，当前压缩设置为“备份位置：新盘”，是否将项目备份位置更新为当前设置？'), '2 selected items have a different backup location. The current compression setting is “Backup location: 新盘”. Update the items’ backup locations to this setting?');
+  });
+
+  test('warehouse density, selection actions and off-page counts translate in both directions', () => {
+    const labels = ['缩略图视图', '缩略图大小', '小', '中', '大', '全选当前页', '取消全部选择', '输入仓库页码', '返回仓库工具栏', '批量操作', '入库时间 ↓', '入库时间 ↑', '第'];
+    i18n.setLocale('en-US');
+    for (const label of labels) assert.ok(!CJK.test(i18n.translate(label)), label);
+    assert.equal(i18n.translate('其中 1 项不在当前页'), '1 item on other pages');
+    assert.equal(i18n.translate('其中 2 项不在当前页'), '2 items on other pages');
+    assert.equal(i18n.translate('/ 9 页 · 共 208 项'), '/ 9 · 208 items total');
+    i18n.setLocale('zh-CN');
+    for (const label of labels) assert.equal(i18n.translate(label), label);
+    assert.equal(i18n.translate('其中 2 项不在当前页'), '其中 2 项不在当前页');
+    assert.equal(i18n.translate('/ 9 页 · 共 208 项'), '/ 9 页 · 共 208 项');
   });
 
   test('pattern captures preserve user text unless explicitly marked as UI copy', () => {
@@ -203,7 +239,7 @@ if (!rendererDir) {
     );
     assert.match(
       app,
-      /\? '待选入库方式'\s*:\s*statusLabel\(job\?\.status\)/,
+      /\? '待选入库方式'\s*:\s*job\?\.status === 'queued' && job\?\.taskKind === 'catalog_refresh'\s*\? '等待更新目录'\s*:\s*statusLabel\(job\?\.status\)/,
       'the special badge must remain presentation-only and other statuses must use statusLabel'
     );
 

@@ -1,0 +1,11 @@
+{
+  "source": "hamster-archiver",
+  "type": "mcp",
+  "version": "1.0.0",
+  "name_zh": "仓鼠症大结局",
+  "name_en": "Hamster Archiver",
+  "description_zh": "调用本机 Hamster Archiver 查询仓库并提交入库任务。",
+  "description_en": "Use the local Hamster Archiver warehouse and intake tasks.",
+  "examples_zh": ["用仓鼠症大结局搜索旅行项目", "用仓鼠症大结局把这个目录不压缩入库"],
+  "examples_en": ["Search Hamster Archiver for travel projects", "Use Hamster Archiver to add this folder without compression"]
+}

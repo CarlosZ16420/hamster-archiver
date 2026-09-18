@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const path = require('node:path');
+const { Worker } = require('node:worker_threads');
 const {
   integrityCheck,
   findCatalogIdsByExactName,
@@ -74,6 +75,7 @@ class AppStore {
       'automation',
       'mcp-requests.json'
     );
+    this.logWriteTail = Promise.resolve();
     this.loadedLegacySettings = false;
     this.repositories = new Map();
   }
@@ -130,6 +132,44 @@ class AppStore {
     return loadCatalogFromDatabase(this.getRepository(repositoryDirectory).database);
   }
 
+  async loadCatalogInBackground(repositoryDirectory, onProgress = null) {
+    const repository = this.getRepository(repositoryDirectory);
+    return new Promise((resolve, reject) => {
+      const records = [];
+      const worker = new Worker(path.join(__dirname, 'catalog-loader-worker.js'), {
+        workerData: { databasePath: repository.databasePath }
+      });
+      worker.unref();
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        callback(value);
+      };
+      worker.on('message', (message) => {
+        if (message?.type === 'batch') {
+          try {
+            records.push(...message.records);
+            onProgress?.({ loaded: message.loaded, total: message.total });
+          } catch (error) {
+            void worker.terminate();
+            finish(reject, error);
+            return;
+          }
+          worker.postMessage({ type: 'continue' });
+        } else if (message?.type === 'complete') {
+          finish(resolve, records);
+        } else if (message?.type === 'error') {
+          finish(reject, Object.assign(new Error(message.error?.message || '仓库后台加载失败。'), message.error));
+        }
+      });
+      worker.on('error', (error) => finish(reject, error));
+      worker.on('exit', (code) => {
+        if (!settled && code !== 0) finish(reject, new Error(`仓库后台加载线程异常退出 (${code})。`));
+      });
+    });
+  }
+
   async saveCatalog(repositoryDirectory, records) {
     return saveCatalogToDatabase(this.getRepository(repositoryDirectory).database, records);
   }
@@ -171,14 +211,36 @@ class AppStore {
     const row = this.getRepository(repositoryDirectory).database
       .prepare('SELECT manifest_json FROM pending_manifests WHERE job_id = ?')
       .get(String(jobId));
-    return row ? JSON.parse(row.manifest_json) : null;
+    if (!row) return null;
+    const payload = JSON.parse(row.manifest_json);
+    if (Array.isArray(payload)) return payload;
+    if (!payload || payload.schemaVersion !== 2 || !Array.isArray(payload.manifest)) return null;
+    const manifest = payload.manifest;
+    Object.defineProperty(manifest, 'directories', {
+      value: Array.isArray(payload.directories) ? payload.directories : [], enumerable: false, configurable: true
+    });
+    Object.defineProperty(manifest, 'skippedFiles', {
+      value: Array.isArray(payload.skippedFiles) ? payload.skippedFiles : [], enumerable: false, configurable: true
+    });
+    if (payload.sourceSnapshot) {
+      Object.defineProperty(manifest, 'sourceSnapshot', {
+        value: payload.sourceSnapshot, enumerable: false, configurable: true
+      });
+    }
+    return manifest;
   }
 
   async savePendingManifest(repositoryDirectory, jobId, manifest) {
     this.getRepository(repositoryDirectory).database.prepare(`
       INSERT INTO pending_manifests(job_id, manifest_json) VALUES (?, ?)
       ON CONFLICT(job_id) DO UPDATE SET manifest_json = excluded.manifest_json
-    `).run(String(jobId), JSON.stringify(manifest));
+    `).run(String(jobId), JSON.stringify({
+      schemaVersion: 2,
+      manifest: Array.isArray(manifest) ? manifest : [],
+      directories: Array.isArray(manifest?.directories) ? manifest.directories : [],
+      skippedFiles: Array.isArray(manifest?.skippedFiles) ? manifest.skippedFiles : [],
+      sourceSnapshot: manifest?.sourceSnapshot || null
+    }));
   }
 
   async deletePendingManifest(repositoryDirectory, jobId) {
@@ -188,8 +250,44 @@ class AppStore {
   }
 
   async appendLog(_repositoryDirectory, entry) {
-    await fs.mkdir(path.dirname(this.logPath), { recursive: true });
-    await fs.appendFile(this.logPath, `${JSON.stringify(entry)}\n`, 'utf8');
+    const operation = this.logWriteTail.catch(() => {}).then(async () => {
+      await fs.mkdir(path.dirname(this.logPath), { recursive: true });
+      await fs.appendFile(this.logPath, `${JSON.stringify(entry)}\n`, 'utf8');
+    });
+    this.logWriteTail = operation;
+    return operation;
+  }
+
+  async loadLogs(limit = 300) {
+    let source;
+    try {
+      source = await fs.readFile(this.logPath, 'utf8');
+    } catch (error) {
+      if (error.code === 'ENOENT') return [];
+      throw error;
+    }
+    const entries = [];
+    const lines = source.split(/\r?\n/).filter(Boolean);
+    for (const line of lines) {
+      try {
+        const entry = JSON.parse(line);
+        if (!entry || typeof entry !== 'object' || typeof entry.at !== 'string' ||
+            typeof entry.level !== 'string' || typeof entry.message !== 'string') continue;
+        entries.push({
+          at: entry.at,
+          level: entry.level,
+          message: entry.message,
+          jobId: entry.jobId ?? null
+        });
+      } catch {
+        // A truncated final line from an interrupted process must not hide older logs.
+      }
+    }
+    return entries.slice(-Math.max(1, Number(limit) || 300));
+  }
+
+  async flushLogs() {
+    await this.logWriteTail.catch(() => {});
   }
 
   async loadAutomationRequests() {

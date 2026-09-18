@@ -5,6 +5,23 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.hamsterUiState = api;
 }(typeof globalThis === 'object' ? globalThis : this, () => ({
+  catalogRangeSelection(pageIds, anchorId, targetId, selection, additive = false) {
+    const result = new Set(additive ? selection : []);
+    const targetIndex = pageIds.indexOf(targetId);
+    if (targetIndex < 0) return new Set(selection);
+    const anchorIndex = pageIds.indexOf(anchorId);
+    const start = anchorIndex < 0 ? targetIndex : anchorIndex;
+    for (const id of pageIds.slice(Math.min(start, targetIndex), Math.max(start, targetIndex) + 1)) result.add(id);
+    return result;
+  },
+  catalogMarqueeSelection(initialSelection, hitIds, mode) {
+    const result = new Set(mode === 'replace' ? [] : initialSelection);
+    for (const id of hitIds) {
+      if (mode === 'toggle' && result.has(id)) result.delete(id);
+      else result.add(id);
+    }
+    return result;
+  },
   formatCatalogDate(value, locale = 'zh-CN') {
     const selectedLocale = locale === 'en-US' ? 'en-US' : 'zh-CN';
     const dateOnly = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);

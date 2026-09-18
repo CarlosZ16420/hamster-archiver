@@ -64,3 +64,56 @@ test('cancellation drains pending image work before rollback can start', async (
   assert.equal(completed, 2);
   assert.equal(manifest.filter((file) => file.thumbnailPath).length, 0);
 });
+
+test('incremental refresh keeps existing previews and does not reread unchanged media', async (t) => {
+  const { job, manifest, config } = await fixture(t, 3);
+  manifest[0].thumbnailPath = 'existing-preview.png';
+  manifest[0].thumbnails = [{ thumbnailPath: 'existing-preview.png', type: 'image' }];
+  await fs.mkdir(path.join(config.repositoryDirectory, 'thumbnails'), { recursive: true });
+  await fs.writeFile(path.join(config.repositoryDirectory, 'thumbnails', 'existing-preview.png'), 'cached');
+  manifest[1].sourceMetadataUnchanged = true;
+  const attempts = [];
+
+  await createThumbnails(job, manifest, config, {}, {
+    async createThumbnailFromPath(source) {
+      attempts.push(path.basename(source));
+      return { isEmpty: () => false, toPNG: () => Buffer.from('preview') };
+    }
+  });
+
+  assert.deepEqual(attempts, ['2.png']);
+  assert.equal(manifest[0].thumbnailPath, 'existing-preview.png');
+  assert.equal(manifest[1].thumbnailPath, undefined);
+  assert.ok(manifest[2].thumbnailPath);
+});
+
+test('incremental refresh repairs a missing cache only for that media', async (t) => {
+  const { job, manifest, config } = await fixture(t, 1);
+  manifest[0].sourceMetadataUnchanged = true;
+  manifest[0].thumbnailPath = 'missing-preview.png';
+  let attempts = 0;
+  await createThumbnails(job, manifest, config, {}, {
+    async createThumbnailFromPath() {
+      attempts += 1;
+      return { isEmpty: () => false, toPNG: () => Buffer.from('replacement') };
+    }
+  });
+  assert.equal(attempts, 1);
+  assert.equal(await fs.readFile(manifest[0].thumbnailPath, 'utf8'), 'replacement');
+});
+
+test('source changes during preview processing are fatal rather than decode warnings', async (t) => {
+  const { job, manifest, config } = await fixture(t, 1);
+  const source = path.join(job.sourcePath, manifest[0].relativePath);
+  await fs.writeFile(source, 'original');
+  const stats = await fs.stat(source);
+  Object.assign(manifest[0], { size: stats.size, modifiedAtMs: stats.mtimeMs });
+  const logs = [];
+  await assert.rejects(createThumbnails(job, manifest, config, { onLog: (message) => logs.push(message) }, {
+    async createThumbnailFromPath() {
+      await fs.writeFile(source, 'new contents with different size');
+      return { isEmpty: () => false, toPNG: () => Buffer.from('stale-preview') };
+    }
+  }), { code: 'SOURCE_CHANGED' });
+  assert.deepEqual(logs, []);
+});

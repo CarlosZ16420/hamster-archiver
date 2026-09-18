@@ -1,0 +1,18 @@
+{
+  "manifest_version": "0.3",
+  "name": "hamster-archiver",
+  "display_name": "Hamster Archiver",
+  "version": "1.0.0",
+  "description": "Optional local MCP access to Hamster Archiver.",
+  "server": {
+    "type": "stdio",
+    "command": "HamsterArchiver-MCP.cmd",
+    "args": []
+  },
+  "_meta": {
+    "com.microsoft.windows": {
+      "preview": true,
+      "requires_package_identity": true
+    }
+  }
+}

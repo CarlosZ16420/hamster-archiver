@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.16",
+  "notes": {
+  "zh-CN": [
+    "目录检查无变化时提示项目名，排队冲突说明更清楚，原位置可在打开旁修改。",
+    "二次压缩支持保留、更新或逐项确认备份位置，仅冲突任务等待确认。",
+    "缩略图按钮默认中档并循环大小；列表展示更多标签，提示避开返回按钮。",
+    "用户资料和仓库格式保持兼容，无需迁移。"
+  ],
+  "en-US": [
+    "Unchanged folder checks identify the item; queue conflicts are explained and originals can be edited beside Open.",
+    "Later compression can keep, update, or individually review backup locations; only conflicts wait for confirmation.",
+    "The thumbnail button defaults to medium and cycles sizes; list rows show more tags and toasts avoid the return button.",
+    "User data and Warehouse formats remain compatible; no migration is needed."
+  ]
+  }
+}
