@@ -39,7 +39,7 @@
     "npm": "^10.0.0 || ^11.0.0"
   },
   "devDependencies": {
-    "electron": "43.7.1",
+    "electron": "44.4.3",
     "electron-builder": "26.15.7",
     "resedit": "3.0.2"
   }
