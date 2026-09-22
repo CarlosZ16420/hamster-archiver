@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('archiveApp', {
   exportWarehouse: () => ipcRenderer.invoke('warehouse:export'),
   importWarehouse: () => ipcRenderer.invoke('warehouse:import'),
   checkForUpdates: (options = {}) => ipcRenderer.invoke('app:check-for-updates', options),
+  logToast: (message, level = 'info') => ipcRenderer.invoke('app:log-toast', message, level),
   installCheckedUpdate: (version) => ipcRenderer.invoke('app:install-checked-update', version),
   installUpdatePackage: () => ipcRenderer.invoke('app:update-from-package'),
   changeUserDataLocation: () => ipcRenderer.invoke('user-data:change-location'),

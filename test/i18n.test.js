@@ -214,7 +214,7 @@ if (!rendererDir) {
       'Found 3 similar items · Awaiting manual confirmation'
     );
     assert.ok(!CJK.test(i18n.translateStage(
-      '名称存在仓库候选 · 发现 2 个相似候选 · 等待选择入库方式'
+      '发现 2 个相似候选 · 等待选择入库方式'
     )));
     assert.equal(
       i18n.translateStage('2 个文件内容完全一致 · 1 个文件名称相似 · 项目名称完全一致'),
@@ -239,7 +239,7 @@ if (!rendererDir) {
     );
     assert.match(
       app,
-      /\? '待选入库方式'\s*:\s*job\?\.status === 'queued' && job\?\.taskKind === 'catalog_refresh'\s*\? '等待更新目录'\s*:\s*statusLabel\(job\?\.status\)/,
+      /\? '待选入库方式'\s*:\s*job\?\.status === 'queued' && job\?\.taskKind === 'catalog_refresh'\s*\? '等待校对更新'\s*:\s*statusLabel\(job\?\.status\)/,
       'the special badge must remain presentation-only and other statuses must use statusLabel'
     );
 

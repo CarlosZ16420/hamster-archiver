@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { checkForUpdates, compareVersions, resolveCnbConfig, UPDATE_PROVIDER_CONFIG } = require('../src/core/update-checker');
+const { checkForUpdates, compareVersions, isStableRelease, resolveCnbConfig, UPDATE_PROVIDER_CONFIG } = require('../src/core/update-checker');
 
 test('history paginates, sorts numerically, filters releases and selects the requested language', async () => {
   const release = { tag_name: 'v4.5.18', body: '## 中文\n- 修复归档。\n## English\n- Fix archives.' };
@@ -120,6 +120,67 @@ test('update metadata exposes a matching Windows asset for installation', async 
   assert.equal(result.asset.name, 'HamsterArchiver-v4.0.1-win-x64.zip');
   assert.equal(result.asset.size, 123);
   assert.match(result.asset.digestDownloadUrl, /\.zip\.sha256$/);
+});
+
+test('stable releases require a plain semantic tag and can be restricted to main', () => {
+  assert.equal(isStableRelease({ tag_name: 'v4.7.0', target_commitish: 'main' }, 'main'), true);
+  assert.equal(isStableRelease({ tag_name: 'v4.7.0-beta.1', target_commitish: 'main' }, 'main'), false);
+  assert.equal(isStableRelease({ tag_name: 'v4.7.0', target_commitish: 'feature/grid' }, 'main'), false);
+  assert.equal(isStableRelease({ tag_name: 'v4.7.0', target_commitish: 'main', prerelease: true }, 'main'), false);
+});
+
+test('automatic checks select the newest stable release from main and ignore feature Betas', async () => {
+  const calls = [];
+  const result = await checkForUpdates({
+    currentVersion: '4.6.17',
+    stableBranch: 'main',
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => [
+          { tag_name: 'v4.8.0-beta.1', target_commitish: 'feature/new-ui', prerelease: true },
+          { tag_name: 'v4.7.1', target_commitish: 'feature/hotfix' },
+          { tag_name: 'v4.7.0-rc.1', target_commitish: 'main' },
+          { tag_name: 'v4.7.0', target_commitish: 'main' }
+        ]
+      };
+    }
+  });
+  assert.equal(result.latestVersion, '4.7.0');
+  assert.equal(result.updateAvailable, true);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0], /\/releases\?per_page=100&page=1$/);
+});
+
+test('online release history applies the same main-branch filter as latest selection', async () => {
+  const releases = [
+    { tag_name: 'v4.7.0', target_commitish: 'main' },
+    { tag_name: 'v4.6.19', target_commitish: 'feature/test' },
+    { tag_name: 'v4.6.18', target_commitish: 'main' }
+  ];
+  const result = await checkForUpdates({
+    currentVersion: '4.6.17',
+    includeHistory: true,
+    stableBranch: 'main',
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => releases })
+  });
+  assert.deepEqual(result.releases.map((item) => item.version), ['4.7.0', '4.6.18']);
+});
+
+test('automatic checks do not fall back when main stable metadata cannot be confirmed', async () => {
+  const calls = [];
+  await assert.rejects(() => checkForUpdates({
+    currentVersion: '4.6.17',
+    stableBranch: 'main',
+    cnb: cnbConfig,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => [{ tag_name: 'v4.7.0', target_commitish: 'feature/test' }] };
+    }
+  }), /main 分支的正式版本/);
+  assert.equal(calls.length, 1);
 });
 
 test('installed distribution selects the matching Setup executable and digest', async () => {

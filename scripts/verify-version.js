@@ -4,12 +4,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
-const projectRoot = path.resolve(__dirname, '..');
+const projectRoot = path.resolve(process.env.HAMSTER_CHECK_SOURCE_ROOT || path.resolve(__dirname, '..'));
 const read = (name) => fs.readFileSync(path.join(projectRoot, name), 'utf8');
 const packageJson = JSON.parse(read('package.json'));
 const lock = JSON.parse(read('package-lock.json'));
 const version = packageJson.version;
 const errors = [];
+if (!/^\d+\.\d+\.\d+(?:-beta\.[a-z0-9][a-z0-9.-]*\.\d+)?$/.test(version)) {
+  errors.push('应用版本必须是纯正式 SemVer 或任务 Beta SemVer；正式版不加 stable 后缀');
+}
 
 if (lock.version !== version || lock.packages?.['']?.version !== version) {
   errors.push('package-lock.json 与 package.json 版本不一致');

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.18",
+  "notes": {
+    "zh-CN": [
+      "未压缩目录统一使用“校对更新”，详情操作移到项目名后，并精简时间与确认文案。",
+      "仓库工具可隐藏“未压缩”标签，批量撤回期间显示独立等待图标。",
+      "删除后撤回会恢复双向相似关系。",
+      "清除疑似重复项不再清除完全重复任务。",
+      "仓库格式和用户资料位置保持兼容，无需迁移。"
+    ],
+    "en-US": [
+      "Uncompressed folders consistently use Review Updates, with compact detail actions and simplified timestamps and confirmations.",
+      "Warehouse Tools can hide the Uncompressed tag, and bulk undo now shows a dedicated busy indicator.",
+      "Undoing deletion restores reciprocal similarity relationships.",
+      "Removing suspected duplicates no longer removes exact duplicates.",
+      "Warehouse formats and user-data locations remain compatible; no migration is needed."
+    ]
+  }
+}

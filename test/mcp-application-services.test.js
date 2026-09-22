@@ -129,6 +129,8 @@ test('manual update cache binds installation to the checked version and automati
   assert.equal(data.events.at(-1), 'quit');
   assert.equal(checks[0].includeHistory, true);
   assert.equal(checks[1].includeHistory, false);
+  assert.equal(checks[0].stableBranch, 'main');
+  assert.equal(checks[1].stableBranch, 'main');
 });
 
 test('migration preflight rejects existing and overlapping targets', async (t) => {

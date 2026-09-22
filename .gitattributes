@@ -7,52 +7,6 @@
 *.dll binary
 *.pak binary
 
-# 私有开发内容不进入公开快照（git archive / export-ignore）
-Developer/ export-ignore
-dev-notes/ export-ignore
-test-data/ export-ignore
-AGENTS.md export-ignore
-docs/private/ export-ignore
-发帖点.md export-ignore
-docs/public-release-coverage-*.md export-ignore
-docs/UNCOMPRESSED_INTAKE_IMPLEMENTATION.md export-ignore
-CHANGELOG.md export-ignore
-scripts/sync-public-snapshot.js export-ignore
-test/public-snapshot.test.js export-ignore
-docs/REPOSITORY_MAINTENANCE.md export-ignore
-ReadmeGlmversion.md export-ignore
-
-# 本地运行数据、日志、用户资料
-userdata/ export-ignore
-/config/ export-ignore
-saves/ export-ignore
-nuts/ export-ignore
-nuts-staging/ export-ignore
-processed/ export-ignore
-archive-staging/ export-ignore
-待处理文件/ export-ignore
-零碎文件/ export-ignore
-压缩暂存目录/ export-ignore
-构造测试目录/ export-ignore
-logs/ export-ignore
-*.log export-ignore
-
-# 数据库、压缩包、密钥、构建产物
-*.sqlite export-ignore
-*.sqlite-wal export-ignore
-*.sqlite-shm export-ignore
-*.db export-ignore
-*.7z export-ignore
-*.7z.* export-ignore
-.env export-ignore
-.env.* export-ignore
-HamsterArchive.exe export-ignore
-HamsterArchiver.exe export-ignore
-# 完整性锁定的元数据必须跨平台保持逐字节一致
+# Integrity metadata must remain byte-for-byte stable across platforms.
 tools/7zip/BUILD-INFO.txt text eol=lf
 tools/ffmpeg/BUILD-INFO.txt text eol=lf
-
-# 项目代理规则和原型资料只服务私有开发仓库
-.agents/ export-ignore
-.workbuddy/ export-ignore
-docs/prototypes/ export-ignore

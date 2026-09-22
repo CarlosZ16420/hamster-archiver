@@ -8,7 +8,7 @@
 
 Windows local-first file organizer, media library, and verifiable batch archiver. Optional local CLI/MCP interfaces support capable AI agents as an experimental feature.
 
-![Version](https://img.shields.io/badge/version-4.6.17-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.6.18-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
@@ -28,7 +28,9 @@ Downloads keep piling up, your drive is almost full, and organizing everything n
 
 **Your files can live elsewhere while a clear record of their contents and backup locations stays on your computer.**
 
-[![Library overview, cover gallery and search filters](assets/readme/library-showcase.en-US.png)](assets/readme/library-showcase.en-US.png)
+[![Library overview, cover gallery and search filters](README.assets/仓库-主目录.png)](README.assets/仓库-主目录.png)
+
+[![Large-thumbnail library view](README.assets/大缩略图模式.png)](README.assets/大缩略图模式.png)
 
 <sub>Actual application views; some labels in these screenshots may differ from the current version.</sub>
 
@@ -41,7 +43,7 @@ Downloads keep piling up, your drive is almost full, and organizing everything n
 
 The app packages files and records them; you or your sync tool handles cloud uploads. Local organization uses catalog metadata such as tags and does not automatically rearrange folders on disk.
 
-Refresh an uncompressed folder from its details or a selected batch. Additions merge into the same record; modifications and deletions require a source-change review. Dropping the same original folder again continues its latest content record, with an explicit choice to replace, create an independent record, or skip when review is needed. Valid previews and fingerprints are reused, and relocating an original only changes the association until your next operation.
+Review updates to an uncompressed folder from its details or a selected batch. Additions merge into the same record; modifications and deletions require a source-change review. Dropping the same original folder again continues its latest content record, with an explicit choice to replace, create an independent record, or skip when review is needed. Valid previews and fingerprints are reused, and relocating an original only changes the association until your next operation.
 
 Intake automatically detects duplicates and can skip existing content while still providing a similarity report. Large directories remain responsive, and the whole library is quick to search.
 
@@ -55,9 +57,9 @@ For **Windows x64**, with English and Chinese interfaces. To use the app, choose
 
 Compression and video-preview tools are included, and no separate Node.js installation is needed.
 
-Keep all included files in the portable directory, `HamsterArchiver-v4.6.17-win-x64/`.
+Keep all included files in the portable directory, `HamsterArchiver-v4.6.18-win-x64/`.
 
-[![Batch archiving, progress tracking and duplicate review](assets/readme/archive-showcase.en-US.png)](assets/readme/archive-showcase.en-US.png)
+[![Batch archiving, progress tracking and duplicate review](README.assets/归档工作台-主目录.png)](README.assets/归档工作台-主目录.png)
 
 ### Ready for modern local workflows
 
@@ -67,7 +69,7 @@ Beyond the desktop interface, Hamster Archiver offers optional CLI/MCP automatio
 
 Each project retains image thumbnails, sampled video frames and a complete directory tree. Choose a cover, record the extraction password and backup location, and browse what you archived without opening the archive itself.
 
-[![Tags, ratings, backup locations, video frames and directory tree](assets/readme/details-showcase.en-US.png)](assets/readme/details-showcase.en-US.png)
+[![Tags, ratings, backup locations, video frames and directory tree](README.assets/项目详情.png)](README.assets/项目详情.png)
 
 ## Everyday ease, supported by careful details
 
@@ -94,11 +96,11 @@ Browse covers and build your own organization habits with tags, ratings and note
 <details>
 <summary>Details: organization tools and responsive browsing</summary>
 
-- Large thumbnails and a text list serve different browsing needs, with keyboard pagination, bulk tags and backup-location edits. Warehouse items deleted during the current session, together with their files in the Windows Recycle Bin, can also be undone directly.
+- Large thumbnails and a text list serve different browsing needs, with keyboard pagination, bulk tags and backup-location edits. Warehouse items deleted during the current session, together with their files in the Windows Recycle Bin, can also be undone directly, including their similarity relationships.
 - Tag completion reuses existing categories; accept suggestions with Tab. Selection updates in place to reduce flicker and layout jumps.
 - Frames from the same video stay grouped, and portrait media remains fully visible. Change covers or add supplementary images from files or the clipboard.
 - Read large-project details on demand. Load nearby visible media with bounded concurrent reads, and render directory trees virtually to reduce unnecessary work.
-- Both views support marquee selection, Ctrl toggling and Shift ranges, with one-click clearing across pages. Warehouse tools offer small, medium and large thumbnails; a floating button returns to search and bulk actions after scrolling down.
+- Both views support marquee selection, Ctrl toggling and Shift ranges, with one-click clearing across pages. Warehouse tools can hide the Uncompressed tag when preferred; a floating button returns to search and bulk actions after scrolling down.
 - Store thumbnails instead of another complete copy of original media; preview counts are configurable.
 - Choose from five themes and Chinese or English, with continuing refinements to dark menus, text contrast and dynamic messages.
 

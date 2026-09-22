@@ -1124,7 +1124,7 @@ class QueueManager extends EventEmitter {
     return this.getState();
   }
 
-  async performSimilarityRebuild({ reportProgress = true } = {}) {
+  async performSimilarityRebuild({ reportProgress = true, useCatalogSnapshot = false } = {}) {
     const statistics = this.refreshTermStatistics();
     const scorer = createSimilarityScorer(this.similarityIgnoreTerms, statistics);
     const stamp = this.similarityVersionStamp();
@@ -1149,12 +1149,36 @@ class QueueManager extends EventEmitter {
     }
     const catalogOrder = new Map(snapshot.map((record, index) => [record.id, index]));
     const catalogById = new Map(snapshot.map((record) => [record.id, record]));
+    const snapshotCandidateIndex = useCatalogSnapshot ? new Map() : null;
+    if (snapshotCandidateIndex) {
+      for (const candidate of snapshot) {
+        for (const key of similarityCandidateKeys(candidate, [])) {
+          if (!snapshotCandidateIndex.has(key)) snapshotCandidateIndex.set(key, []);
+          snapshotCandidateIndex.get(key).push(candidate.id);
+        }
+      }
+    }
+    const getSnapshotCandidates = (subject) => {
+      const ids = new Set();
+      const keys = new Set([
+        ...similarityCandidateKeys(subject, []),
+        ...similarityCandidateKeys(subject, this.similarityIgnoreTerms)
+      ]);
+      for (const key of keys) {
+        for (const id of snapshotCandidateIndex.get(key) || []) ids.add(id);
+      }
+      ids.delete(subject.id);
+      ids.delete(subject.jobId);
+      return [...ids].map((id) => catalogById.get(id)).filter(Boolean);
+    };
     const yieldToEventLoop = () => new Promise((resolve) => setImmediate(resolve));
     for (let index = 0; index < snapshot.length; index += 1) {
       const record = snapshot[index];
       // 重建期间目录可能被增删（后台任务与用户操作并发），跳过失效位置。
       if (!record) continue;
-      const candidates = this.getSimilarityCandidates(record)
+      const candidates = (useCatalogSnapshot
+        ? getSnapshotCandidates(record)
+        : this.getSimilarityCandidates(record))
         .filter((candidate) => catalogById.get(candidate.id) === candidate &&
           (catalogOrder.get(candidate.id) ?? -1) > index);
       const matches = findSimilarProjects(record, candidates, this.similarityIgnoreTerms, this.similarityStrength, scorer)
@@ -1424,7 +1448,7 @@ class QueueManager extends EventEmitter {
         this.catalog.splice(Math.min(entry.index, this.catalog.length), 0, structuredClone(entry.record));
       }
       this.markTermStatisticsDirty();
-      await this.rebuildAllSimilarityRelations();
+      await this.rebuildAllSimilarityRelations({ useCatalogSnapshot: true });
       await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
     } catch (error) {
       this.catalog = catalogBeforeRestore;
@@ -1997,7 +2021,7 @@ class QueueManager extends EventEmitter {
     }
     const records = this.catalog.filter((record) => ids.has(record.id));
     if (records.length !== ids.size) throw new Error('部分仓库记录不存在，请刷新后重试。');
-    this.rememberCatalogAction(`批量修改 ${records.length} 项备份位置`, records.map((record) => record.id), [
+    this.rememberCatalogAction(`修改 ${records.length} 项备份位置`, records.map((record) => record.id), [
       'backupLocation', 'metadataUpdatedAt'
     ]);
     const updatedAt = new Date().toISOString();
@@ -2354,7 +2378,7 @@ class QueueManager extends EventEmitter {
     }
     job.status = 'queued';
     job.stageText = action === 'overwrite'
-      ? (job.processingMode === 'inventory_only' ? '已确认变化，等待更新目录' : '已确认变化，等待覆盖并压缩')
+      ? (job.processingMode === 'inventory_only' ? '已确认变化，等待校对更新' : '已确认变化，等待覆盖并压缩')
       : (job.processingMode === 'inventory_only' ? '已确认新建独立项目，等待不压缩入库' : '已确认新建独立项目，等待压缩');
     delete job.sourceChangeReport;
     await this.persistJobs();
@@ -3602,10 +3626,7 @@ class QueueManager extends EventEmitter {
     const taskKind = task.taskKind || (task.processingMode === 'archive_existing' ? 'catalog_compress' : 'intake');
     const automaticDuplicateCheckPending = false;
     const blockingConfirmationReasons = confirmationReasons.filter((reason) => reason === 'large_task');
-    const similarityNotice = [
-      nameDuplicateMatches.length > 0 ? '名称存在仓库候选' : null,
-      similarMatches.length > 0 ? `发现 ${similarMatches.length} 个相似候选` : null
-    ].filter(Boolean).join(' · ');
+    const similarityNotice = similarMatches.length > 0 ? `发现 ${similarMatches.length} 个相似候选` : '';
     return {
       id: crypto.randomUUID(),
       ...task,
@@ -3641,7 +3662,7 @@ class QueueManager extends EventEmitter {
             similarityNotice || null,
             !intakeModeSelected ? '等待选择入库方式'
               : task.processingMode === 'inventory_only' ? '等待不压缩入库'
-                : taskKind === 'catalog_refresh' ? '等待更新目录'
+                : taskKind === 'catalog_refresh' ? '等待校对更新'
                   : sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩'
           ].filter(Boolean).join(' · '),
       archiveBaseName: createConfiguredArchiveName(task.displayName, this.config),
@@ -3808,7 +3829,7 @@ class QueueManager extends EventEmitter {
         job.duplicatePolicy = 'disabled';
       }
       job.stageText = job.status === 'queued'
-        ? job.taskKind === 'catalog_refresh' ? '等待更新目录' : '等待不压缩入库'
+        ? job.taskKind === 'catalog_refresh' ? '等待校对更新' : '等待不压缩入库'
         : `未压缩直接入库 · ${job.stageText || '等待手动确认'}`;
     }
     await this.persistJobs();
@@ -3825,7 +3846,7 @@ class QueueManager extends EventEmitter {
     const candidates = this.jobs.filter((job) => job.taskKind !== 'catalog_refresh' &&
       ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
     if (candidates.length === 0) {
-      if (refreshJobs.length > 0) throw new Error('没有可压缩入库的普通任务；“更新目录”任务请使用不压缩入库继续。');
+      if (refreshJobs.length > 0) throw new Error('没有可压缩入库的普通任务；“校对更新”任务请使用不压缩入库继续。');
       throw new Error('任务列表中没有可以压缩入库的项目。');
     }
     const candidateIds = candidates.map((job) => job.id);
@@ -3844,7 +3865,7 @@ class QueueManager extends EventEmitter {
     await this.log('info', `已选择压缩入库，共 ${candidates.length} 个任务。`);
     void this.startQueue(candidateIds);
     const state = this.getState();
-    return refreshJobs.length > 0 ? { ...state, archiveStartNotice: '部分“更新目录”任务仅在不压缩入库时有效，本次不会执行。' } : state;
+    return refreshJobs.length > 0 ? { ...state, archiveStartNotice: '部分“校对更新”任务仅在不压缩入库时有效，本次不会执行。' } : state;
   }
 
   async queueCatalogRecordsForCompression(recordIds, options = {}) {
@@ -3949,7 +3970,7 @@ class QueueManager extends EventEmitter {
         continue;
       }
       if (activeRecordIds.has(record.id)) {
-        failures.push({ id: record.id, title: record.title, reason: '该项目已在更新或压缩队列中，请先完成或取消该任务，再更新目录。' });
+        failures.push({ id: record.id, title: record.title, reason: '该项目已在更新或压缩队列中，请先完成或取消该任务，再校对更新。' });
         continue;
       }
       const sourcePath = getOriginalSourcePath(record);
@@ -3972,7 +3993,7 @@ class QueueManager extends EventEmitter {
           ignoreScheduleOnce: true,
           sameSourceRecordIds: this.findSameSourceUncompressedRecords(sourcePath, 'directory').map((item) => item.id)
         });
-        job.stageText = '等待更新目录';
+        job.stageText = '等待校对更新';
         this.jobs.push(job);
         activeRecordIds.add(record.id);
         added.push(job);
@@ -4462,6 +4483,8 @@ class QueueManager extends EventEmitter {
   async removePotentialDuplicateJobs() {
     const duplicateIds = this.jobs
       .filter((job) => !RUNNING_STATUSES.has(job.status) && job.status !== 'awaiting_anomaly_confirmation')
+      .filter((job) => (job.exactDuplicateMatches || []).length === 0 &&
+        (job.exactProjectMatches || []).length === 0)
       .filter((job) => (job.nameDuplicateMatches || []).length > 0 ||
         (job.similarMatches || []).length > 0 ||
         (job.confirmationReasons || []).includes('name_match'))

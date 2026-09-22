@@ -25,13 +25,19 @@ concurrency:
 
 jobs:
   disabled:
-    if: github.repository == 'CarlosZ16420/hamster-archiver' && vars.CNB_SYNC_ENABLED != 'true'
+    if: >-
+      ${{ github.repository == 'CarlosZ16420/hamster-archiver' &&
+          (github.event_name != 'release' || !github.event.release.prerelease) &&
+          !contains(github.event.release.tag_name || inputs.tag, '-') && vars.CNB_SYNC_ENABLED != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Explain disabled CNB synchronization
         run: echo 'CNB synchronization is disabled. Set the repository variable CNB_SYNC_ENABLED=true only after the target, API contract, upload hosts and token permissions have been independently verified.' >> "$GITHUB_STEP_SUMMARY"
   sync:
-    if: github.repository == 'CarlosZ16420/hamster-archiver' && vars.CNB_SYNC_ENABLED == 'true'
+    if: >-
+      ${{ github.repository == 'CarlosZ16420/hamster-archiver' &&
+          (github.event_name != 'release' || !github.event.release.prerelease) &&
+          !contains(github.event.release.tag_name || inputs.tag, '-') && vars.CNB_SYNC_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

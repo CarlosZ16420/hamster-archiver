@@ -1049,7 +1049,7 @@ function createWindow() {
     mainWindow.webContents.once('did-finish-load', async () => {
       const bridgeStatus = await mainWindow.webContents.executeJavaScript(`(() => {
         const required = [
-          'getState', 'chooseDirectory', 'chooseProgram', 'changeWarehouseLocation', 'openWarehouse', 'exportWarehouse', 'importWarehouse', 'checkForUpdates', 'installUpdatePackage', 'changeUserDataLocation', 'openExternal', 'copyText', 'chooseSingle', 'saveConfig', 'scanSource',
+          'getState', 'chooseDirectory', 'chooseProgram', 'changeWarehouseLocation', 'openWarehouse', 'exportWarehouse', 'importWarehouse', 'checkForUpdates', 'logToast', 'installUpdatePackage', 'changeUserDataLocation', 'openExternal', 'copyText', 'chooseSingle', 'saveConfig', 'scanSource',
           'addSingle', 'openTaskSource', 'getQueueSimilarityReport', 'getSourceChangeReport', 'resolveSourceChange', 'getDroppedPath', 'confirmTask', 'confirmAnomaly', 'acknowledgeTrashSafety', 'cancelTask', 'retryTask', 'startQueue', 'startInventoryOnlyQueue',
           'discardAnomaly', 'pauseQueue', 'resumeQueue', 'removeJobs', 'clearCompletedJobs', 'clearCancelledJobs', 'clearQueue', 'clearPotentialDuplicates', 'clearExactDuplicates', 'confirmAllDuplicates', 'finishNextAndPause', 'searchCatalog',
           'getCatalogSuggestions', 'openSimilarityIgnoreTerms', 'reloadSimilarityIgnoreTerms', 'addSimilarityIgnoreTerm', 'rebuildAllSimilarity', 'onSimilarityRebuildProgress',
@@ -1366,7 +1366,7 @@ function createWindow() {
           overviewMatchesPrototype: document.querySelector('.warehouse-overview-head')?.parentElement?.classList.contains('warehouse-summary') &&
             !document.querySelector('.warehouse-overview')?.innerText.includes('仓库活跃度') &&
             document.querySelectorAll('.warehouse-metrics > .warehouse-metric').length === 4,
-          hasInventoryDate: document.querySelector('#catalog-detail')?.innerText.includes('入库日期'),
+          hasInventoryDate: document.querySelector('#catalog-detail')?.innerText.includes('入库时间'),
           hasBackupFilter: document.querySelectorAll('#catalog-backup-filter option').length >=
             (${process.env.HAMSTER_SMOKE_REAL_CATALOG === '1' || Boolean(process.env.HAMSTER_SMOKE_IMPORT_DIRECTORY) ? 1 : 2}),
           hasBackupSetting: Boolean(document.querySelector('#record-backup-location') && document.querySelector('#backup-location')),
@@ -1576,12 +1576,20 @@ function registerIpc() {
 
   let checkedUpdate = null;
   let updateInstallInFlight = false;
+  ipcMain.handle('app:log-toast', async (event, message, level = 'info') => {
+    assertTrustedSender(event);
+    const normalizedMessage = String(message || '').trim().slice(0, 2_000);
+    if (!normalizedMessage) return false;
+    await queueManager.log(level === 'error' ? 'error' : 'info', `界面提示：${normalizedMessage}`);
+    return true;
+  });
   ipcMain.handle('app:check-for-updates', async (event, options = {}) => {
     assertTrustedSender(event);
     const check = () => checkForUpdates({
       currentVersion: app.getVersion(),
       distributionMode: isInstalledDistribution ? 'installed' : 'portable',
       includeHistory: options?.silent !== true,
+      stableBranch: 'main',
       fetchImpl: net.fetch,
       timeoutMs: options?.silent === true ? 6_000 : 8_000
     });

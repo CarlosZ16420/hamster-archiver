@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
 const { Readable } = require('node:stream');
-const { expectedReleaseAssetNames } = require('./release-publish');
+const { expectedReleaseAssetNames } = require('../src/core/sync-cnb-release-assets');
 
 const DEFAULT_CNB_API_BASE = 'https://api.cnb.cool';
 const DEFAULT_CNB_WEB_BASE = 'https://cnb.cool';

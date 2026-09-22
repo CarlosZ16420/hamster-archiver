@@ -1,6 +1,6 @@
 {
   "name": "hamster-archiver",
-  "version": "4.6.17",
+  "version": "4.6.18",
   "private": true,
   "author": "CarlosZ16420",
   "license": "MIT",
@@ -20,8 +20,6 @@
     "hamster": "node src/core/hamster-cli.js",
     "test": "node --test \"test/**/*.test.js\"",
     "test:full": "node --test \"test/**/*.test.js\"",
-    "test:changed": "node scripts/qa-plan.js --execute",
-    "test:group": "node scripts/qa-plan.js --execute --group",
     "check": "node scripts/check-syntax.js",
     "verify:dependencies": "node scripts/verify-toolchain.js --dependencies-only",
     "verify:tools": "node scripts/verify-toolchain.js --installed",
@@ -34,10 +32,7 @@
     "build:installer": "node scripts/build-installer.js",
     "check:layout": "node scripts/verify-workspace-layout.js",
     "verify:version": "node scripts/verify-version.js",
-    "release:local": "node scripts/release-local.js",
-    "release": "node scripts/release.js",
-    "release:sync:cnb": "node scripts/release-sync-cnb.js",
-    "preview:current": "node scripts/launch-current.js"
+    "release:sync:cnb": "node scripts/release-sync-cnb.js"
   },
   "engines": {
     "node": "^22.12.0 || ^24.0.0",

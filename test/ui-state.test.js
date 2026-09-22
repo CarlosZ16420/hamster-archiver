@@ -5,6 +5,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const {
+  catalogGridRowsForSize,
+  catalogPageForAnchor,
+  catalogPageSizeForColumns,
   formatCatalogDate,
   formatItemCount,
   newlyAutoSkippedJobIds,
@@ -16,6 +19,23 @@ const {
   summarizeScanSkips,
   sourceDispositionPresentation
 } = require('../src/renderer/ui-state');
+
+test('thumbnail pagination fills complete rows for each density and keeps anchor content nearby', () => {
+  assert.equal(catalogGridRowsForSize('large'), 3);
+  assert.equal(catalogGridRowsForSize('medium'), 3);
+  assert.equal(catalogGridRowsForSize('small'), 3);
+  assert.equal(catalogPageSizeForColumns(4, 3), 12);
+  assert.equal(catalogPageSizeForColumns(6, 3), 18);
+  assert.equal(catalogPageSizeForColumns(8, 3), 24);
+  assert.equal(catalogPageForAnchor(40, 20), 3);
+  assert.equal(catalogPageForAnchor(40, 24), 2);
+
+  const pageSize = catalogPageSizeForColumns(6, 3);
+  const pageLengths = Array.from({ length: Math.ceil(100 / pageSize) }, (_, page) =>
+    Math.min(pageSize, 100 - page * pageSize));
+  assert.deepEqual(pageLengths, [18, 18, 18, 18, 18, 10]);
+  assert.ok(pageLengths.slice(0, -1).every((length) => length % 6 === 0));
+});
 
 test('locale-sensitive warehouse text recalculates dates and singular nouns', () => {
   const timestamp = '2026-09-03T01:00:00.000Z';
@@ -403,7 +423,7 @@ test('compact settings copy and activity colors follow the current UI specificat
   assert.match(app, /actionButton\('相似报告', 'similarity-report'/);
   assert.doesNotMatch(app, /Ctrl.*多选/);
   assert.ok(
-    app.indexOf("actionButton('确认重复并继续'") < app.indexOf("actionButton('取消'"),
+    app.indexOf("actionButton(\n        '继续入库'") < app.indexOf("actionButton('取消'"),
     'duplicate continuation must remain immediately before cancel in the action order'
   );
   assert.match(app, /exact-duplicate-mark/);
@@ -682,6 +702,7 @@ test('language changes refresh warehouse dates, counts, months and filter-help c
 
 test('automatic update checks do not change header status or show failure notifications', () => {
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   const check = app.match(/async function runUpdateCheck\(\{ automatic = false \} = \{\}\) \{([\s\S]*?)\n\}/)?.[1] || '';
 
   assert.match(check, /checkForUpdates\(\{ silent: automatic \}\)/);
@@ -689,4 +710,31 @@ test('automatic update checks do not change header status or show failure notifi
   assert.match(check, /if \(!automatic\) \{\s*if \(result\?\.updateAvailable\)/);
   assert.match(check, /if \(!automatic\) \{\s*setUpdateStatus\('failed'[\s\S]*showToast/);
   assert.match(check, /if \(!automatic\) setUpdateControlsDisabled\(false\)/);
+  assert.match(main, /stableBranch:\s*'main'/);
+  assert.doesNotMatch(main, /stableBranch:\s*options\?\.silent/);
+});
+
+test('warehouse controls expose the new batch menu, queue viewport and thumbnail outline behavior', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
+  const batchMenu = html.match(/class="action-menu warehouse-batch-menu">[\s\S]*?class="action-menu-popover">([\s\S]*?)<\/div>\s*<\/details>/)?.[1] || '';
+
+  assert.match(batchMenu, />追加标签<\/button>/);
+  assert.match(batchMenu, />修改备份位置<\/button>/);
+  assert.match(batchMenu, /id="refresh-directories-selected"[^>]*>校对更新<\/button>/);
+  assert.match(batchMenu, /id="compress-uncompressed-selected"[^>]*>压缩入库<\/button>/);
+  assert.doesNotMatch(html, />批量追加标签<\/button>|>批量修改备份位置<\/button>/);
+  assert.match(app, /rows\.length > 10/);
+  assert.match(styles, /#task-list-container\.queue-scrollable[^}]*overflow-y:\s*auto/);
+  assert.match(styles, /#catalog-grid-view:hover::after[^}]*thumbnail-outline-breathe/);
+  assert.match(styles, /@keyframes thumbnail-outline-breathe[^}]*scale\(1\)[\s\S]*scale\(1\.15\)/);
+  assert.match(styles, /#catalog-grid-view::after[^}]*inset:\s*-2px;[^}]*border-radius:\s*10px;/s);
+  assert.match(app, /archiveApp\.logToast\(String\(message \|\| ''\), isError \? 'error' : 'info'\)/);
+  assert.match(preload, /logToast: \(message, level = 'info'\) => ipcRenderer\.invoke\('app:log-toast', message, level\)/);
+  assert.match(html, /id="hide-uncompressed-tag"[\s\S]*不展示“未压缩”标签/);
+  assert.match(html, /id="catalog-undo-busy"[^>]*aria-live="polite"/);
+  assert.match(styles, /\.catalog-undo-busy\s*\{[^}]*right:\s*80px;[^}]*bottom:\s*28px;/s);
+  assert.match(app, /catalogUndoBusy\.hidden = false[\s\S]*undoCatalogAction\(\)[\s\S]*catalogUndoBusy\.hidden = true/);
 });

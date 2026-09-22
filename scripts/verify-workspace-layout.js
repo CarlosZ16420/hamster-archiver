@@ -11,7 +11,7 @@ const forbiddenDirectories = new Set([
   'resources', 'userdata', 'userData', 'user-data', '待处理文件', '构造测试目录'
 ]);
 const allowedDirectories = new Set([
-  '.agents', '.git', '.github', 'assets', 'docs', 'node_modules',
+  '.agents', '.git', '.github', 'assets', 'docs', 'integrations', 'node_modules',
   'README.assets', 'scripts', 'src', 'test', 'tools'
 ]);
 const runtimeFilePatterns = [

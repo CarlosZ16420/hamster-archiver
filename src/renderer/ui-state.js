@@ -22,6 +22,19 @@
     }
     return result;
   },
+  catalogGridRowsForSize(size) {
+    return 3;
+  },
+  catalogPageSizeForColumns(columns, rows = 4) {
+    const safeColumns = Math.max(1, Math.floor(Number(columns) || 1));
+    const safeRows = Math.max(1, Math.floor(Number(rows) || 1));
+    return safeColumns * safeRows;
+  },
+  catalogPageForAnchor(anchorIndex, pageSize) {
+    const safeIndex = Math.max(0, Math.floor(Number(anchorIndex) || 0));
+    const safePageSize = Math.max(1, Math.floor(Number(pageSize) || 1));
+    return Math.floor(safeIndex / safePageSize) + 1;
+  },
   formatCatalogDate(value, locale = 'zh-CN') {
     const selectedLocale = locale === 'en-US' ? 'en-US' : 'zh-CN';
     const dateOnly = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);

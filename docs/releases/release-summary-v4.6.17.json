@@ -5,13 +5,17 @@
   "zh-CN": [
     "目录检查无变化时提示项目名，排队冲突说明更清楚，原位置可在打开旁修改。",
     "二次压缩支持保留、更新或逐项确认备份位置，仅冲突任务等待确认。",
-    "缩略图按钮默认中档并循环大小；列表展示更多标签，提示避开返回按钮。",
+    "三档缩略图统一每页三行并保持翻页位置；按钮新增扩散淡出的圆角提示框，大小/状态列收窄为 64px。",
+    "联网检查和历史只接受 main 稳定版本；本机 ZIP 仍可安装更高的测试版本。",
+    "README 截图改用发行包内的四个资源；极小文件 MD5 跳过默认阈值改为 1 KB。",
     "用户资料和仓库格式保持兼容，无需迁移。"
   ],
   "en-US": [
     "Unchanged folder checks identify the item; queue conflicts are explained and originals can be edited beside Open.",
     "Later compression can keep, update, or individually review backup locations; only conflicts wait for confirmation.",
-    "The thumbnail button defaults to medium and cycles sizes; list rows show more tags and toasts avoid the return button.",
+    "All thumbnail sizes use three rows and preserve paging position; the button gains a fading rounded outline and Size / Status narrows to 64 px.",
+    "Online checks and history accept only stable main Releases; local ZIP selection still permits higher test versions.",
+    "README screenshots now use the four packaged assets; the tiny-file MD5 skip default is 1 KB.",
     "User data and Warehouse formats remain compatible; no migration is needed."
   ]
   }

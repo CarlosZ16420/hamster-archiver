@@ -24,7 +24,9 @@ const releaseName = distributionMode === 'installed'
   ? `HamsterArchiver-v${packageJson.version}-win-x64-installed`
   : `HamsterArchiver-v${packageJson.version}-win-x64`;
 const localLayout = makeLocalLayout(projectRoot);
-const outputRoot = path.join(localLayout.stagingRoot, releaseName);
+const taskId = String(process.env.HAMSTER_TASK_ID || '').trim();
+if (taskId && !/^[a-z][a-z0-9-]{1,47}$/.test(taskId)) throw new Error('Invalid preview task ID.');
+const outputRoot = path.join(taskId ? path.join(localLayout.taskBuildsRoot, taskId, 'staging') : localLayout.stagingRoot, releaseName);
 assertPathInsideLocalRoot(outputRoot, localLayout.root, '发行构建目录');
 
 async function exists(targetPath) {
@@ -222,6 +224,7 @@ async function main() {
   const releaseManifest = {
     schemaVersion: 2,
     name: releaseName,
+    ...(taskId ? { preview: { taskId, sourceCommit: commit, kind: 'local-task' } } : {}),
     version: packageJson.version,
     platform: 'win32-x64',
     distributionMode,

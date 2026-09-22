@@ -88,6 +88,7 @@ const elements = {
   catalogSort: document.querySelector('#catalog-sort'),
   catalogListView: document.querySelector('#catalog-list-view'),
   catalogGridView: document.querySelector('#catalog-grid-view'),
+  hideUncompressedTag: document.querySelector('#hide-uncompressed-tag'),
   backToLibraryToolbar: document.querySelector('#back-to-library-toolbar'),
   libraryToolbar: document.querySelector('.library-toolbar'),
   warehouseBulkbar: document.querySelector('.warehouse-bulkbar'),
@@ -102,6 +103,7 @@ const elements = {
   refreshDirectoriesSelected: document.querySelector('#refresh-directories-selected'),
   compressUncompressedSelected: document.querySelector('#compress-uncompressed-selected'),
   undoCatalog: document.querySelector('#undo-catalog'),
+  catalogUndoBusy: document.querySelector('#catalog-undo-busy'),
   deleteCatalogSelected: document.querySelector('#delete-catalog-selected'),
   manualCatalogDialog: document.querySelector('#manual-catalog-dialog'),
   manualCatalogForm: document.querySelector('#manual-catalog-form'),
@@ -224,7 +226,7 @@ function jobStatusLabel(job) {
     : job?.status === 'queued' && job?.intakeModeSelected === false
     ? '待选入库方式'
     : job?.status === 'queued' && job?.taskKind === 'catalog_refresh'
-    ? '等待更新目录'
+    ? '等待校对更新'
     : statusLabel(job?.status);
 }
 
@@ -258,9 +260,11 @@ const CATALOG_GRID_SIZES = {
 };
 let catalogThumbnailSize = localStorage.getItem('hamster-catalog-thumbnail-size') || 'medium';
 if (!Object.hasOwn(CATALOG_GRID_SIZES, catalogThumbnailSize)) catalogThumbnailSize = 'medium';
-const CATALOG_GRID_ROWS_PER_PAGE = 4;
+let hideUncompressedTag = localStorage.getItem('hamster-hide-uncompressed-tag') === 'true';
+if (elements.hideUncompressedTag) elements.hideUncompressedTag.checked = hideUncompressedTag;
 let catalogGridColumns = 4;
 let catalogResizeTimer = 0;
+const CATALOG_RESIZE_DEBOUNCE_MS = 120;
 let catalogRefreshDirty = false;
 let lastCatalogRefreshAt = 0;
 let catalogSearchSequence = 0;
@@ -442,6 +446,7 @@ function showToast(message, isError = false) {
   elements.toast.classList.toggle('error', isError);
   elements.toast.hidden = false;
   toastTimer = setTimeout(() => { elements.toast.hidden = true; }, 4500);
+  void window.archiveApp.logToast(String(message || ''), isError ? 'error' : 'info').catch(() => {});
 }
 
 let settleConfirmDialog = null;
@@ -472,7 +477,7 @@ function confirmUser(message, options = {}) {
   return new Promise((resolve) => { settleConfirmDialog = resolve; });
 }
 
-async function confirmDirectoryRefresh(message, title = '更新目录') {
+async function confirmDirectoryRefresh(message, title = '校对更新') {
   if (localStorage.getItem('hamster-suppress-directory-refresh-notice') === 'true') return true;
   const accepted = await confirmUser(message, { title, confirmLabel: '开始检查', suppressible: true });
   if (accepted && document.querySelector('#confirm-dialog-suppress').checked) {
@@ -904,7 +909,7 @@ function updateActivityDateFilterControl() {
   if (!elements.catalogDateFilter) return;
   elements.catalogDateFilter.hidden = !activeActivityDateFilter;
   if (activeActivityDateFilter) {
-    elements.catalogDateFilter.textContent = t(`入库日期：${activeActivityDateFilter} · 清除`);
+    elements.catalogDateFilter.textContent = t(`入库时间：${activeActivityDateFilter} · 清除`);
   }
 }
 
@@ -1535,7 +1540,7 @@ function renderConfig(config) {
   elements.largeFolderFileThreshold.value = String(config.largeFolderFileThreshold || 500);
   elements.largeFolderMd5SampleLimit.value = String(config.largeFolderMd5SampleLimit || 200);
   elements.skipTinyMd5Files.checked = config.skipTinyMd5Files === true;
-  elements.tinyFileMd5ThresholdKb.value = String(Math.round((config.tinyFileMd5ThresholdBytes || (5 * 1024)) / 1024));
+  elements.tinyFileMd5ThresholdKb.value = String(Math.round((config.tinyFileMd5ThresholdBytes || 1024) / 1024));
   elements.autoSkipExactDuplicates.checked = Boolean(config.autoSkipExactDuplicates);
   const autoSkipAction = config.autoSkipExactDuplicateAction === 'remove' ? 'remove' : 'keep';
   const autoSkipActionRadio = document.querySelector(`input[name="auto-skip-exact-duplicate-action"][value="${autoSkipAction}"]`);
@@ -1623,7 +1628,7 @@ function renderJobs(jobs) {
       aiBadge.title = `${t('AI 请求')}：${job.mcpRequestId}`;
       nameLine.append(aiBadge);
     }
-    if (job.taskKind === 'catalog_refresh') nameLine.append(make('span', 'queue-origin-badge uncompressed', '更新目录'));
+    if (job.taskKind === 'catalog_refresh') nameLine.append(make('span', 'queue-origin-badge uncompressed', '校对更新'));
     else if (job.taskKind === 'pending_existing') nameLine.append(make('span', 'queue-origin-badge', '待核对原目录'));
     else if (job.sourceCatalogRecordId) nameLine.append(make('span', 'queue-origin-badge', '库内项目压缩'));
     else if (job.processingMode === 'inventory_only') nameLine.append(make('span', 'queue-origin-badge uncompressed', '未压缩入库'));
@@ -1671,7 +1676,7 @@ function renderJobs(jobs) {
     }
     if (uiState?.shouldShowDuplicateConfirmation(job)) {
       actionCell.append(actionButton(
-        job.duplicateReviewKind === 'similarity' ? '确认相似并继续' : '确认内容一致并继续',
+        '继续入库',
         'confirm',
         job.id,
         'confirm'
@@ -1698,6 +1703,18 @@ function renderJobs(jobs) {
     row.append(actionCell);
     elements.taskList.append(row);
   }
+  requestAnimationFrame(() => {
+    const rows = [...elements.taskList.rows];
+    elements.taskListContainer.classList.toggle('queue-scrollable', rows.length > 10);
+    if (rows.length <= 10) {
+      elements.taskListContainer.style.removeProperty('--queue-visible-height');
+      return;
+    }
+    const table = elements.taskList.closest('table');
+    const headerHeight = table?.tHead?.getBoundingClientRect().height || 0;
+    const rowsHeight = rows.slice(0, 10).reduce((height, row) => height + row.getBoundingClientRect().height, 0);
+    elements.taskListContainer.style.setProperty('--queue-visible-height', `${Math.ceil(headerHeight + rowsHeight + 2)}px`);
+  });
 }
 
 function renderLogs(logs) {
@@ -1770,8 +1787,7 @@ function catalogGridLayout(size = catalogThumbnailSize) {
 }
 
 function measureCatalogGridColumns() {
-  // Pagination follows the original large-card layout, independent of display density.
-  return catalogViewMode === 'grid' ? catalogGridLayout('large').columns : 1;
+  return catalogViewMode === 'grid' ? catalogGridLayout().columns : 1;
 }
 
 function applyCatalogGridLayout() {
@@ -1787,7 +1803,49 @@ function applyCatalogGridLayout() {
 
 function catalogPageSize() {
   if (catalogViewMode !== 'grid') return CATALOG_PAGE_SIZE;
-  return Math.max(6, catalogGridColumns * CATALOG_GRID_ROWS_PER_PAGE);
+  return uiState.catalogPageSizeForColumns(
+    catalogGridColumns,
+    uiState.catalogGridRowsForSize(catalogThumbnailSize)
+  );
+}
+
+function currentCatalogVisualAnchor() {
+  const headerOffset = libraryHeaderOffset();
+  const visible = [...elements.catalogList.querySelectorAll('[data-catalog-id]')]
+    .find((item) => item.getBoundingClientRect().bottom > headerOffset && item.getBoundingClientRect().top < window.innerHeight);
+  const fallbackId = activeCatalogId || currentCatalogPageRecords[0]?.id || null;
+  const element = visible || (fallbackId
+    ? elements.catalogList.querySelector(`[data-catalog-id="${CSS.escape(fallbackId)}"]`)
+    : null);
+  return {
+    id: visible?.dataset.catalogId || fallbackId,
+    top: element?.getBoundingClientRect().top
+  };
+}
+
+function syncCatalogGrid({ forcePagination = false, anchor = currentCatalogVisualAnchor() } = {}) {
+  if (catalogViewMode !== 'grid') return;
+  const nextColumns = measureCatalogGridColumns();
+  if (!forcePagination && nextColumns === catalogGridColumns) {
+    applyCatalogGridLayout();
+    return;
+  }
+  catalogGridColumns = nextColumns;
+  const anchorIndex = currentCatalogResults.findIndex((record) => record.id === anchor?.id);
+  if (anchorIndex >= 0) catalogPage = uiState.catalogPageForAnchor(anchorIndex, catalogPageSize());
+  renderCatalog(currentCatalogResults);
+  if (anchor?.id && Number.isFinite(anchor.top)) {
+    requestAnimationFrame(() => {
+      const nextAnchor = elements.catalogList.querySelector(`[data-catalog-id="${CSS.escape(anchor.id)}"]`);
+      if (nextAnchor) window.scrollBy({ top: nextAnchor.getBoundingClientRect().top - anchor.top, behavior: 'instant' });
+    });
+  }
+}
+
+function scheduleCatalogGridSync() {
+  if (catalogViewMode !== 'grid' || elements.libraryLayout.hidden) return;
+  clearTimeout(catalogResizeTimer);
+  catalogResizeTimer = setTimeout(syncCatalogGrid, CATALOG_RESIZE_DEBOUNCE_MS);
 }
 
 function renderCatalog(catalog) {
@@ -1848,7 +1906,7 @@ function renderCatalog(catalog) {
       titleCell.title = catalogTitle(record);
       titleCell.dataset.i18nUserText = 'true';
       const tagsCell = make('span', 'catalog-text-tags');
-      for (const tag of catalogTags(record).filter((tag) => tag !== '未压缩')) {
+      for (const tag of catalogTags(record).filter((tag) => !hideUncompressedTag || tag !== '未压缩')) {
         const chip = makeUserText('span', '', tag);
         chip.title = tag;
         tagsCell.append(chip);
@@ -1928,7 +1986,7 @@ function renderCatalog(catalog) {
           : formatBytes(record.archiveTotalBytes)}`),
       makeCatalogDate('small', '', record.inventoryDate || record.completedAt, '入库')
     );
-    const visibleTags = catalogTags(record);
+    const visibleTags = catalogTags(record).filter((tag) => !hideUncompressedTag || tag !== '未压缩');
     if (visibleTags.length > 0) {
       const tags = make('div', 'catalog-card-tags');
       for (const tag of visibleTags.slice(0, catalogViewMode === 'grid' ? 4 : 2)) {
@@ -2057,16 +2115,16 @@ function updateCatalogThumbnailButton() {
 function setCatalogThumbnailSize(size) {
   if (!Object.hasOwn(CATALOG_GRID_SIZES, size)) return;
   cancelCatalogMarquee?.();
-  const headerOffset = libraryHeaderOffset();
-  const anchor = catalogViewMode === 'grid' ? [...elements.catalogList.querySelectorAll('[data-catalog-id]')]
-    .find((item) => item.getBoundingClientRect().bottom > headerOffset && item.getBoundingClientRect().top < window.innerHeight) : null;
-  const anchorTop = anchor?.getBoundingClientRect().top;
+  const anchor = currentCatalogVisualAnchor();
+  const previousPageSize = catalogPageSize();
   catalogThumbnailSize = size;
   localStorage.setItem('hamster-catalog-thumbnail-size', size);
   updateCatalogThumbnailButton();
   elements.libraryLayout.dataset.thumbnailSize = size;
-  applyCatalogGridLayout();
-  if (anchor) window.scrollBy({ top: anchor.getBoundingClientRect().top - anchorTop, behavior: 'instant' });
+  const nextColumns = measureCatalogGridColumns();
+  const nextRows = uiState.catalogGridRowsForSize(catalogThumbnailSize);
+  const nextPageSize = uiState.catalogPageSizeForColumns(nextColumns, nextRows);
+  syncCatalogGrid({ forcePagination: nextPageSize !== previousPageSize, anchor });
   scheduleLibraryToolbarButton();
 }
 
@@ -3009,13 +3067,31 @@ function renderCatalogDetail(record) {
   releaseDetailThumbnails();
   elements.catalogDetail.replaceChildren();
   const heading = make('div', 'archive-heading');
-  heading.append(makeUserText('h3', '', catalogTitle(record)));
+  const titleRow = make('div', 'archive-title-row');
+  titleRow.append(makeUserText('h3', '', catalogTitle(record)));
+  if (record.archiveState === 'uncompressed' && record.recordType !== 'manual') {
+    if (record.canRefreshDirectory) {
+      const refresh = make('button', 'mini-copy-button', '校对更新');
+      refresh.type = 'button';
+      refresh.dataset.refreshCatalogDirectory = record.id;
+      titleRow.append(refresh);
+    }
+    const compress = make('button', 'mini-copy-button', '压缩入库');
+    compress.type = 'button';
+    compress.dataset.compressCatalogRecord = record.id;
+    titleRow.append(compress);
+  }
+  heading.append(titleRow);
   if (record.title && record.title !== record.displayName) {
     const originalTitle = make('p', 'original-title');
     originalTitle.append(make('span', '', '原始名称：'), makeUserText('span', '', record.displayName));
     heading.append(originalTitle);
   }
-  heading.append(makeCatalogDate('p', 'inventory-date', record.inventoryDate || record.completedAt, '入库日期'));
+  heading.append(makeCatalogDate('p', 'inventory-date', record.inventoryDate || record.completedAt, '入库时间'));
+  const lastProofreadAt = record.sourceLocationCheckedAt || record.sourceSnapshotUpdatedAt;
+  if (record.archiveState === 'uncompressed' && record.recordType !== 'manual' && lastProofreadAt) {
+    heading.append(make('p', 'muted', `上次校对时间：${formatCatalogDate(lastProofreadAt)}`));
+  }
   if (record.recordType === 'manual') {
     heading.append(make('p', '', '手动库存记录 · 未关联压缩包或文件清单'));
   }
@@ -3081,22 +3157,6 @@ function renderCatalogDetail(record) {
     stats.append(backupStat);
   }
   heading.append(stats);
-  if (record.archiveState === 'uncompressed' && record.recordType !== 'manual') {
-    const actions = make('div', 'catalog-detail-actions');
-    if (record.canRefreshDirectory) {
-      const refresh = make('button', 'button secondary', '更新目录');
-      refresh.type = 'button';
-      refresh.dataset.refreshCatalogDirectory = record.id;
-      actions.append(refresh);
-    }
-    const compress = make('button', 'button primary', '压缩入库');
-    compress.type = 'button';
-    compress.dataset.compressCatalogRecord = record.id;
-    actions.append(compress);
-    heading.append(actions);
-    if (record.sourceSnapshotUpdatedAt) heading.append(make('p', 'muted', `目录更新于：${formatCatalogDate(record.sourceSnapshotUpdatedAt)}`));
-    if (record.sourceLocationCheckedAt) heading.append(make('p', 'muted', `上次检查于：${formatCatalogDate(record.sourceLocationCheckedAt)}`));
-  }
   if (record.coverNeedsReplacement) heading.append(make('p', 'muted', '原自动封面已失效，请选择新的封面。'));
   elements.catalogDetail.append(heading);
   elements.catalogDetail.append(renderCatalogEditor(record));
@@ -4080,12 +4140,12 @@ document.querySelector('#clear-cancelled').addEventListener('click', async () =>
 });
 
 document.querySelector('#clear-duplicates').addEventListener('click', async () => {
-  if (!await confirmUser('从任务列表清除所有名称或标题可能重复的项目？已入库档案和源文件不会删除。')) return;
+  if (!await confirmUser('从任务列表清除所有名称或标题疑似重复、但不是完全重复的项目？已入库档案和源文件不会删除。')) return;
   const result = await safely(() => window.archiveApp.clearPotentialDuplicates());
   if (!result) return;
   selectedJobIds.clear();
   render(result.state);
-  showToast(result.removedCount > 0 ? `已清除 ${result.removedCount} 个可能重复的任务` : '没有发现可清除的重复任务');
+  showToast(result.removedCount > 0 ? `已清除 ${result.removedCount} 个疑似重复任务` : '没有发现可清除的疑似重复任务');
 });
 
 document.querySelector('#clear-exact-duplicates').addEventListener('click', async () => {
@@ -4098,7 +4158,7 @@ document.querySelector('#clear-exact-duplicates').addEventListener('click', asyn
 });
 
 document.querySelector('#confirm-all-duplicates').addEventListener('click', async () => {
-  if (!await confirmUser('同意任务列表中全部名称重复、标题相似或视频大小相同的风险，并让它们进入等待压缩状态？', { title: '批量确认重复风险', confirmLabel: '确认并继续' })) return;
+  if (!await confirmUser('同意任务列表中全部名称重复、标题相似或视频大小相同的风险，并让它们进入等待压缩状态？', { title: '批量确认重复风险', confirmLabel: '继续入库' })) return;
   const result = await safely(() => window.archiveApp.confirmAllDuplicates());
   if (!result) return;
   render(result.state);
@@ -4232,28 +4292,10 @@ elements.catalogGridView.addEventListener('click', () => {
 });
 window.addEventListener('resize', () => {
   hideSimilarityWhitelistAction();
-  if (catalogViewMode !== 'grid') return;
-  clearTimeout(catalogResizeTimer);
-  catalogResizeTimer = setTimeout(() => {
-    const nextColumns = measureCatalogGridColumns();
-    if (nextColumns !== catalogGridColumns) {
-      catalogGridColumns = nextColumns;
-      renderCatalog(currentCatalogResults);
-    } else applyCatalogGridLayout();
-  }, 150);
+  scheduleCatalogGridSync();
 });
 if ('ResizeObserver' in window) {
-  const catalogResizeObserver = new ResizeObserver(() => {
-    if (catalogViewMode !== 'grid' || elements.libraryLayout.hidden) return;
-    clearTimeout(catalogResizeTimer);
-    catalogResizeTimer = setTimeout(() => {
-      const nextColumns = measureCatalogGridColumns();
-      if (nextColumns !== catalogGridColumns) {
-        catalogGridColumns = nextColumns;
-        renderCatalog(currentCatalogResults);
-      } else applyCatalogGridLayout();
-    }, 80);
-  });
+  const catalogResizeObserver = new ResizeObserver(scheduleCatalogGridSync);
   catalogResizeObserver.observe(elements.catalogList);
 }
 document.querySelector('#refresh-catalog').addEventListener('click', async () => {
@@ -4380,10 +4422,10 @@ function changeCatalogPage(targetPage, { scrollToList = true } = {}) {
   }
 }
 elements.catalogPagePrev.addEventListener('click', () => {
-  changeCatalogPage(catalogPage - 1);
+  changeCatalogPage(catalogPage - 1, { scrollToList: false });
 });
 elements.catalogPageNext.addEventListener('click', () => {
-  changeCatalogPage(catalogPage + 1);
+  changeCatalogPage(catalogPage + 1, { scrollToList: false });
 });
 function jumpToEnteredCatalogPage() {
   closeCatalogPageOptions();
@@ -4580,7 +4622,7 @@ elements.catalogDetail.addEventListener('click', (event) => {
     void (async () => {
       if (!await confirmDirectoryRefresh(
         '检查原地址的文件与仓库是否一致，不会改动原文件。若有新增内容，则更新至仓库。若有修改与删除，则需要您手动确认才会更新至仓库。',
-        '更新目录'
+        '校对更新'
       )) return;
       const result = await safely(() => window.archiveApp.queueCatalogRecordsForRefresh([refreshDirectory.dataset.refreshCatalogDirectory]));
       if (!result) return;
@@ -4599,7 +4641,7 @@ elements.catalogDetail.addEventListener('click', (event) => {
         : await safely(() => window.archiveApp.chooseDirectory(''));
       if (!selected) return;
       if (!await confirmUser(
-        '这里只会更新仓库记录指向的原文件位置，不会立即重建清单。下次更新目录或压缩入库时会重新核对内容。',
+        '这里只会更新仓库记录指向的原文件位置，不会立即重建清单。下次校对更新或压缩入库时会重新核对内容。',
         { title: '重新设置原文件位置', confirmLabel: '更新位置' }
       )) return;
       const updated = await safely(() => window.archiveApp.updateCatalogSourcePath(
@@ -4838,7 +4880,7 @@ elements.refreshDirectoriesSelected.addEventListener('click', () => {
     const excludedNote = excludedCount > 0 ? `；另有 ${excludedCount} 项不是可更新的未压缩目录，将自动排除` : '';
     if (!await confirmDirectoryRefresh(
       `将检查 ${eligible.length} 个目录与仓库清单的差异${excludedNote}。更新不会修改、移动或删除原文件。`,
-      '批量更新目录'
+      '校对更新'
     )) return;
     const result = await safely(() => window.archiveApp.queueCatalogRecordsForRefresh(eligible.map((record) => record.id)));
     if (!result) return;
@@ -4890,14 +4932,27 @@ elements.bulkBackupForm.addEventListener('submit', async (event) => {
 });
 
 elements.undoCatalog.addEventListener('click', async () => {
-  const state = await safely(() => window.archiveApp.undoCatalogAction());
-  if (!state) return;
+  elements.undoCatalog.disabled = true;
+  elements.catalogUndoBusy.hidden = false;
+  const state = await safely(() => window.archiveApp.undoCatalogAction()).finally(() => {
+    elements.catalogUndoBusy.hidden = true;
+  });
+  if (!state) {
+    elements.undoCatalog.disabled = !(currentState?.undoDepth > 0);
+    return;
+  }
   render(state);
   await refreshCatalog();
   if (activeCatalogId && state.catalog.some((record) => record.id === activeCatalogId)) {
     await loadCatalogDetails(activeCatalogId);
   }
   showToast('已撤回最近一次仓库操作');
+});
+
+elements.hideUncompressedTag?.addEventListener('change', () => {
+  hideUncompressedTag = elements.hideUncompressedTag.checked;
+  localStorage.setItem('hamster-hide-uncompressed-tag', String(hideUncompressedTag));
+  renderCatalog(currentCatalogResults);
 });
 
 function closeDeleteCatalogDialog() {

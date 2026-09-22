@@ -560,15 +560,16 @@ test('cancelled tasks can be cleared without touching failed or queued tasks', a
   assert.deepEqual(manager.jobs.map((job) => job.id), ['failed', 'queued']);
 });
 
-test('possible duplicate tasks can be cleared with one action', async () => {
+test('suspected duplicate cleanup excludes tasks with exact duplicate evidence', async () => {
   const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
   manager.jobs = [
     { ...queuedJob('duplicate'), nameDuplicateMatches: [{ archiveId: 'old' }] },
+    { ...queuedJob('mixed-exact'), nameDuplicateMatches: [{ archiveId: 'old' }], exactDuplicateMatches: [{ md5: 'abc' }] },
     { ...queuedJob('unique'), nameDuplicateMatches: [] }
   ];
   const result = await manager.removePotentialDuplicateJobs();
   assert.equal(result.removedCount, 1);
-  assert.deepEqual(manager.jobs.map((job) => job.id), ['unique']);
+  assert.deepEqual(manager.jobs.map((job) => job.id), ['mixed-exact', 'unique']);
 });
 
 test('exact duplicate tasks can be cleared separately', async () => {
@@ -616,12 +617,14 @@ test('name and similarity evidence is a nonblocking notice before MD5 work', () 
   });
 
   assert.equal(normal.status, 'queued');
-  assert.match(normal.stageText, /名称存在仓库候选.*等待选择入库方式/);
+  assert.doesNotMatch(normal.stageText, /名称存在仓库候选/);
+  assert.match(normal.stageText, /发现 1 个相似候选.*等待选择入库方式/);
   assert.equal(normal.similarityPreflightBlocking, false);
   assert.equal(normal.automaticDuplicateCheckPending, false);
   assert.equal(large.status, 'awaiting_confirmation');
   assert.ok(large.confirmationReasons.includes('large_task'));
-  assert.match(large.stageText, /名称存在仓库候选.*等待手动确认/);
+  assert.doesNotMatch(large.stageText, /名称存在仓库候选/);
+  assert.match(large.stageText, /超过 10 GiB.*发现 1 个相似候选.*等待手动确认/);
 });
 
 test('nonblocking preflight similarity notice still waits for the user to select an intake mode', async () => {
@@ -640,7 +643,8 @@ test('nonblocking preflight similarity notice still waits for the user to select
   assert.equal(job.duplicateConfirmedAt, null);
   assert.equal(job.exactDuplicateOverrideAt, null);
   assert.equal(job.intakeModeSelected, false);
-  assert.match(job.stageText, /名称存在仓库候选.*等待选择入库方式/);
+  assert.doesNotMatch(job.stageText, /名称存在仓库候选/);
+  assert.match(job.stageText, /发现 1 个相似候选.*等待选择入库方式/);
   await assert.rejects(() => manager.confirmJob(job.id), /不处于等待确认状态/);
 });
 
@@ -691,7 +695,7 @@ test('a name warning does not require preflight confirmation before automatic ex
   await manager.addSingle(sourcePath);
   const job = manager.jobs[0];
   assert.equal(job.status, 'queued');
-  assert.match(job.stageText, /名称存在仓库候选/);
+  assert.doesNotMatch(job.stageText, /名称存在仓库候选/);
   assert.equal(job.duplicateConfirmedAt, null);
   assert.equal(job.exactDuplicateOverrideAt, null);
 
@@ -732,7 +736,7 @@ test('direct intake routes a same-path uncompressed directory to explicit update
       assert.equal(manager.jobs[0].taskKind, 'pending_existing');
       assert.equal(manager.jobs[0].sourceCatalogRecordId, 'uncompressed-existing');
     } else {
-      assert.match(manager.jobs[0].stageText, /名称存在仓库候选/);
+      assert.doesNotMatch(manager.jobs[0].stageText, /名称存在仓库候选/);
       assert.notEqual(manager.jobs[0].taskKind, 'pending_existing');
     }
     assert.equal(manager.jobs[0].automaticDuplicateCheckPending, false, archiveState);
@@ -768,7 +772,7 @@ test('same-source metadata without complete MD5 never reports an exact duplicate
   await manager.addSingle(sourcePath);
 
   assert.equal(manager.jobs[0].status, 'queued');
-  assert.match(manager.jobs[0].stageText, /名称存在仓库候选/);
+  assert.doesNotMatch(manager.jobs[0].stageText, /名称存在仓库候选/);
   assert.equal(manager.jobs[0].exactProjectMatches, undefined);
 });
 
@@ -904,7 +908,7 @@ test('historical MD5 coverage is not reused as the current task fingerprint duri
   await manager.addSingle(sourcePath);
 
   assert.equal(manager.jobs[0].status, 'queued');
-  assert.match(manager.jobs[0].stageText, /名称存在仓库候选/);
+  assert.doesNotMatch(manager.jobs[0].stageText, /名称存在仓库候选/);
   const savedManifest = await store.loadPendingManifest(manager.config.repositoryDirectory, manager.jobs[0].id);
   assert.equal(savedManifest, null);
 });
@@ -1258,7 +1262,8 @@ test('name matches remain nonblocking until one post-fingerprint similarity revi
   })];
 
   assert.equal(manager.jobs[0].status, 'queued');
-  assert.match(manager.jobs[0].stageText, /名称存在仓库候选.*等待选择入库方式/);
+  assert.doesNotMatch(manager.jobs[0].stageText, /名称存在仓库候选/);
+  assert.match(manager.jobs[0].stageText, /发现 1 个相似候选.*等待选择入库方式/);
   const idle = new Promise((resolve) => manager.once('idle', resolve));
   await manager.startArchiveQueue();
   await idle;
@@ -2490,6 +2495,35 @@ test('catalog deletion is undoable without erasing unrelated undo history', asyn
   assert.equal(manager.catalog.find((record) => record.id === 'edited').notes, '先前修改');
   await manager.undoCatalogAction();
   assert.equal(manager.catalog.find((record) => record.id === 'edited').notes, '');
+});
+
+test('catalog deletion undo restores similarity links before the database index is refreshed', async () => {
+  const store = new FakeStore();
+  store.findCatalogIdsBySimilarityKeys = () => [];
+  store.saveCatalog = async (_library, records) => { store.catalog = structuredClone(records); };
+  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  manager.catalog = [
+    {
+      id: 'a', recordType: 'manual', title: '王佳乐北京旅行记录', displayName: '项目A',
+      tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [],
+      similarRecords: [{ id: 'b', title: '北京王佳乐旅行纪录', score: 0.9, reasons: ['标题相似'] }],
+      possibleDuplicate: true
+    },
+    {
+      id: 'b', recordType: 'manual', title: '北京王佳乐旅行纪录', displayName: '项目B',
+      tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [],
+      similarRecords: [{ id: 'a', title: '王佳乐北京旅行记录', score: 0.9, reasons: ['标题相似'] }],
+      possibleDuplicate: true
+    }
+  ];
+
+  await manager.deleteCatalogRecords(['b']);
+  assert.deepEqual(manager.catalog[0].similarRecords, []);
+  await manager.undoCatalogAction();
+
+  assert.equal(manager.catalog.find((record) => record.id === 'a').similarRecords.some((item) => item.id === 'b'), true);
+  assert.equal(manager.catalog.find((record) => record.id === 'b').similarRecords.some((item) => item.id === 'a'), true);
+  assert.equal(manager.catalog.every((record) => record.possibleDuplicate), true);
 });
 
 test('catalog deletion undo restores its archive, thumbnails and full record', async (t) => {

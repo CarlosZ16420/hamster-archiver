@@ -17,8 +17,14 @@
 
 ### 仓库浏览
 
-- 缩略图视图按钮使用大中小三态 SVG，默认中档；在该视图再次点击按大→中→小循环，保留大小偏好。悬停缓慢呼吸，减少动态效果时停用动画。
+- 缩略图视图按钮使用大中小三态 SVG，默认中档；在该视图再次点击按大→中→小循环，保留大小偏好。图标保留明暗呼吸，外侧圆角矩形框缓慢扩散到约 1.15 倍并淡出；减少动态效果时显示静态轮廓。
+- 大、中、小缩略图统一每页显示三行；点击上一页、下一页或使用左右方向键时保持页面上下位置。列表“大小 / 状态”的最小和默认宽度收窄为 64px。
 - 移除工具菜单里的缩略图大小设置。列表不再重复未压缩标签；渲染全部标签，超出列宽的内容裁切，不遮挡备份位置。
+
+### 更新、说明与默认值
+
+- 启动静默检查和用户主动联网检查都只接受 `main` 分支上的正式稳定 Release，历史列表也排除非 `main` 版本；用户明确选择本机 ZIP 时仍可安装版本号更高且校验通过的测试版本。
+- 中英文 README 的四张界面截图改为引用发行包内实际包含的 `README.assets` 文件；极小文件 MD5 跳过的新配置默认阈值调整为 1 KB。
 
 ### 升级与数据
 
@@ -41,8 +47,14 @@
 
 ### Warehouse browsing
 
-- The thumbnail button uses large, medium, and small SVG states, defaults to medium, and cycles large → medium → small when clicked again in thumbnail view. Size preferences remain saved. Hover adds slow breathing unless reduced motion is enabled.
+- The thumbnail button uses large, medium, and small SVG states, defaults to medium, and cycles large → medium → small when clicked again in thumbnail view. Size preferences remain saved. The icon keeps its brightness breathing while a rounded rectangle expands to about 1.15× and fades; reduced-motion mode shows a static outline.
+- Large, medium, and small thumbnail modes all show three rows per page. Previous, Next, and arrow-key paging preserve the vertical window position. The Size / Status column now has a 64 px minimum and default width.
 - Remove the thumbnail size menu control. List rows omit the duplicate Uncompressed tag and render all tags, clipping overflow within the tag column so backup locations remain unobstructed.
+
+### Updates, documentation, and defaults
+
+- Startup and user-requested online checks both accept only stable Releases from `main`, and the online history excludes non-`main` versions. A user-selected local ZIP can still install a higher, integrity-checked test version.
+- All four README screenshots now reference files actually included under `README.assets`. The default tiny-file MD5 skip threshold for new configurations is now 1 KB.
 
 ### Upgrade and data
 

@@ -29,7 +29,7 @@ test('growth borrows from following editable columns without moving the final co
   assert.equal(resized.tags, 69);
   assert.equal(resized.rating, 64);
   near(total(resized), total(defaultWidths));
-  assert.deepEqual(defaultWidths, { title: 293, type: 40, number: 37, status: 72, tags: 214, backup: 168, date: 97, rating: 64 });
+  assert.deepEqual(defaultWidths, { title: 293, type: 40, number: 37, status: 64, tags: 214, backup: 168, date: 97, rating: 64 });
 });
 
 test('extreme drags stop at minimum widths and the final boundary is immutable', () => {

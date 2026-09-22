@@ -13,6 +13,12 @@ function versionParts(value) {
   return match ? match.slice(1).map(Number) : null;
 }
 
+function isStableRelease(release, stableBranch = '') {
+  if (!release || typeof release !== 'object' || release.draft || release.prerelease) return false;
+  if (!/^v?\d+\.\d+\.\d+$/i.test(String(release.tag_name || '').trim())) return false;
+  return !stableBranch || String(release.target_commitish || '').trim() === stableBranch;
+}
+
 function compareVersions(left, right) {
   const a = versionParts(left);
   const b = versionParts(right);
@@ -181,10 +187,37 @@ function releaseFromCnbRedirect(response, adapter) {
   };
 }
 
-async function fetchLatestRelease(adapter, fetchImpl, timeoutMs) {
+async function fetchLatestRelease(adapter, fetchImpl, timeoutMs, stableBranch = '') {
+  if (stableBranch && adapter.provider === 'github') {
+    const signal = AbortSignal.timeout(timeoutMs);
+    try {
+      for (let page = 1; page <= 10; page += 1) {
+        const response = await fetchImpl(adapter.historyUrl(page), {
+          headers: adapter.headers,
+          redirect: 'follow',
+          signal
+        });
+        if (!response.ok) throw new Error(`${adapter.label} 更新检查失败（HTTP ${response.status}）`);
+        let releases;
+        try { releases = await response.json(); } catch (error) {
+          throw new Error(`${adapter.label} Release 响应解析失败：${error.message}`);
+        }
+        if (!Array.isArray(releases)) throw new Error(`${adapter.label} Release 响应缺少有效的正式版本`);
+        const release = releases.find((item) => isStableRelease(item, stableBranch));
+        if (release) return release;
+        if (releases.length < 100) break;
+      }
+    } catch (error) {
+      if (/^GitHub /.test(error.message)) throw error;
+      const kind = error.name === 'TimeoutError' || error.name === 'AbortError' ? '请求超时' : `连接失败：${error.message}`;
+      throw new Error(`${adapter.label} ${kind}`);
+    }
+    throw new Error(`${adapter.label} Release 响应缺少 ${stableBranch} 分支的有效正式版本`);
+  }
+  const requestUrl = adapter.latestApiUrl;
   let response;
   try {
-    response = await fetchImpl(adapter.latestApiUrl, {
+    response = await fetchImpl(requestUrl, {
       headers: adapter.headers,
       redirect: adapter.discoveryMode === 'release-page-redirect' ? 'manual' : 'follow',
       signal: AbortSignal.timeout(timeoutMs)
@@ -197,17 +230,18 @@ async function fetchLatestRelease(adapter, fetchImpl, timeoutMs) {
     return releaseFromCnbRedirect(response, adapter);
   }
   if (!response.ok) throw new Error(`${adapter.label} 更新检查失败（HTTP ${response.status}）`);
-  let release;
-  try { release = await response.json(); } catch (error) {
+  let payload;
+  try { payload = await response.json(); } catch (error) {
     throw new Error(`${adapter.label} Release 响应解析失败：${error.message}`);
   }
-  if (!release || typeof release !== 'object' || release.draft || release.prerelease || !versionParts(release.tag_name)) {
+  const release = payload;
+  if (!isStableRelease(release, stableBranch)) {
     throw new Error(`${adapter.label} Release 响应缺少有效的正式版本`);
   }
   return release;
 }
 
-async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter }) {
+async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter, stableBranch = '' }) {
   const latest = displayRelease(release, adapter);
   const versions = new Map([[latest.version, latest]]);
   const signal = AbortSignal.timeout(timeoutMs);
@@ -222,7 +256,7 @@ async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeo
       const releases = await response.json();
       if (!Array.isArray(releases)) break;
       for (const item of releases) {
-        if (item.draft || item.prerelease || !/^v?\d+\.\d+\.\d+$/i.test(item.tag_name || '')) continue;
+        if (!isStableRelease(item, stableBranch)) continue;
         if (compareVersions(item.tag_name, currentVersion) > 0 && compareVersions(item.tag_name, release.tag_name) <= 0) {
           const entry = displayRelease(item, adapter);
           versions.set(entry.version, entry);
@@ -291,7 +325,8 @@ async function checkForUpdates({
   fetchImpl = globalThis.fetch,
   timeoutMs = 8_000,
   cnb = UPDATE_PROVIDER_CONFIG.cnb,
-  environment = process.env
+  environment = process.env,
+  stableBranch = ''
 } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('当前运行环境不支持联网检查更新。');
   const normalizedDistributionMode = distributionMode === 'installed' ? 'installed' : 'portable';
@@ -300,9 +335,10 @@ async function checkForUpdates({
   let release;
   let githubFailure;
   try {
-    release = await fetchLatestRelease(github, fetchImpl, timeoutMs);
+    release = await fetchLatestRelease(github, fetchImpl, timeoutMs, stableBranch);
   } catch (error) {
     githubFailure = error;
+    if (stableBranch) throw new Error(`在线更新未找到 ${stableBranch} 分支的正式版本：${githubFailure.message}`);
     const cnbConfig = resolveCnbConfig(cnb, environment);
     if (!cnbConfig.configured) {
       throw new Error(`检查更新失败：${githubFailure.message}；${cnbConfig.reason}`);
@@ -316,7 +352,7 @@ async function checkForUpdates({
   }
   const updateAvailable = compareVersions(release.tag_name, currentVersion) > 0;
   const history = includeHistory && updateAvailable
-    ? await collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter })
+    ? await collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter, stableBranch })
     : { releases: [], historyIncomplete: false };
   return normalizeRelease({ release, adapter, currentVersion, distributionMode: normalizedDistributionMode, history });
 }
@@ -332,6 +368,7 @@ module.exports = {
   createCnbAdapter,
   createGithubAdapter,
   displayRelease,
+  isStableRelease,
   normalizeRelease,
   releaseFromCnbRedirect,
   resolveCnbConfig,

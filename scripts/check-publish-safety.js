@@ -3,8 +3,10 @@
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { verifySnapshotRecord } = require('../src/core/snapshot-provenance');
+const { publicSourceClassification } = require('../src/core/public-snapshot-boundary');
 
-const projectRoot = path.resolve(__dirname, '..');
+const projectRoot = path.resolve(process.env.HAMSTER_CHECK_SOURCE_ROOT || path.resolve(__dirname, '..'));
 const candidates = execFileSync(
   'git',
   ['-c', `safe.directory=${projectRoot.replace(/\\/g, '/')}`, 'ls-files', '--cached', '--others', '--exclude-standard', '-z'],
@@ -33,6 +35,7 @@ const forbiddenPaths = [
   /\.(?:sqlite(?:-wal|-shm)?|db|7z(?:\.\d+)?)$/i,
   /(^|\/)\.env(?:\.|$)/i
 ];
+const privateAgentPath = /(^|\/)(?:AGENTS\.md|\.agents|\.workbuddy)(\/|$)/i;
 const forbiddenExactNames = new Set(['readmeglmversion.md']);
 const secretPatterns = [
   { label: 'Windows 用户目录', pattern: /[A-Za-z]:\\Users\\[^\\\s"']+/i },
@@ -48,13 +51,29 @@ const textExtensions = new Set([
   '.cjs', '.cmd', '.css', '.cs', '.csproj', '.html', '.js', '.json', '.md', '.mjs', '.ps1', '.txt', '.yml', '.yaml'
 ]);
 const errors = [];
+if (process.env.HAMSTER_REQUIRE_SNAPSHOT_RECORD === '1' && !fs.existsSync(path.join(projectRoot, 'snapshot-source.json'))) {
+  errors.push('snapshot-source.json：公开快照缺少精确来源记录');
+}
+if (fs.existsSync(path.join(projectRoot, 'snapshot-source.json'))) {
+  try { verifySnapshotRecord(projectRoot); }
+  catch (error) { errors.push(`snapshot-source.json：${error.message}`); }
+}
 
 for (const relativePath of candidates) {
   const normalized = relativePath.replace(/\\/g, '/');
   const absolutePath = path.join(projectRoot, relativePath);
   if (!fs.existsSync(absolutePath)) continue;
+  if (fs.lstatSync(absolutePath).isSymbolicLink()) {
+    errors.push(`${relativePath}：公开快照不能包含符号链接`);
+    continue;
+  }
   if (forbiddenExactNames.has(normalized.toLowerCase()) || forbiddenPaths.some((pattern) => pattern.test(normalized))) {
     errors.push(`${relativePath}：属于运行数据、归档成品或本机配置`);
+    continue;
+  }
+  const classification = publicSourceClassification(normalized);
+  if ((privateAgentPath.test(normalized) || !classification.allowed) && !exportIgnoredPaths.has(normalized)) {
+    errors.push(`${relativePath}：私有或未分类的开发资产缺少 export-ignore，可能进入公开快照`);
     continue;
   }
   const stats = fs.statSync(absolutePath);

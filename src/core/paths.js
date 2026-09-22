@@ -135,7 +135,7 @@ function makeDefaultConfig(workspaceRoot, userDataLayout = {}) {
     largeFolderFileThreshold: 500,
     largeFolderMd5SampleLimit: 200,
     skipTinyMd5Files: true,
-    tinyFileMd5ThresholdBytes: 5 * 1024,
+    tinyFileMd5ThresholdBytes: 1024,
     autoSkipExactDuplicates: true,
     autoSkipExactDuplicateAction: 'keep',
     similarityReportEnabled: true,

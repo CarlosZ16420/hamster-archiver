@@ -1,36 +1,14 @@
 node_modules/
 dist/
 out/
-Developer/
 config/
 !src/config/
 !src/config/update-providers.json
 userdata/
 userData/
 user-data/
+logs/
 *.log
-.DS_Store
-.dotnet-cli/
-launcher/bin/
-launcher/obj/
-launcher-publish/
-
-# 私人媒体与程序运行数据不作为源代码提交
-待处理文件/
-压缩暂存目录/
-archive-staging/
-nuts/
-nuts-staging/
-saves/
-processed/
-BUG1/
-构造测试目录/
-零碎文件/
-.smoke-*/
-.tmp-smoke-*/
-.tmp-*-smoke-*/
-
-# 本机配置、数据库、归档成品和可能包含隐私的需求原稿
 .env
 .env.*
 !.env.example
@@ -40,30 +18,18 @@ BUG1/
 *.db
 *.7z
 *.7z.*
-项目名称：*.md
-ReadmeGlmversion.md
+.DS_Store
 
-# 第三方核查脚本生成的本地探针目录（保留在本机，不进入发布检查）
-hy测试目录/*/
-
-# 构建/发布产物：源码仓库不直接保存大二进制
+# Build outputs and local tool/runtime caches are not source files.
+.dotnet-cli/
+launcher/bin/
+launcher/obj/
+launcher-publish/
 HamsterArchive.exe
 HamsterArchiver.exe
 tools/ffmpeg/*.exe
-# 本地 AI 交接导出可能包含工作区绝对路径，不进入源码与发布检查
-docs/zcode-handoff-*/
 
-# Agent 临时记忆、仓库根运行时和旧式便携副本不进入源码
+# Keep each contributor's optional agent configuration local.
+/.agents/
 /.workbuddy/
-/locales/
-/resources/
-/release-manifest.json
-/chrome_*_percent.pak
-/*.dll
-/*.pak
-/*.dat
-/snapshot_blob.bin
-/v8_context_snapshot.bin
-/version
-/vk_swiftshader_icd.json
-/LICENSES.chromium.html
+/AGENTS.md

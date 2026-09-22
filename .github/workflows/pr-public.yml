@@ -1,0 +1,43 @@
+name: Public snapshot gate
+
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    if: github.repository == 'CarlosZ16420/hamster-archiver'
+    name: Public Snapshot Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: gate
+          persist-credentials: false
+      - name: Check out snapshot merge tree as data only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+      - name: Verify public boundaries and version files
+        env:
+          HAMSTER_CHECK_SOURCE_ROOT: ${{ github.workspace }}/candidate
+          HAMSTER_REQUIRE_SNAPSHOT_RECORD: '1'
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git -C candidate rev-parse HEAD^1)" = "$BASE_SHA"
+          test "$(git -C candidate rev-parse HEAD^2)" = "$HEAD_SHA"
+          node gate/scripts/check-publish-safety.js
+          node gate/scripts/verify-version.js

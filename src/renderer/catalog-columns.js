@@ -9,13 +9,13 @@
     { key: 'title', label: '名称', min: 140 },
     { key: 'type', label: '类型', min: 40 },
     { key: 'number', label: '文件', min: 32 },
-    { key: 'status', label: '大小 / 状态', min: 72 },
+    { key: 'status', label: '大小 / 状态', min: 64 },
     { key: 'tags', label: '标签', min: 60 },
     { key: 'backup', label: '备份位置', min: 80 },
     { key: 'date', label: '入库时间', min: 96 },
     { key: 'rating', label: '星级', min: 60 }
   ];
-  const defaultWidths = { title: 293, type: 40, number: 37, status: 72, tags: 214, backup: 168, date: 97, rating: 64 };
+  const defaultWidths = { title: 293, type: 40, number: 37, status: 64, tags: 214, backup: 168, date: 97, rating: 64 };
   const storageKey = 'hamster-catalog-column-ratios-v2';
   const legacyKey = 'hamster-catalog-column-widths-v1';
 

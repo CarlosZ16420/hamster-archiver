@@ -365,6 +365,7 @@ function createMcpApplicationServices(context = {}) {
           currentVersion: app.getVersion(),
           distributionMode: isInstalledDistribution ? 'installed' : 'portable',
           includeHistory: mode === 'manual',
+          stableBranch: 'main',
           fetchImpl: net?.fetch,
           timeoutMs: mode === 'automatic' ? 6_000 : 8_000
         });
