@@ -9,6 +9,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const { runArchiveJob } = require('../src/core/archive-engine');
+const { attachManifestMetadata, buildManifest } = require('../src/core/manifest');
 const { QueueManager } = require('../src/core/queue-manager');
 const { AppStore } = require('../src/core/store');
 
@@ -27,15 +28,19 @@ test('real 7-Zip flow encrypts, verifies and moves a small test archive', {
   await fs.mkdir(archiveOutputDirectory, { recursive: true });
   await fs.mkdir(sourcePath, { recursive: true });
   await fs.mkdir(path.join(sourcePath, '空子目录'), { recursive: true });
+  await fs.mkdir(path.join(sourcePath, '父目录', '嵌套空目录'), { recursive: true });
+  await fs.mkdir(path.join(sourcePath, '混合目录', '空层'), { recursive: true });
   await fs.writeFile(path.join(sourcePath, '不会明文显示的文件名.txt'), 'hamster archive integration test', 'utf8');
+  await fs.writeFile(path.join(sourcePath, '混合目录', '内容.txt'), 'nested content', 'utf8');
   const sourceStats = await fs.stat(path.join(sourcePath, '不会明文显示的文件名.txt'));
+  const nestedStats = await fs.stat(path.join(sourcePath, '混合目录', '内容.txt'));
 
   const result = await runArchiveJob({
     id: 'integration-job',
     sourcePath,
     sourceType: 'directory',
-    fileCount: 1,
-    totalBytes: sourceStats.size,
+    fileCount: 2,
+    totalBytes: sourceStats.size + nestedStats.size,
     archiveBaseName: 'arc_20260814T151230Z_a1b2c3d4.7z'
   }, {
     archiveStagingDirectory,
@@ -46,21 +51,204 @@ test('real 7-Zip flow encrypts, verifies and moves a small test archive', {
   });
 
   assert.equal(result.archiveFiles.length, 1);
-  assert.equal(result.manifest.length, 1);
-  assert.deepEqual(result.directories, ['空子目录']);
+  assert.equal(result.manifest.length, 2);
+  assert.deepEqual(new Set(result.directories), new Set(['空子目录', '父目录', '父目录/嵌套空目录', '混合目录', '混合目录/空层']));
   assert.match(result.manifest[0].md5, /^[a-f0-9]{32}$/);
   const archivePath = path.join(
     archiveOutputDirectory,
     result.archiveFiles[0].name
   );
   assert.equal(fsSync.existsSync(archivePath), true);
+  const published = await fs.stat(archivePath, { bigint: true });
+  assert.equal(result.archiveFiles[0].size, Number(published.size));
+  assert.deepEqual(result.archiveFiles[0].identity, {
+    device: String(published.dev), inode: String(published.ino),
+    modifiedNs: String(published.mtimeNs), createdNs: String(published.birthtimeNs)
+  });
   assert.equal(fsSync.existsSync(path.join(archiveStagingDirectory, 'integration-job')), false);
+
+  const extracted = path.join(root, 'extracted');
+  const extraction = spawnSync(sevenZipPath, ['x', archivePath, `-o${extracted}`, '-pintegration-secret', '-y'], {
+    encoding: 'utf8', windowsHide: true
+  });
+  assert.equal(extraction.status, 0, `${extraction.stdout}${extraction.stderr}`);
+  const extractedSource = path.join(extracted, path.basename(sourcePath));
+  for (const relative of ['空子目录', path.join('父目录', '嵌套空目录'), path.join('混合目录', '空层')]) {
+    const emptyDirectory = path.join(extractedSource, relative);
+    assert.equal((await fs.stat(emptyDirectory)).isDirectory(), true);
+    assert.deepEqual(await fs.readdir(emptyDirectory), []);
+  }
+  assert.equal(await fs.readFile(path.join(extractedSource, '混合目录', '内容.txt'), 'utf8'), 'nested content');
+  assert.equal(await fs.readFile(path.join(extractedSource, '不会明文显示的文件名.txt'), 'utf8'), 'hamster archive integration test');
 
   const wrongPasswordListing = spawnSync(sevenZipPath, [
     'l', archivePath, '-pwrong-password', '-y'
   ], { encoding: 'utf8', windowsHide: true });
   assert.notEqual(wrongPasswordListing.status, 0);
   assert.equal(`${wrongPasswordListing.stdout}${wrongPasswordListing.stderr}`.includes('不会明文显示的文件名.txt'), false);
+});
+
+test('archive verification rejects a valid 7-Zip file missing a source empty directory before publication', {
+  skip: process.platform !== 'win32' || !fsSync.existsSync(sevenZipPath)
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-missing-archive-directory-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source', 'item');
+  const archiveStagingDirectory = path.join(root, 'staging');
+  const archiveOutputDirectory = path.join(root, 'output');
+  const archiveBaseName = 'missing-directory.7z';
+  await fs.mkdir(path.join(sourcePath, 'empty'), { recursive: true });
+  await fs.mkdir(archiveOutputDirectory);
+  const sourceFile = path.join(sourcePath, 'content.txt');
+  await fs.writeFile(sourceFile, 'source remains intact');
+  const totalBytes = (await fs.stat(sourceFile)).size;
+
+  await assert.rejects(runArchiveJob({
+    id: 'missing-directory', sourcePath, sourceType: 'directory', fileCount: 1,
+    totalBytes, archiveBaseName
+  }, {
+    archiveStagingDirectory, archiveOutputDirectory,
+    repositoryDirectory: path.join(root, 'repository'), sevenZipPath, archivePassword: ''
+  }, {
+    onStage: async (stage, description) => {
+      if (stage !== 'verifying' || description !== '正在比对归档与源文件及目录清单') return;
+      const stagedPath = path.join(archiveStagingDirectory, 'missing-directory', archiveBaseName);
+      const deletion = spawnSync(sevenZipPath, ['d', stagedPath, 'item\\empty', '-y'], {
+        encoding: 'utf8', windowsHide: true
+      });
+      assert.equal(deletion.status, 0, `${deletion.stdout}${deletion.stderr}`);
+    }
+  }), { code: 'ARCHIVE_CONTENT_MISMATCH' });
+  assert.equal(await fs.readFile(sourceFile, 'utf8'), 'source remains intact');
+  await assert.rejects(fs.access(path.join(archiveOutputDirectory, archiveBaseName)), { code: 'ENOENT' });
+});
+
+test('incomplete source scans cannot publish a partially verified archive', {
+  skip: process.platform !== 'win32' || !fsSync.existsSync(sevenZipPath)
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-incomplete-source-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source', 'item');
+  const archiveOutputDirectory = path.join(root, 'output');
+  await fs.mkdir(sourcePath, { recursive: true });
+  await fs.mkdir(archiveOutputDirectory);
+  const sourceFile = path.join(sourcePath, 'content.txt');
+  await fs.writeFile(sourceFile, 'source stays in place');
+  const manifest = await buildManifest(sourcePath, 'directory');
+  const archiveBaseName = 'incomplete.7z';
+  for (const { skippedFiles, complete } of [
+    { skippedFiles: [{ path: 'unreadable.txt', code: 'EACCES', type: 'file' }], complete: true },
+    { skippedFiles: [], complete: false }
+  ]) {
+    const incompleteManifest = attachManifestMetadata([...manifest], {
+      directories: manifest.directories,
+      skippedFiles,
+      sourceSnapshot: { ...manifest.sourceSnapshot, complete }
+    });
+    await assert.rejects(runArchiveJob({
+      id: 'incomplete-source', sourcePath, sourceType: 'directory', fileCount: 1,
+      totalBytes: manifest[0].size, archiveBaseName
+    }, {
+      archiveStagingDirectory: path.join(root, 'staging'), archiveOutputDirectory,
+      repositoryDirectory: path.join(root, 'repository'), sevenZipPath, archivePassword: ''
+    }, { preparedManifest: incompleteManifest, preparedManifestValidated: true }), {
+      code: 'ARCHIVE_SOURCE_INCOMPLETE'
+    });
+  }
+  assert.equal(await fs.readFile(sourceFile, 'utf8'), 'source stays in place');
+  await assert.rejects(fs.access(path.join(archiveOutputDirectory, archiveBaseName)), { code: 'ENOENT' });
+});
+
+test('ZIP archives preserve nested empty directories after structure verification', {
+  skip: process.platform !== 'win32' || !fsSync.existsSync(sevenZipPath)
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-zip-empty-directory-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source', 'item');
+  const archiveOutputDirectory = path.join(root, 'output');
+  await fs.mkdir(path.join(sourcePath, 'nested', 'empty'), { recursive: true });
+  await fs.mkdir(archiveOutputDirectory);
+  await fs.writeFile(path.join(sourcePath, 'nested', 'content.txt'), 'ZIP content');
+  const archiveBaseName = 'structure.zip';
+  const result = await runArchiveJob({
+    id: 'zip-structure', sourcePath, sourceType: 'directory', fileCount: 1,
+    totalBytes: Buffer.byteLength('ZIP content'), archiveBaseName, archiveFormat: 'zip'
+  }, {
+    archiveStagingDirectory: path.join(root, 'staging'), archiveOutputDirectory,
+    repositoryDirectory: path.join(root, 'repository'), sevenZipPath, archivePassword: ''
+  });
+  assert.equal(result.archiveFiles.length, 1);
+  const extracted = path.join(root, 'extracted');
+  const extraction = spawnSync(sevenZipPath, [
+    'x', path.join(archiveOutputDirectory, archiveBaseName), `-o${extracted}`, '-y'
+  ], { encoding: 'utf8', windowsHide: true });
+  assert.equal(extraction.status, 0, `${extraction.stdout}${extraction.stderr}`);
+  assert.deepEqual(await fs.readdir(path.join(extracted, 'item', 'nested', 'empty')), []);
+  assert.equal(await fs.readFile(path.join(extracted, 'item', 'nested', 'content.txt'), 'utf8'), 'ZIP content');
+});
+
+test('split 7z archives verify source structure through the first volume', {
+  skip: process.platform !== 'win32' || !fsSync.existsSync(sevenZipPath)
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-split-empty-directory-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source', 'item');
+  const archiveOutputDirectory = path.join(root, 'output');
+  await fs.mkdir(path.join(sourcePath, 'nested', 'empty'), { recursive: true });
+  await fs.mkdir(archiveOutputDirectory);
+  const sourceFile = await fs.open(path.join(sourcePath, 'large.bin'), 'w');
+  try {
+    for (let index = 0; index < 66; index += 1) await sourceFile.write(crypto.randomBytes(1024 * 1024));
+  } finally { await sourceFile.close(); }
+  const archiveBaseName = 'structure.7z';
+  const result = await runArchiveJob({
+    id: 'split-structure', sourcePath, sourceType: 'directory', fileCount: 1,
+    totalBytes: 66 * 1024 * 1024, archiveBaseName, archiveFormat: '7z', compressionLevel: 0,
+    archiveVolumeEnabled: true, archiveVolumeBytes: 64 * 1024 * 1024
+  }, {
+    archiveStagingDirectory: path.join(root, 'staging'), archiveOutputDirectory,
+    repositoryDirectory: path.join(root, 'repository'), sevenZipPath, archivePassword: ''
+  });
+  assert.ok(result.archiveFiles.length >= 2);
+  const extracted = path.join(root, 'extracted');
+  const extraction = spawnSync(sevenZipPath, [
+    'x', path.join(archiveOutputDirectory, result.archiveFiles[0].name), `-o${extracted}`, '-y'
+  ], { encoding: 'utf8', windowsHide: true });
+  assert.equal(extraction.status, 0, `${extraction.stdout}${extraction.stderr}`);
+  assert.deepEqual(await fs.readdir(path.join(extracted, 'item', 'nested', 'empty')), []);
+  assert.equal((await fs.stat(path.join(extracted, 'item', 'large.bin'))).size, 66 * 1024 * 1024);
+});
+
+test('verified same-disk archive rejects a staged replacement before publication', {
+  skip: process.platform !== 'win32' || !fsSync.existsSync(sevenZipPath)
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-staged-replacement-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source', 'item');
+  const archiveStagingDirectory = path.join(root, 'staging');
+  const archiveOutputDirectory = path.join(root, 'output');
+  const archiveBaseName = 'owned.7z';
+  await fs.mkdir(sourcePath, { recursive: true });
+  await fs.mkdir(archiveOutputDirectory, { recursive: true });
+  await fs.writeFile(path.join(sourcePath, 'content.txt'), 'source remains unchanged');
+  const totalBytes = (await fs.stat(path.join(sourcePath, 'content.txt'))).size;
+
+  await assert.rejects(runArchiveJob({
+    id: 'staged-replacement', sourcePath, sourceType: 'directory', fileCount: 1,
+    totalBytes, archiveBaseName
+  }, {
+    archiveStagingDirectory, archiveOutputDirectory,
+    repositoryDirectory: path.join(root, 'repository'), sevenZipPath, archivePassword: ''
+  }, {
+    onStage: async (stage) => {
+      if (stage !== 'moving') return;
+      const stagedPath = path.join(archiveStagingDirectory, 'staged-replacement', archiveBaseName);
+      const replacement = path.join(path.dirname(stagedPath), 'replacement.tmp');
+      await fs.writeFile(replacement, 'unverified replacement');
+      await fs.rename(replacement, stagedPath);
+    }
+  }), /身份复核失败/);
+  assert.equal(await fs.readFile(path.join(sourcePath, 'content.txt'), 'utf8'), 'source remains unchanged');
 });
 
 test('real archive publication is recovered when the SQLite catalog commit is rejected', {

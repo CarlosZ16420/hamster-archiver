@@ -6,17 +6,20 @@
 
 ### Enjoy collecting. Enjoy organizing, too.
 
-Windows local-first file organizer, media library, and verifiable batch archiver. Optional local CLI/MCP interfaces support capable AI agents as an experimental feature.
+Local-first file organizer, media library, and verifiable batch archiver for Windows, now with a public macOS beta. Optional local CLI/MCP interfaces support capable AI agents as an experimental feature.
 
-![Version](https://img.shields.io/badge/version-4.6.18-d45f3c?style=flat-square)
+![Mac Beta](https://img.shields.io/badge/version-4.8.0--beta.mac.2-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
+![macOS universal](https://img.shields.io/badge/macOS-universal-23211d?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
-**[Download for Windows](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · [简体中文](README.md) · [Report an issue](https://github.com/CarlosZ16420/hamster-archiver/issues)
+**[Download Windows stable](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[Download Mac beta](https://github.com/CarlosZ16420/hamster-archiver/releases/tag/v4.8.0-beta.mac.2)** · [简体中文](README.md) · [Report an issue](https://github.com/CarlosZ16420/hamster-archiver/issues)
 
 </div>
 
 [Quick start](#quick-start) · [Features](#everyday-ease-supported-by-careful-details) · [Experimental AI integration](#experimental-features) · [FAQ](#frequently-asked-questions) · [Documentation and contributions](#documentation-and-contributions)
+
+Using this project with an AI agent? Go straight to the [short AI guide](docs/AI-QUICKSTART.md). A full Release includes `hamster.cmd` and the offline guide; ordinary use needs no source checkout, separate Node.js install, or MCP setup.
 
 Downloads keep piling up, your drive is almost full, and organizing everything never gets done?
 
@@ -45,11 +48,13 @@ The app packages files and records them; you or your sync tool handles cloud upl
 
 Review updates to an uncompressed folder from its details or a selected batch. Additions merge into the same record; modifications and deletions require a source-change review. Dropping the same original folder again continues its latest content record, with an explicit choice to replace, create an independent record, or skip when review is needed. Valid previews and fingerprints are reused, and relocating an original only changes the association until your next operation.
 
+Finish or cancel a pending review or compression task before deleting its linked uncompressed Warehouse item. If the item is deleted first, adding the same source again starts a new item.
+
 Intake automatically detects duplicates and can skip existing content while still providing a similarity report. Large directories remain responsive, and the whole library is quick to search.
 
 ## Quick start
 
-For **Windows x64**, with English and Chinese interfaces. To use the app, choose a [Release package](https://github.com/CarlosZ16420/hamster-archiver/releases/latest); GitHub Source code downloads and repository clones are for development.
+The Windows stable release supports **Windows x64**, with English and Chinese interfaces. To use the app, choose a [Release package](https://github.com/CarlosZ16420/hamster-archiver/releases/latest); GitHub Source code downloads and repository clones are for development.
 
 1. Download the **Setup EXE installer**, or extract the entire **portable ZIP** and run `HamsterArchiver.exe`.
 2. In the archive workbench, scan a directory or drop folders and videos, then review the pending resources. Try one small folder for your first run.
@@ -57,7 +62,11 @@ For **Windows x64**, with English and Chinese interfaces. To use the app, choose
 
 Compression and video-preview tools are included, and no separate Node.js installation is needed.
 
-Keep all included files in the portable directory, `HamsterArchiver-v4.6.18-win-x64/`.
+Keep all included files in the current Windows stable portable directory, `HamsterArchiver-v4.6.18-win-x64/`.
+
+### Mac beta (Apple Silicon and Intel)
+
+Download `HamsterArchiver-v4.8.0-beta.mac.2-mac-universal.dmg` and its `.sha256` file from the [Mac beta prerelease](https://github.com/CarlosZ16420/hamster-archiver/releases/tag/v4.8.0-beta.mac.2). Check the digest, open the DMG, then drag the app to Applications. macOS 12 or later is supported. This beta is not Apple-notarized, so macOS may block the first launch. If you trust the download, use Open Anyway in System Settings → Privacy & Security. Mac user data defaults to the current user's Application Support directory and remains when replacing the app. See the [Mac guide](platforms/macos/README.md) for feature limits and build details.
 
 [![Batch archiving, progress tracking and duplicate review](README.assets/归档工作台-主目录.png)](README.assets/归档工作台-主目录.png)
 
@@ -75,7 +84,7 @@ Each project retains image thumbnails, sampled video frames and a complete direc
 
 ### File safety: verify before handling originals
 
-Archive intake follows **manifest → compression → integrity verification → catalog registration → configured source handling**. Low disk space and abnormal output sizes stop processing or require review. Source post-processing runs only after verification and registration succeed.
+Archive intake follows **manifest → compression → integrity verification → catalog registration → configured source handling**. Empty folders are retained in the archive; before publication, archived file paths, sizes, and folder structure are compared with the complete source manifest. Low disk space, an incomplete source manifest, mismatched archive contents, and abnormal output sizes stop processing or require review. Source post-processing runs only after verification and registration succeed.
 
 <details>
 <summary>Details: file preservation and recovery</summary>
@@ -83,7 +92,7 @@ Archive intake follows **manifest → compression → integrity verification →
 - Generate a manifest and recheck sources before compression. Cross-drive moves copy and verify before handling the source location.
 - Verify archive identity before moving or cleaning up, protecting against replacement files with the same name; handle split archives as a complete set.
 - Preserve generated archives for recovery if catalog registration fails. Cancellation during thumbnail generation keeps originals and cleans uncommitted outputs.
-- Distinguish a failed source operation from a completed operation whose status could not be saved, retaining diagnostic recovery information.
+- Distinguish a failed source operation from a completed operation whose status could not be saved. This also applies after confirming an abnormal archive, preserving the actual move destination and preventing a misleading retry prompt.
 - Track original-file location and disposition, with restoration of moved or recycled sources when conditions permit.
 - Report invalid data locations explicitly; safe data-location switching retains the previous directory instead of silently presenting an empty library.
 
@@ -91,7 +100,7 @@ Archive intake follows **manifest → compression → integrity verification →
 
 ### Organization: preview, categorize and keep useful notes
 
-Browse covers and build your own organization habits with tags, ratings and notes. Search titles, tags, notes, paths and filenames, and record backup locations in bulk.
+Browse covers and build your own organization habits with tags, ratings and notes. Search titles, tags, notes, paths and filenames; results remain available across pages even when a common query matches more than 2,000 items. Record backup locations in bulk.
 
 <details>
 <summary>Details: organization tools and responsive browsing</summary>
@@ -139,15 +148,15 @@ Choose 7z/ZIP, passwords and custom split volumes. Queue batches, pause or sched
 
 ## Experimental features
 
-### AI / agent integration (CLI · MCP · discovery preview)
+### AI / agent collaboration
 
-Hamster Archiver offers experimental local integration for modern AI/agent workflows. Once enabled, assistants with local command or MCP access can search the library, add tags, and submit inventory-only or compressed archive tasks.
+An assistant with local tool access can search the library, add tags, and submit inventory-only or compressed archive tasks. For temporary use, run `hamster.cmd` from a complete Windows Release package or `Contents/Resources/hamster` inside the Mac app without registering a host.
 
-AI integration is off by default. The Setup EXE is recommended because it provides a stable application path and managed upgrade/uninstall lifecycle; portable ZIP builds can still use CLI/MCP manually.
+For ongoing integration, enable the desired adapter under **More settings → Experimental → AI assistant integration**. Host registration is off by default, and each adapter can be disabled independently. Setup EXE provides a stable path and managed upgrade/uninstall lifecycle; the portable ZIP can use the CLI directly.
 
-Under **More settings → Experimental → AI assistant integration**, enable Codex / ChatGPT Desktop, optional Codex MCP, WorkBuddy, generic MCP, or the ODR discovery preview independently. Each adapter can also be disabled independently.
+Available adapters include Codex / ChatGPT Desktop, optional Codex MCP, WorkBuddy, generic MCP, and a Windows ODR discovery preview. Actual host support depends on that client and the operating system.
 
-For routine use, state the goal directly—for example: “Use Hamster Archiver to catalog `D:\Downloads\Sample` without compression and keep the originals.” The application owns validation, queueing, archive verification, and result persistence. The assistant needs extra steps only when input is missing, confirmation is required, or a real error occurs.
+For example: “Use Hamster Archiver to catalog this folder without compression and keep the originals.” The app validates, queues, and saves results. Meaningful project boundary ambiguity remains a choice; existing records are identified as reused, updated, or skipped.
 
 > This is experimental. The AI client can see returned paths, titles, tags, notes, and other metadata; Hamster Archiver itself does not upload media to an online model. Availability depends on the selected client, operating system, and permissions.
 
@@ -167,7 +176,7 @@ Confirm that the backup is safely stored at its destination before deciding what
 <details>
 <summary>Where do files and library data live?</summary>
 
-Local organization leaves originals in place and stores an index and thumbnails. Backup archives go to your selected destination. Portable builds default to adjacent `userdata`; installed builds use Windows user data. More settings provides a safe location-switching workflow.
+Local organization leaves originals in place and stores an index and thumbnails. Backup archives go to your selected destination. Windows portable builds default to adjacent `userdata`; Windows installed builds use Windows user data. The Mac build defaults to `~/Library/Application Support/Hamster Archiver/`. More settings provides a safe location-switching workflow.
 
 The application does not upload resources; you or your sync tool handles uploads. It contacts GitHub for update checks and downloads. When using AI, returned metadata enters the chosen client's context.
 
@@ -183,7 +192,7 @@ Yes. Runtime logs remain in `logs/app.log` inside the active user-data area, and
 <details>
 <summary>How do I update? Does a warehouse export include my originals?</summary>
 
-Open Check for updates to read release notes and update. If networking is unavailable, download a newer release and choose Manual update: select a ZIP for portable builds or a Setup EXE for installed builds.
+On Windows, open Check for updates to read release notes and update. If networking is unavailable, download a newer release and choose Manual update: select a ZIP for portable builds or a Setup EXE for installed builds. On Mac, download a newer DMG from GitHub and replace the app manually.
 
 If an older version has no working updater, export the warehouse and import it into a new copy of the app. Verify records and thumbnails before retiring the old directory. **Warehouse exports contain the index and thumbnails, not original files or archive outputs**; keep those separately.
 
@@ -200,6 +209,6 @@ If an older version has no working updater, export the warehouse and import it i
 | Code or documentation contributions | [Contributing](CONTRIBUTING.md) · [Development guide](docs/DEVELOPMENT.md) |
 | Security reports and licensing | [Security](SECURITY.md) · [MIT License](LICENSE) |
 
-Source development requires Windows, Node.js 22.12+ on 22.x or 24.x, and npm 10.x/11.x. See the development guide for dependency, Electron runtime and bundled-tool setup.
+Source development requires Windows or macOS, Node.js 22.12+ on 22.x or 24.x, and npm 10.x/11.x. See the development guide for dependency, Electron runtime and bundled-tool setup.
 
 Hamster Archiver started as a small tool for my own collection. I hope it helps you enjoy organizing yours, too. Thanks to 7-Zip, FFmpeg, the LinuxDo community and everyone who tries the app and shares feedback. If it helps you, a Star or a suggestion is always welcome.

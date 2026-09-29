@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+resources=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ELECTRON_RUN_AS_NODE=1 exec "$resources/../MacOS/Hamster Archiver" "$resources/app/src/core/mcp-client.js" "$@" --disable-crash-reporter --disable-breakpad

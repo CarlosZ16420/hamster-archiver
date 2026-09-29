@@ -71,6 +71,22 @@ if (!rendererDir) {
       'Identical to a Warehouse item; auto-skipped'
     );
     assert.equal(i18n.translate('等待下次入库'), 'Next Run');
+    assert.equal(i18n.translate('归档完成/状态保存失败'), 'Archived / Status Save Failed');
+    assert.equal(i18n.translate('已移入 Windows 回收站'), 'Moved to the Windows Recycle Bin');
+    assert.equal(i18n.translate('已移动到：'), 'Moved to: ');
+    assert.equal(i18n.translate('原位置副本保留；已复制到：'), 'Original retained; copied to: ');
+    assert.equal(
+      i18n.translate('源文件恢复线索：原位置 E:\\source；已移动到 E:\\finished。'),
+      'Source recovery details: original location E:\\source; moved to E:\\finished.'
+    );
+    assert.equal(
+      i18n.translate('源文件恢复线索：原位置 E:\\source；已复制到 E:\\finished，原位置副本保留。'),
+      'Source recovery details: original location E:\\source; copied to E:\\finished; original retained.'
+    );
+    assert.equal(
+      i18n.translate('源文件恢复线索：原位置 E:\\source；已移入 Windows 回收站。'),
+      'Source recovery details: original location E:\\source; moved to the Windows Recycle Bin.'
+    );
     assert.equal(i18n.translate('2 个低于 100 MB 的小项目'), '2 small items below 100 MB');
     assert.equal(
       i18n.translate('有多个项目低于当前 50 MB 的入库阈值。'),
@@ -377,6 +393,7 @@ if (!rendererDir) {
       '用户已确认回收站安全警告；队列仍保持停止，后续任务需手动重新开始。',
       '卡顿规避：已跳过 17 个小于 128 KB 的极小文件，不计算 MD5。',
       '内容完全一致候选核验达到读取预算，未完成的候选已转为人工复核；不会自动跳过。',
+      '部分内容一致候选的来源路径暂不可核验，已转为人工复核；不会自动跳过。',
       '内容完全一致候选已提前排除；读取 3 个文件后停止完整核验。',
       '用户已确认相似报告，任务复用已生成清单并重新进入队列。',
       '用户已确认内容完全一致提示，任务复用已生成清单并重新进入队列。',

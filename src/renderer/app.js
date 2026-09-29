@@ -2,7 +2,7 @@
 
 if (!window.archiveApp) {
   document.querySelector('#desktop-required').hidden = false;
-  throw new Error('桌面桥接未加载：请运行 HamsterArchiver.exe，不要直接打开网页文件。');
+  throw new Error('桌面桥接未加载：请启动 Hamster Archiver 桌面应用，不要直接打开网页文件。');
 }
 
 // 界面翻译：中文为源语言，英文环境在运行时替换词条；用户数据永不翻译。
@@ -10,6 +10,7 @@ const i18n = window.hamsterI18n;
 const uiState = window.hamsterUiState;
 const tagAutocomplete = window.hamsterTagAutocomplete;
 const t = (value) => i18n?.translate(value) ?? value;
+const isMac = window.archiveApp.platform === 'darwin';
 i18n?.setLocale(String(navigator.language || 'zh-CN').toLowerCase().startsWith('en') ? 'en-US' : 'zh-CN');
 
 const SIMILARITY_STRENGTH_ORDER = ['loose', 'standard', 'strict'];
@@ -47,6 +48,7 @@ const elements = {
   largeFolderMd5SampleLimit: document.querySelector('#large-folder-md5-sample-limit'),
   skipTinyMd5Files: document.querySelector('#skip-tiny-md5-files'),
   tinyFileMd5ThresholdKb: document.querySelector('#tiny-file-md5-threshold-kb'),
+  queueConcurrency: document.querySelector('#queue-concurrency'),
   autoSkipExactDuplicates: document.querySelector('#auto-skip-exact-duplicates'),
   autoSkipExactDuplicateAction: document.querySelector('#auto-skip-exact-duplicate-action'),
   scheduleEnabled: document.querySelector('#schedule-enabled'),
@@ -197,6 +199,14 @@ const elements = {
   codexSkillMode: document.querySelector('#codex-skill-mode'),
   toast: document.querySelector('#toast')
 };
+if (isMac) {
+  document.querySelector('.brand-icon')?.setAttribute('src', '../../assets/app-icon.png');
+  elements.autoTrash.checked = false;
+  elements.autoTrash.disabled = true;
+  elements.autoTrash.closest('label').hidden = true;
+  elements.integrationList?.querySelector('[data-integration="windows-odr"]')?.setAttribute('hidden', '');
+  elements.manualImagePaste.textContent = '也可以在这里按 ⌘V 粘贴图片';
+}
 
 const statusLabels = {
   awaiting_confirmation: '等待确认',
@@ -208,7 +218,7 @@ const statusLabels = {
   inventorying: '生成清单与 MD5',
   compressing: '压缩中',
   verifying: '完整性验证',
-  moving: '移入库目录',
+  moving: '处理源文件',
   completed: '已完成',
   completed_cleanup_failed: '归档完成/源文件处理失败',
   skipped_duplicate: '已自动跳过',
@@ -221,7 +231,9 @@ function statusLabel(status) {
 }
 
 function jobStatusLabel(job) {
-  return job?.status === 'queued' && job?.deferredUntilNextRun === true
+  return job?.status === 'completed_cleanup_failed' && job?.errorCode === 'SOURCE_DISPOSITION_COMMIT_FAILED'
+    ? '归档完成/状态保存失败'
+    : job?.status === 'queued' && job?.deferredUntilNextRun === true
     ? '等待下次入库'
     : job?.status === 'queued' && job?.intakeModeSelected === false
     ? '待选入库方式'
@@ -1337,9 +1349,10 @@ function readConfig() {
     scheduleEnabled: elements.scheduleEnabled.checked,
     scheduleStart: elements.scheduleStart.value,
     scheduleEnd: elements.scheduleEnd.value,
+    queueConcurrency: Number(elements.queueConcurrency.value),
     similarityEnabled: elements.similarityEnabled.checked,
     similarityStrength: SIMILARITY_STRENGTH_ORDER[Number(elements.similarityStrength.value) - 1] || 'standard',
-    autoTrashCompleted: elements.autoTrash.checked,
+    autoTrashCompleted: !isMac && elements.autoTrash.checked,
     recordBackupLocation: elements.recordBackupLocation.checked,
     backupLocation: elements.backupLocation.value.trim(),
     suppressOnboarding: Boolean(currentState?.config?.suppressOnboarding)
@@ -1548,10 +1561,11 @@ function renderConfig(config) {
   elements.scheduleEnabled.checked = Boolean(config.scheduleEnabled);
   elements.scheduleStart.value = config.scheduleStart || '';
   elements.scheduleEnd.value = config.scheduleEnd || '';
+  elements.queueConcurrency.value = String(config.queueConcurrency || 1);
   elements.similarityEnabled.checked = config.similarityEnabled !== false;
   const strengthIndex = SIMILARITY_STRENGTH_ORDER.indexOf(config.similarityStrength || 'standard');
   elements.similarityStrength.value = String(strengthIndex >= 0 ? strengthIndex + 1 : 2);
-  elements.autoTrash.checked = Boolean(config.autoTrashCompleted);
+  elements.autoTrash.checked = !isMac && Boolean(config.autoTrashCompleted);
   elements.recordBackupLocation.checked = Boolean(config.recordBackupLocation);
   elements.backupLocation.value = config.backupLocation || '';
   updateBackupLocationControl();
@@ -1587,7 +1601,7 @@ function updateSelectionControls(jobs) {
   elements.selectionCount.textContent = t(selectedJobIds.size > 0
     ? `已选择 ${selectedJobIds.size} 项`
     : '未选择任务');
-  elements.removeSelected.disabled = selectedJobIds.size === 0;
+  elements.removeSelected.disabled = selectedJobIds.size === 0 || Boolean(currentState?.running);
   elements.queueSelectionActions.hidden = selectedJobIds.size === 0;
   elements.selectAllTasks.checked = jobs.length > 0 && selectedJobIds.size === jobs.length;
   elements.selectAllTasks.indeterminate = selectedJobIds.size > 0 && selectedJobIds.size < jobs.length;
@@ -1598,7 +1612,29 @@ function renderJobs(jobs) {
   elements.emptyTasks.hidden = jobs.length > 0;
   updateSelectionControls(jobs);
 
-  for (const job of jobs) {
+  const currentBatchJobs = currentState?.activeBatchId
+    ? jobs.filter((job) => job.runBatchId === currentState.activeBatchId)
+    : [];
+  const pendingJobs = currentState?.activeBatchId
+    ? jobs.filter((job) => !job.runBatchId && [
+        'queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation', 'awaiting_source_change_confirmation'
+      ].includes(job.status))
+    : [];
+  const groupedIds = new Set([...currentBatchJobs, ...pendingJobs].map((job) => job.id));
+  const orderedJobs = currentState?.activeBatchId
+    ? [...currentBatchJobs, ...pendingJobs, ...jobs.filter((job) => !groupedIds.has(job.id))]
+    : jobs;
+
+  for (const job of orderedJobs) {
+    if (pendingJobs.length > 0 && currentBatchJobs.length > 0 && job === pendingJobs[0]) {
+      const divider = document.createElement('tr');
+      divider.className = 'queue-batch-divider';
+      const dividerCell = document.createElement('td');
+      dividerCell.colSpan = 7;
+      dividerCell.textContent = `待启动 · ${pendingJobs.length} 项`;
+      divider.append(dividerCell);
+      elements.taskList.append(divider);
+    }
     const row = document.createElement('tr');
     row.dataset.jobId = job.id;
     row.classList.toggle('selected', selectedJobIds.has(job.id));
@@ -1634,6 +1670,20 @@ function renderJobs(jobs) {
     else if (job.processingMode === 'inventory_only') nameLine.append(make('span', 'queue-origin-badge uncompressed', '未压缩入库'));
     nameLine.append(copyName, openName);
     nameCell.append(nameLine, makeUserText('small', '', job.sourcePath));
+    if (job.errorCode === 'SOURCE_DISPOSITION_COMMIT_FAILED' && job.sourceDispositionRecovery) {
+      const recovery = job.sourceDispositionRecovery;
+      const detail = make('small', 'source-recovery-location');
+      if (recovery.sourceDisposition === 'trashed') {
+        detail.append(make('span', '', '已移入 Windows 回收站'));
+      } else {
+        detail.append(
+          make('span', '', recovery.sourceDisposition === 'moved_source_retained'
+            ? '原位置副本保留；已复制到：' : '已移动到：'),
+          makeUserText('span', '', recovery.movedTo)
+        );
+      }
+      nameCell.append(detail);
+    }
     row.append(nameCell);
     row.append(make('td', '', String(job.fileCount)));
     row.append(make('td', '', formatBytes(job.totalBytes)));
@@ -1704,7 +1754,7 @@ function renderJobs(jobs) {
     elements.taskList.append(row);
   }
   requestAnimationFrame(() => {
-    const rows = [...elements.taskList.rows];
+    const rows = [...elements.taskList.querySelectorAll('tr[data-job-id]')];
     elements.taskListContainer.classList.toggle('queue-scrollable', rows.length > 10);
     if (rows.length <= 10) {
       elements.taskListContainer.style.removeProperty('--queue-visible-height');
@@ -3263,33 +3313,44 @@ function renderSummary(state) {
   document.querySelector('#summary-completed').textContent = String(jobs.filter((job) => job.status.startsWith('completed')).length);
   document.querySelector('#summary-bytes').textContent = formatBytes(jobs.reduce((sum, job) => sum + job.totalBytes, 0));
   elements.runningIndicator.textContent = t(state.paused
-    ? '当前任务已暂停'
+    ? '当前队列已暂停'
     : state.pauseAfterCurrent ? '完成本项后暂停'
       : state.scheduleWaiting ? '等待定时时段'
-        : state.running ? '队列运行中' : '空闲');
+        : state.running
+          ? state.memoryWaiting
+            ? `正在运行 ${state.runningCount} / ${state.concurrencyLimit} · 内存不足，暂缓启动其他任务`
+            : `正在运行 ${state.runningCount} / ${state.concurrencyLimit}`
+          : '空闲');
   if (state.safetyHalt) {
     elements.runningIndicator.textContent = t('安全停止：等待确认');
   }
   elements.runningIndicator.classList.toggle('active', state.running);
-  document.querySelector('#start-queue').disabled = state.running || !jobs.some((job) =>
+  const queueRunningHint = '当前队列执行中。新任务可以继续添加，待本批任务完成后再选择入库方式。';
+  const archiveStart = document.querySelector('#start-queue');
+  const inventoryStart = document.querySelector('#start-inventory-only');
+  archiveStart.disabled = state.running || !jobs.some((job) => !job.runBatchId && job.taskKind !== 'catalog_refresh' &&
     ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
-  document.querySelector('#start-inventory-only').disabled = state.running || !jobs.some((job) =>
-    job.taskKind !== 'catalog_compress' && ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
+  inventoryStart.disabled = state.running || !jobs.some((job) => !job.runBatchId && job.taskKind !== 'catalog_compress' &&
+    ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
+  archiveStart.title = state.running ? t(queueRunningHint) : '';
+  inventoryStart.title = state.running ? t(queueRunningHint) : '';
   if (state.safetyHalt) document.querySelector('#start-queue').disabled = true;
   if (state.safetyHalt) document.querySelector('#start-inventory-only').disabled = true;
   document.querySelector('#scan-source').disabled = Boolean(activeScanToken);
   document.querySelector('#add-folder').disabled = false;
   document.querySelector('#add-video').disabled = false;
   setConfigControlsLocked(state.running);
-  document.querySelector('#clear-completed').disabled = !jobs.some((job) => String(job.status).startsWith('completed'));
-  document.querySelector('#clear-cancelled').disabled = !jobs.some((job) => job.status === 'cancelled');
-  document.querySelector('#clear-queue').disabled = jobs.length === 0;
-  document.querySelector('#finish-next').disabled = !jobs.some((job) => job.status === 'queued') && !state.running;
-  document.querySelector('#clear-duplicates').disabled = !jobs.some((job) =>
+  document.querySelector('#clear-completed').disabled = state.running || !jobs.some((job) =>
+    String(job.status).startsWith('completed') && job.errorCode !== 'SOURCE_DISPOSITION_COMMIT_FAILED');
+  document.querySelector('#clear-cancelled').disabled = state.running || !jobs.some((job) => job.status === 'cancelled');
+  document.querySelector('#clear-queue').disabled = state.running || jobs.length === 0;
+  document.querySelector('#finish-next').disabled = state.paused || state.pauseAfterCurrent ||
+    (!state.running && !jobs.some((job) => !job.runBatchId && job.status === 'queued'));
+  document.querySelector('#clear-duplicates').disabled = state.running || !jobs.some((job) =>
     (job.nameDuplicateMatches || []).length > 0 || (job.similarMatches || []).length > 0);
-  document.querySelector('#clear-exact-duplicates').disabled = !jobs.some((job) =>
+  document.querySelector('#clear-exact-duplicates').disabled = state.running || !jobs.some((job) =>
     (job.exactDuplicateMatches || []).length > 0 || (job.exactProjectMatches || []).length > 0);
-  document.querySelector('#confirm-all-duplicates').disabled = !jobs.some((job) =>
+  document.querySelector('#confirm-all-duplicates').disabled = state.running || !jobs.some((job) =>
     job.status === 'awaiting_duplicate_confirmation' ||
     (job.similarityPreflightBlocking !== false && job.status === 'awaiting_confirmation' && (job.confirmationReasons || []).some((reason) =>
       ['name_match', 'similar_title', 'same_video_size'].includes(reason))));
@@ -3297,7 +3358,16 @@ function renderSummary(state) {
   elements.undoCatalog.textContent = t(state.undoDepth ? `撤回：${state.undoLabel}` : '撤回');
   elements.undoCatalog.title = t(state.undoDepth ? `撤回：${state.undoLabel}` : '撤回');
 
-  const canPause = state.running && !state.paused && ['inventorying', 'compressing', 'verifying'].includes(currentJob?.status);
+  const duplicateMenu = document.querySelector('#clear-duplicates').closest('.action-menu');
+  const clearMenu = document.querySelector('#clear-queue').closest('.action-menu');
+  for (const menu of [duplicateMenu, clearMenu]) {
+    menu.classList.toggle('disabled', state.running);
+    menu.querySelector('summary')?.setAttribute('aria-disabled', String(Boolean(state.running)));
+    if (state.running) menu.removeAttribute('open');
+  }
+  const activeJobs = new Set(state.activeJobIds || []);
+  const canPause = state.running && !state.paused && Number(state.runningCount) > 0 &&
+    !jobs.some((job) => activeJobs.has(job.id) && job.status === 'moving');
   document.querySelector('#pause-queue').hidden = !canPause;
   document.querySelector('#resume-queue').hidden = !state.paused;
   document.querySelector('#cancel-current').hidden = !(state.paused && currentJob);
@@ -3735,6 +3805,7 @@ elements.moveCompleted.addEventListener('change', async () => {
   control.addEventListener('change', updateIntakeOptionControls);
 });
 elements.similarityReportEnabled.addEventListener('change', () => { void saveConfig(); });
+elements.queueConcurrency.addEventListener('change', () => { void saveConfig(); });
 elements.largeFolderSimplification.addEventListener('change', () => {
   updatePerformanceAvoidanceControls();
   void saveConfig();
@@ -3941,16 +4012,19 @@ document.addEventListener('paste', async (event) => {
 });
 
 document.querySelector('#start-queue').addEventListener('click', async () => {
-  const state = await safely(() => window.archiveApp.startQueue());
+  const state = await safely(() => window.archiveApp.startQueue([...selectedJobIds]));
   if (state) {
     render(state);
-    if (state.archiveStartNotice) showToast(state.archiveStartNotice, true);
+    if (state.queueStartNotice) showToast(state.queueStartNotice, true);
   }
 });
 
 async function beginInventoryOnlyQueue() {
-  const state = await safely(() => window.archiveApp.startInventoryOnlyQueue());
-  if (state) render(state);
+  const state = await safely(() => window.archiveApp.startInventoryOnlyQueue([...selectedJobIds]));
+  if (state) {
+    render(state);
+    if (state.queueStartNotice) showToast(state.queueStartNotice, true);
+  }
 }
 
 document.querySelector('#start-inventory-only').addEventListener('click', () => {
@@ -4111,7 +4185,7 @@ elements.removeSelected.addEventListener('click', async () => {
 });
 
 document.querySelector('#clear-queue').addEventListener('click', async () => {
-  if (!await confirmUser('清空整个任务列表？如果当前正在运行，会停止当前任务并阻止后续任务启动。已入库档案和源文件不会删除。', { tone: 'danger', title: '清空任务列表', confirmLabel: '确认清空' })) return;
+  if (!await confirmUser('清空整个任务列表？已入库档案和源文件不会删除。', { tone: 'danger', title: '清空任务列表', confirmLabel: '确认清空' })) return;
   const state = await safely(() => window.archiveApp.clearQueue());
   if (state) {
     selectedJobIds.clear();
@@ -4120,7 +4194,8 @@ document.querySelector('#clear-queue').addEventListener('click', async () => {
 });
 
 document.querySelector('#clear-completed').addEventListener('click', async () => {
-  const completedCount = (currentState?.jobs || []).filter((job) => String(job.status).startsWith('completed')).length;
+  const completedCount = (currentState?.jobs || []).filter((job) =>
+    String(job.status).startsWith('completed') && job.errorCode !== 'SOURCE_DISPOSITION_COMMIT_FAILED').length;
   if (completedCount === 0) return;
   const result = await safely(() => window.archiveApp.clearCompletedJobs());
   if (!result) return;
@@ -4967,11 +5042,14 @@ elements.deleteCatalogSelected.addEventListener('click', () => {
   const uncompressedCount = selectedRecords.filter((record) => record.recordType !== 'manual' && (record.archiveFiles || []).length === 0).length;
   const manualCount = selectedRecords.length - archiveCount - uncompressedCount;
   const parts = [];
-  if (archiveCount > 0) parts.push(`${archiveCount} 个普通归档的压缩包将移入 Windows 回收站`);
+  if (archiveCount > 0) parts.push(isMac
+    ? `${archiveCount} 个本机压缩归档暂不能在 Mac Beta 中删除，请先取消选择这些项目`
+    : `${archiveCount} 个普通归档的压缩包将移入 Windows 回收站`);
   if (uncompressedCount > 0) parts.push(`${uncompressedCount} 个未压缩库存只删除仓库记录，原文件保持不变`);
   if (manualCount > 0) parts.push(`${manualCount} 条手动库存记录将被移除`);
   elements.deleteCatalogSummary.textContent = `${t(`所选 ${selectedRecords.length} 项：`)}${parts.map((part) => t(part)).join(t('；'))}${t('。')} ${t('只有必要操作全部成功后，对应仓库记录才会删除。本次运行期间可从仓库顶部撤回。')}`;
-  const restorableCount = selectedRecords.filter((record) => ['moved', 'trashed'].includes(record.sourceDisposition)).length;
+  elements.deleteCatalogForm.querySelector('button[type="submit"]').disabled = isMac && archiveCount > 0;
+  const restorableCount = selectedRecords.filter((record) => (isMac ? ['moved'] : ['moved', 'trashed']).includes(record.sourceDisposition)).length;
   elements.restoreOriginalSources.disabled = restorableCount === 0;
   elements.restoreOriginalSources.closest('.restore-source-option').classList.toggle('disabled', restorableCount === 0);
   elements.restoreOriginalSourcesHelp.textContent = t(restorableCount > 0

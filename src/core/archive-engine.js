@@ -13,8 +13,10 @@ const {
   PASSWORD_SCHEME
 } = require('./constants');
 const { CancelledError } = require('./archive-engine-errors');
-const { buildManifest, collectDirectories, validateManifestUnchanged } = require('./manifest');
+const { buildManifest, collectDirectories, sourceSnapshotFromManifest, validateManifestUnchanged } = require('./manifest');
 const { validatePathLayout } = require('./paths');
+const { performanceTrace } = require('./performance-trace');
+const { samePublishedFileIdentity } = require('./file-metadata');
 
 function resolveArchiveVolumeBytes(job) {
   const totalBytes = Number(job.totalBytes) || 0;
@@ -51,6 +53,8 @@ function buildCompressArgs(job, outputPath, password = ARCHIVE_PASSWORD, listFil
     '-bb1',
     '-y'
   ];
+  const threadCount = Number(job.sevenZipThreads);
+  if (Number.isInteger(threadCount) && threadCount > 0) args.push(`-mmt=${threadCount}`);
 
   if (password) args.splice(3, 0, ...(format === '7z' ? ['-mhe=on', `-p${password}`] : [`-p${password}`]));
 
@@ -76,8 +80,14 @@ function buildVerifyArgs(archivePath, password = ARCHIVE_PASSWORD) {
   return args;
 }
 
+function buildListArgs(archivePath, password = ARCHIVE_PASSWORD) {
+  const args = ['l', archivePath, '-slt', '-ba', '-sccUTF-8', '-y'];
+  if (password) args.push(`-p${password}`);
+  return args;
+}
+
 function runProcess(executable, args, options = {}) {
-  const { cwd, signal, pauseController, onOutput = () => {}, onProgress = () => {} } = options;
+  const { cwd, signal, pauseController, onOutput = () => {}, onStdout = () => {}, onProgress = () => {} } = options;
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -97,18 +107,21 @@ function runProcess(executable, args, options = {}) {
     let outputTail = '';
     let aborted = false;
 
-    const consume = (chunk) => {
-      const text = chunk.toString('utf8');
+    const consume = (chunk, stdout) => {
+      const text = String(chunk);
       outputTail = `${outputTail}${text}`.slice(-12000);
       onOutput(text);
+      if (stdout) onStdout(text);
       const matches = [...text.matchAll(/(?:^|\s)(\d{1,3})%/g)];
       if (matches.length > 0) {
         onProgress(Math.min(100, Number(matches.at(-1)[1])));
       }
     };
 
-    child.stdout.on('data', consume);
-    child.stderr.on('data', consume);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => consume(chunk, true));
+    child.stderr.on('data', (chunk) => consume(chunk, false));
 
     const abortHandler = () => {
       aborted = true;
@@ -137,6 +150,121 @@ function runProcess(executable, args, options = {}) {
       }
     });
   });
+}
+
+function archiveContentMismatch() {
+  const error = new Error('归档内容与源文件及目录清单不一致，已停止发布。');
+  error.code = 'ARCHIVE_CONTENT_MISMATCH';
+  return error;
+}
+
+function createArchiveListingReader() {
+  const entries = new Map();
+  let remainder = '';
+  let current = {};
+  let parseError = null;
+  const commit = () => {
+    if (Object.keys(current).length === 0) return;
+    const name = current.path?.replace(/\\/g, '/').replace(/\/+$/, '');
+    const directory = current.folder === '+' || String(current.attributes || '').startsWith('D');
+    const size = Number(current.size);
+    if (!name || entries.has(name) || (!directory && (!Number.isSafeInteger(size) || size < 0))) {
+      throw archiveContentMismatch();
+    }
+    entries.set(name, { directory, size: directory ? 0 : size });
+    current = {};
+  };
+  const line = (value) => {
+    const content = value.replace(/\r$/, '');
+    if (!content) { commit(); return; }
+    for (const [prefix, key] of [
+      ['Path = ', 'path'], ['Size = ', 'size'], ['Attributes = ', 'attributes'], ['Folder = ', 'folder']
+    ]) {
+      if (content.startsWith(prefix)) { current[key] = content.slice(prefix.length); return; }
+    }
+  };
+  return {
+    push(chunk) {
+      if (parseError) return;
+      try {
+        remainder += chunk;
+        let end;
+        while ((end = remainder.indexOf('\n')) !== -1) {
+          line(remainder.slice(0, end));
+          remainder = remainder.slice(end + 1);
+        }
+      } catch (error) { parseError = error; }
+    },
+    finish() {
+      if (parseError) throw parseError;
+      if (remainder) line(remainder);
+      commit();
+      return entries;
+    }
+  };
+}
+
+function assertArchiveContentsMatch(job, manifest, directories, entries) {
+  const sourceName = path.basename(job.sourcePath);
+  const expectedFiles = new Map(manifest.map((file) => [
+    job.sourceType === 'video' ? sourceName : `${sourceName}/${file.relativePath}`,
+    Number(file.size)
+  ]));
+  const expectedDirectories = new Set(job.sourceType === 'video' ? [] : [
+    sourceName, ...directories.map((directory) => `${sourceName}/${directory}`)
+  ]);
+  const actualFiles = new Map();
+  const actualDirectories = new Set();
+  for (const [entryPath, entry] of entries) {
+    if (entry.directory) actualDirectories.add(entryPath);
+    else actualFiles.set(entryPath, entry.size);
+    const parts = entryPath.split('/');
+    for (let index = 1; index < parts.length; index += 1) {
+      actualDirectories.add(parts.slice(0, index).join('/'));
+    }
+  }
+  if (expectedFiles.size !== actualFiles.size || expectedDirectories.size !== actualDirectories.size ||
+      [...expectedFiles].some(([name, size]) => actualFiles.get(name) !== size) ||
+      [...expectedDirectories].some((name) => !actualDirectories.has(name)) ||
+      [...actualDirectories].some((name) => !expectedDirectories.has(name))) {
+    throw archiveContentMismatch();
+  }
+}
+
+async function verifyArchiveContents(sevenZipPath, archivePath, job, manifest, directories, password, options = {}) {
+  const reader = createArchiveListingReader();
+  await runProcess(sevenZipPath, buildListArgs(archivePath, password), {
+    ...options,
+    onStdout: (chunk) => reader.push(chunk)
+  });
+  assertArchiveContentsMatch(job, manifest, directories, reader.finish());
+}
+
+async function buildArchiveInputs(job, manifest, directories) {
+  const sourceName = path.basename(job.sourcePath);
+  if (job.sourceType === 'video') return [sourceName];
+  const inputs = manifest.map((file) => path.join(sourceName, ...file.relativePath.split('/')));
+  const occupied = new Set();
+  for (const directory of directories) {
+    const slash = directory.lastIndexOf('/');
+    if (slash > 0) occupied.add(directory.slice(0, slash));
+  }
+  for (const file of manifest) {
+    const slash = file.relativePath.lastIndexOf('/');
+    if (slash > 0) occupied.add(file.relativePath.slice(0, slash));
+  }
+  for (const directory of directories) {
+    if (occupied.has(directory)) continue;
+    const absolutePath = path.join(job.sourcePath, ...directory.split('/'));
+    if ((await fs.readdir(absolutePath)).length !== 0) {
+      const error = new Error('归档前源目录结构发生变化，请重新扫描。');
+      error.code = 'SOURCE_CHANGED';
+      throw error;
+    }
+    inputs.push(path.join(sourceName, ...directory.split('/')));
+  }
+  if (inputs.length === 0 && (await fs.readdir(job.sourcePath)).length === 0) inputs.push(sourceName);
+  return inputs;
 }
 
 async function assertUsableConfiguration(config, sourcePath) {
@@ -260,6 +388,7 @@ async function publishArchiveFiles(
 
   const published = [];
   let usedCrossDiskCopy = false;
+  let usedSameDiskCopy = false;
   let copySpaceChecked = copySpacePrechecked;
   try {
     for (let index = 0; index < archiveNames.length; index += 1) {
@@ -267,25 +396,34 @@ async function publishArchiveFiles(
       const sourcePath = path.join(sourceDir, name);
       const targetPath = path.join(archiveRoot, name);
       let expectedSourceIdentity = expectedSourceIdentities.get(name);
+      if (!expectedSourceIdentity) {
+        expectedSourceIdentity = await readPublishedFileIdentity(sourcePath);
+        expectedSourceIdentities.set(name, expectedSourceIdentity);
+      }
       let targetIdentity;
-      let publicationMethod = 'rename';
+      let linkedTarget = false;
       try {
-        await fs.rename(sourcePath, targetPath);
+        // Linking reserves the final name atomically: a concurrent owner wins
+        // with EEXIST instead of being overwritten by a rename.
+        await fs.link(sourcePath, targetPath);
+        linkedTarget = true;
         targetIdentity = await readPublishedFileIdentity(targetPath);
-        if (expectedSourceIdentity && !samePublishedFileIdentity(expectedSourceIdentity, targetIdentity)) {
+        if (!samePublishedFileIdentity(expectedSourceIdentity, targetIdentity)) {
           const error = new Error(`归档成品移动后身份复核失败：${name}`);
           error.code = 'ARCHIVE_PUBLICATION_IDENTITY_CHANGED';
-          try {
-            await fs.rename(targetPath, sourcePath);
-          } catch (rollbackError) {
-            error.rollbackError = rollbackError;
-          }
           throw error;
         }
+        if (!samePublishedFileIdentity(expectedSourceIdentity, await readPublishedFileIdentity(sourcePath))) {
+          throw new Error(`归档成品发布前源文件身份已变化：${name}`);
+        }
+        await fs.unlink(sourcePath);
       } catch (error) {
-        if (error.code !== 'EXDEV') throw error;
-        usedCrossDiskCopy = true;
-        publicationMethod = 'copy';
+        if (!['EXDEV', 'EPERM', 'ENOTSUP', 'EOPNOTSUPP'].includes(error.code)) {
+          if (linkedTarget) error.message += `；已占用的成品路径保留待核对：${targetPath}`;
+          throw error;
+        }
+        if (error.code === 'EXDEV') usedCrossDiskCopy = true;
+        else usedSameDiskCopy = true;
         expectedSourceIdentity ||= await readPublishedFileIdentity(sourcePath);
         expectedSourceIdentities.set(name, expectedSourceIdentity);
         if (!copySpaceChecked) {
@@ -316,11 +454,11 @@ async function publishArchiveFiles(
           }
           targetIdentity = copiedIdentity;
         } catch (copyError) {
-          await fs.rm(targetPath, { force: true }).catch(() => {});
+          copyError.message += `；请核对可能保留的复制目标：${targetPath}`;
           throw copyError;
         }
       }
-      published.push({ sourcePath, targetPath, identity: targetIdentity, publicationMethod });
+      published.push({ targetPath, identity: targetIdentity });
     }
     const publicationFiles = published.map(({ targetPath, identity }) => ({
         name: path.basename(targetPath),
@@ -330,22 +468,14 @@ async function publishArchiveFiles(
     await fs.rm(sourceDir, { recursive: true, force: true });
     return {
       files: publicationFiles,
-      mode: usedCrossDiskCopy ? 'cross_disk_copy' : 'same_disk_rename'
+      mode: usedCrossDiskCopy ? 'cross_disk_copy' : usedSameDiskCopy ? 'same_disk_copy' : 'same_disk_link'
     };
   } catch (error) {
-    const cleanupErrors = [];
-    for (const { sourcePath, targetPath, identity, publicationMethod } of published.reverse()) {
-      try {
-        const currentIdentity = await readPublishedFileIdentity(targetPath);
-        if (samePublishedFileIdentity(identity, currentIdentity)) {
-          if (publicationMethod === 'rename') await fs.rename(targetPath, sourcePath);
-          else await fs.rm(targetPath, { force: true });
-        }
-      } catch (cleanupError) {
-        if (cleanupError.code !== 'ENOENT') cleanupErrors.push(cleanupError);
-      }
+    if (published.length > 0) {
+      const retained = published.map((file) => file.targetPath);
+      error.retainedPublishedPaths = retained;
+      error.message += `；已发布的成品未自动删除，请核对：${retained.join('；')}`;
     }
-    if (cleanupErrors.length > 0) error.cleanupErrors = cleanupErrors;
     throw error;
   }
 }
@@ -365,15 +495,6 @@ async function readPublishedFileIdentity(filePath) {
     modifiedNs: String(stats.mtimeNs),
     createdNs: String(stats.birthtimeNs)
   };
-}
-
-function samePublishedFileIdentity(expected, actual) {
-  return expected && actual &&
-    Number(expected.size) === Number(actual.size) &&
-    String(expected.device) === String(actual.device) &&
-    String(expected.inode) === String(actual.inode) &&
-    String(expected.modifiedNs) === String(actual.modifiedNs) &&
-    String(expected.createdNs) === String(actual.createdNs);
 }
 
 async function createArchivePublicationReceipt(jobId, archiveRoot, archiveStagingDirectory, archiveNames) {
@@ -542,6 +663,7 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
 
     await onStage('inventorying', '正在生成逐文件清单与 MD5');
     const manifest = hooks.preparedManifest || await buildManifest(job.sourcePath, job.sourceType, {
+        jobId: job.id,
         signal,
         pauseController,
         preparedSnapshot: hooks.preparedSnapshot,
@@ -569,12 +691,6 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       error.code = 'SOURCE_CHANGED';
       throw error;
     }
-    if (manifest.length === 0) throw new Error('没有可安全读取并归档的文件。');
-
-    if (hooks.preparedManifest && !hooks.preparedManifestValidated) {
-      await validateManifestUnchanged(job.sourcePath, job.sourceType, manifest, signal, pauseController);
-    }
-
     const directories = Array.isArray(manifest.directories)
       ? manifest.directories
       : await collectDirectories(job.sourcePath, job.sourceType, {
@@ -586,6 +702,18 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
         }
       });
 
+    const sourceSnapshot = manifest.sourceSnapshot || sourceSnapshotFromManifest(
+      job.sourcePath, job.sourceType, manifest, directories, { complete: skippedFiles.length === 0 }
+    );
+    if (skippedFiles.length > 0 || sourceSnapshot.complete !== true) {
+      const error = new Error('源文件或目录清单不完整，已停止归档；请处理无法读取的内容后重试。');
+      error.code = 'ARCHIVE_SOURCE_INCOMPLETE';
+      throw error;
+    }
+    if (hooks.preparedManifest && !hooks.preparedManifestValidated) {
+      await validateManifestUnchanged(job.sourcePath, job.sourceType, manifest, signal, pauseController, sourceSnapshot);
+    }
+
     await hooks.onManifestReady?.(manifest, directories);
 
     await assertEnoughDiskSpace(config.archiveStagingDirectory, job.totalBytes);
@@ -594,9 +722,8 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
 
     const outputPath = path.join(taskStagingDir, job.archiveBaseName);
     const listFilePath = path.join(taskStagingDir, 'archive-inputs.txt');
-    const archiveInputs = manifest.map((file) => job.sourceType === 'video'
-      ? path.basename(job.sourcePath)
-      : path.join(path.basename(job.sourcePath), ...file.relativePath.split('/')));
+    const archiveInputs = await buildArchiveInputs(job, manifest, directories);
+    if (archiveInputs.length === 0) throw new Error('没有可安全读取并归档的文件。');
     await fs.writeFile(listFilePath, `\uFEFF${archiveInputs.map((value) => `"${value}"`).join('\r\n')}\r\n`, 'utf8');
     const hasPassword = Boolean(config.archivePassword);
     const archiveVolumeBytes = resolveArchiveVolumeBytes(volumeJob);
@@ -604,6 +731,7 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       ? `${hasPassword ? '正在加密压缩' : '正在压缩'}并生成 ${formatVolumeBytes(archiveVolumeBytes)} 分卷`
       : (hasPassword ? '正在加密压缩' : '正在压缩'));
     onLog(hasPassword ? '开始调用 7-Zip；密码参数已隐藏。' : '开始调用 7-Zip；本任务未设置密码。');
+    const compressStartedAt = Date.now();
     await runProcess(config.sevenZipPath, buildCompressArgs(volumeJob, outputPath, config.archivePassword, listFilePath), {
       cwd: path.dirname(job.sourcePath),
       signal,
@@ -611,15 +739,25 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       onProgress,
       onOutput: () => {}
     });
+    performanceTrace.record({ jobId: job.id, stage: '7zip-compress', elapsedMs: Date.now() - compressStartedAt,
+      fileCount: manifest.length, bytes: manifestBytes });
 
     const archiveFiles = await listArchiveFiles(taskStagingDir, job.archiveBaseName);
     if (archiveFiles.length === 0) throw new Error('7-Zip 成功退出，但没有找到输出压缩包。');
+    const stagedIdentities = new Map();
+    await Promise.all(archiveFiles.map(async (name) => {
+      stagedIdentities.set(name, await readPublishedFileIdentity(path.join(taskStagingDir, name)));
+    }));
 
     await onStage('verifying', '正在复核源文件未发生变化');
-    await validateManifestUnchanged(job.sourcePath, job.sourceType, manifest, signal, pauseController);
+    const revalidationStartedAt = Date.now();
+    await validateManifestUnchanged(job.sourcePath, job.sourceType, manifest, signal, pauseController, sourceSnapshot);
+    performanceTrace.record({ jobId: job.id, stage: 'source-revalidation',
+      elapsedMs: Date.now() - revalidationStartedAt, fileCount: manifest.length });
 
     const verificationTarget = path.join(taskStagingDir, archiveFiles[0]);
     await onStage('verifying', '正在执行 7-Zip 完整性测试');
+    const testStartedAt = Date.now();
     await runProcess(config.sevenZipPath, buildVerifyArgs(verificationTarget, config.archivePassword), {
       cwd: taskStagingDir,
       signal,
@@ -627,13 +765,21 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       onProgress,
       onOutput: () => {}
     });
+    performanceTrace.record({ jobId: job.id, stage: '7zip-test', elapsedMs: Date.now() - testStartedAt,
+      fileCount: archiveFiles.length });
+
+    await onStage('verifying', '正在比对归档与源文件及目录清单');
+    const contentCheckStartedAt = Date.now();
+    await verifyArchiveContents(config.sevenZipPath, verificationTarget, job, manifest, directories, config.archivePassword, {
+      cwd: taskStagingDir,
+      signal,
+      pauseController
+    });
+    performanceTrace.record({ jobId: job.id, stage: 'archive-content-check', elapsedMs: Date.now() - contentCheckStartedAt,
+      fileCount: manifest.length, directoryCount: directories.length });
 
     const crossStorage = !(await sameStorage(taskStagingDir, archiveRoot));
-    const stagedIdentities = new Map();
     if (crossStorage) {
-      await Promise.all(archiveFiles.map(async (name) => {
-        stagedIdentities.set(name, await readPublishedFileIdentity(path.join(taskStagingDir, name)));
-      }));
       const stagedArchiveBytes = [...stagedIdentities.values()]
         .reduce((sum, identity) => sum + Number(identity.size || 0), 0);
       await assertEnoughDiskSpace(archiveRoot, stagedArchiveBytes, '成品磁盘');
@@ -649,9 +795,14 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       { copySpacePrechecked: crossStorage }
     );
     const publishedFiles = publicationResult.files;
-    const archivePublishDurationMs = Date.now() - publicationStartedAt;
     const archivePublicationMode = publicationResult.mode;
-    onLog(`已验证成品发布完成：${archivePublicationMode === 'cross_disk_copy' ? '跨盘复制' : '同盘重命名'} ${publishedFiles.length} 个文件，用时 ${archivePublishDurationMs} 毫秒。`);
+    const publicationLabel = archivePublicationMode === 'cross_disk_copy' ? '跨盘复制'
+      : archivePublicationMode === 'same_disk_copy' ? '同盘复制' : '同盘链接';
+    onLog(`已验证成品发布完成：${publicationLabel} ${publishedFiles.length} 个文件。`);
+    performanceTrace.record({ jobId: job.id, stage: 'archive-publication',
+      elapsedMs: Date.now() - publicationStartedAt, fileCount: publishedFiles.length,
+      bytes: publishedFiles.reduce((sum, file) => sum + Number(file.identity.size || 0), 0),
+      mode: archivePublicationMode });
     const archivePublication = {
       ownerJobId: String(job.id),
       publicationId,
@@ -660,14 +811,22 @@ async function runArchiveJob(job, config, hooks = {}, signal) {
       files: publishedFiles
     };
 
-    const finalFiles = publishedFiles.map((file) => ({ name: file.name, size: file.identity.size }));
+    const finalFiles = publishedFiles.map((file) => ({
+      name: file.name,
+      size: file.identity.size,
+      identity: {
+        device: file.identity.device,
+        inode: file.identity.inode,
+        modifiedNs: file.identity.modifiedNs,
+        createdNs: file.identity.createdNs
+      }
+    }));
 
     return {
       archiveFiles: finalFiles,
       archiveTotalBytes: finalFiles.reduce((sum, item) => sum + item.size, 0),
       archiveVolumeBytes: archiveVolumeBytes || null,
       archivePublicationMode,
-      archivePublishDurationMs,
       manifest,
       directories,
       skippedFiles,

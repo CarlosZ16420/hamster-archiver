@@ -1,0 +1,8 @@
+{
+  "sevenZip": {
+    "version": "26.03",
+    "url": "https://github.com/ip7z/7zip/releases/download/26.03/7z2603-mac.tar.xz",
+    "sha256": "5ca87677072c59f5602e5c49baa27d4694bacd2259b4e507f0094249d4281480",
+    "files": ["7zz", "License.txt"]
+  }
+}

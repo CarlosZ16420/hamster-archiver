@@ -90,6 +90,14 @@ test('zip format uses selected compression level without 7z header encryption', 
   assert.equal(args.includes('-mhe=on'), false);
 });
 
+test('configured per-task thread limit is passed to 7-Zip', () => {
+  const args = buildCompressArgs({
+    ...makeJob(1024),
+    sevenZipThreads: 4
+  }, 'E:\\stage\\archive.7z');
+  assert.ok(args.includes('-mmt=4'));
+});
+
 test('disk-space guard rejects an impossibly large task instead of silently continuing', async () => {
   await assert.rejects(
     assertEnoughDiskSpace(os.tmpdir(), Number.MAX_SAFE_INTEGER, '测试磁盘'),
@@ -130,17 +138,17 @@ test('EXDEV publication fallback checks target space and reports the actual copy
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(path.join(staging, 'owned.7z'), Buffer.alloc(64, 0x31));
 
-  const originalRename = fs.rename.bind(fs);
+  const originalLink = fs.link.bind(fs);
   const originalCopyFile = fs.copyFile.bind(fs);
   const events = [];
-  t.mock.method(fs, 'rename', async (sourcePath, targetPath) => {
+  t.mock.method(fs, 'link', async (sourcePath, targetPath) => {
     if (sourcePath === path.join(staging, 'owned.7z') && targetPath === path.join(output, 'owned.7z')) {
-      events.push('rename-exdev');
+      events.push('link-exdev');
       const error = new Error('simulated mounted-volume boundary');
       error.code = 'EXDEV';
       throw error;
     }
-    return originalRename(sourcePath, targetPath);
+    return originalLink(sourcePath, targetPath);
   });
   t.mock.method(fs, 'statfs', async (directory) => {
     assert.equal(path.resolve(directory), path.resolve(output));
@@ -154,7 +162,7 @@ test('EXDEV publication fallback checks target space and reports the actual copy
 
   const publication = await publishArchiveFiles(staging, output, ['owned.7z']);
   assert.equal(publication.mode, 'cross_disk_copy');
-  assert.deepEqual(events.slice(0, 3), ['rename-exdev', 'space-check', 'copy']);
+  assert.deepEqual(events.slice(0, 3), ['link-exdev', 'space-check', 'copy']);
   assert.deepEqual(await fs.readFile(path.join(output, 'owned.7z')), Buffer.alloc(64, 0x31));
   await assert.rejects(fs.stat(staging), (error) => error.code === 'ENOENT');
 });
@@ -170,14 +178,14 @@ test('EXDEV publication fallback leaves the source intact when target space is i
   await fs.mkdir(output, { recursive: true });
   await fs.writeFile(sourcePath, Buffer.alloc(64, 0x42));
 
-  const originalRename = fs.rename.bind(fs);
-  t.mock.method(fs, 'rename', async (fromPath, toPath) => {
+  const originalLink = fs.link.bind(fs);
+  t.mock.method(fs, 'link', async (fromPath, toPath) => {
     if (fromPath === sourcePath && toPath === targetPath) {
       const error = new Error('simulated mounted-volume boundary');
       error.code = 'EXDEV';
       throw error;
     }
-    return originalRename(fromPath, toPath);
+    return originalLink(fromPath, toPath);
   });
   t.mock.method(fs, 'statfs', async () => ({ bavail: 0, bsize: 4096 }));
 
@@ -187,6 +195,124 @@ test('EXDEV publication fallback leaves the source intact when target space is i
   );
   assert.deepEqual(await fs.readFile(sourcePath), Buffer.alloc(64, 0x42));
   await assert.rejects(fs.stat(targetPath), (error) => error.code === 'ENOENT');
+});
+
+test('publication copies without overwriting when hard links are unavailable', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-publication-no-links-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const staging = path.join(root, 'staging');
+  const output = path.join(root, 'output');
+  const sourcePath = path.join(staging, 'owned.7z');
+  await fs.mkdir(staging, { recursive: true });
+  await fs.mkdir(output, { recursive: true });
+  await fs.writeFile(sourcePath, 'published archive');
+  t.mock.method(fs, 'link', async () => {
+    const error = new Error('hard links unavailable');
+    error.code = 'ENOTSUP';
+    throw error;
+  });
+  t.mock.method(fs, 'statfs', async () => ({ bavail: 1024 ** 3, bsize: 4096 }));
+
+  const publication = await publishArchiveFiles(staging, output, ['owned.7z']);
+  assert.equal(publication.mode, 'same_disk_copy');
+  assert.equal(await fs.readFile(path.join(output, 'owned.7z'), 'utf8'), 'published archive');
+  await assert.rejects(fs.stat(staging), (error) => error.code === 'ENOENT');
+});
+
+test('failed exclusive copy reports a target that was partially created', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-publication-copy-failure-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const staging = path.join(root, 'staging');
+  const output = path.join(root, 'output');
+  const sourcePath = path.join(staging, 'owned.7z');
+  const targetPath = path.join(output, 'owned.7z');
+  await fs.mkdir(staging, { recursive: true });
+  await fs.mkdir(output, { recursive: true });
+  await fs.writeFile(sourcePath, 'published archive');
+  t.mock.method(fs, 'link', async () => {
+    const error = new Error('separate volumes');
+    error.code = 'EXDEV';
+    throw error;
+  });
+  t.mock.method(fs, 'statfs', async () => ({ bavail: 1024 ** 3, bsize: 4096 }));
+  t.mock.method(fs, 'copyFile', async () => {
+    await fs.writeFile(targetPath, 'partial copy');
+    const error = new Error('copy interrupted');
+    error.code = 'EIO';
+    throw error;
+  });
+
+  await assert.rejects(publishArchiveFiles(staging, output, ['owned.7z']),
+    (error) => error.code === 'EIO' && error.message.includes(targetPath));
+  assert.equal(await fs.readFile(sourcePath, 'utf8'), 'published archive');
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'partial copy');
+});
+
+test('publication preserves a name claimed after its initial check', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-publication-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const staging = path.join(root, 'staging');
+  const output = path.join(root, 'output');
+  const sourcePath = path.join(staging, 'owned.7z');
+  const targetPath = path.join(output, 'owned.7z');
+  await fs.mkdir(staging, { recursive: true });
+  await fs.mkdir(output, { recursive: true });
+  await fs.writeFile(sourcePath, 'published archive');
+  const originalLink = fs.link.bind(fs);
+  t.mock.method(fs, 'link', async (fromPath, toPath) => {
+    if (fromPath === sourcePath && toPath === targetPath) await fs.writeFile(targetPath, 'new owner');
+    return originalLink(fromPath, toPath);
+  });
+
+  await assert.rejects(publishArchiveFiles(staging, output, ['owned.7z']), (error) => error.code === 'EEXIST');
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'new owner');
+  assert.equal(await fs.readFile(sourcePath, 'utf8'), 'published archive');
+});
+
+test('publication retains its staged file when the linked target is replaced', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-publication-replaced-link-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const staging = path.join(root, 'staging');
+  const output = path.join(root, 'output');
+  const sourcePath = path.join(staging, 'owned.7z');
+  const targetPath = path.join(output, 'owned.7z');
+  await fs.mkdir(staging, { recursive: true });
+  await fs.mkdir(output, { recursive: true });
+  await fs.writeFile(sourcePath, 'published archive');
+  const originalLink = fs.link.bind(fs);
+  t.mock.method(fs, 'link', async (fromPath, toPath) => {
+    await originalLink(fromPath, toPath);
+    await fs.rm(targetPath);
+    await fs.writeFile(targetPath, 'replacement');
+  });
+
+  await assert.rejects(publishArchiveFiles(staging, output, ['owned.7z']), /身份复核失败.*保留待核对/);
+  assert.equal(await fs.readFile(sourcePath, 'utf8'), 'published archive');
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'replacement');
+});
+
+test('partial publication retains earlier volumes and reports their paths', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-publication-partial-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const staging = path.join(root, 'staging');
+  const output = path.join(root, 'output');
+  await fs.mkdir(staging, { recursive: true });
+  await fs.mkdir(output, { recursive: true });
+  await fs.writeFile(path.join(staging, 'one.7z.001'), 'first volume');
+  await fs.writeFile(path.join(staging, 'one.7z.002'), 'second volume');
+  const originalLink = fs.link.bind(fs);
+  t.mock.method(fs, 'link', async (fromPath, toPath) => {
+    if (toPath === path.join(output, 'one.7z.002')) await fs.writeFile(toPath, 'new owner');
+    return originalLink(fromPath, toPath);
+  });
+
+  await assert.rejects(
+    publishArchiveFiles(staging, output, ['one.7z.001', 'one.7z.002']),
+    /已发布的成品未自动删除，请核对/
+  );
+  assert.equal(await fs.readFile(path.join(output, 'one.7z.001'), 'utf8'), 'first volume');
+  assert.equal(await fs.readFile(path.join(output, 'one.7z.002'), 'utf8'), 'new owner');
+  assert.equal(await fs.readFile(path.join(staging, 'one.7z.002'), 'utf8'), 'second volume');
 });
 
 test('archive recovery refuses to move a published path whose file identity changed', async (t) => {

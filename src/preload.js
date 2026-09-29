@@ -3,6 +3,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('archiveApp', {
+  platform: process.platform,
   getState: () => ipcRenderer.invoke('state:get'),
   getIntegrationStatus: () => ipcRenderer.invoke('integrations:status'),
   installIntegration: (adapterId, options = {}) => ipcRenderer.invoke('integrations:install', adapterId, options),
@@ -40,8 +41,8 @@ contextBridge.exposeInMainWorld('archiveApp', {
   acknowledgeTrashSafety: (jobId) => ipcRenderer.invoke('task:acknowledge-trash-safety', jobId),
   cancelTask: (jobId) => ipcRenderer.invoke('task:cancel', jobId),
   retryTask: (jobId) => ipcRenderer.invoke('task:retry', jobId),
-  startQueue: () => ipcRenderer.invoke('queue:start'),
-  startInventoryOnlyQueue: () => ipcRenderer.invoke('queue:start-inventory-only'),
+  startQueue: (jobIds = []) => ipcRenderer.invoke('queue:start', jobIds),
+  startInventoryOnlyQueue: (jobIds = []) => ipcRenderer.invoke('queue:start-inventory-only', jobIds),
   pauseQueue: () => ipcRenderer.invoke('queue:pause'),
   resumeQueue: () => ipcRenderer.invoke('queue:resume'),
   removeJobs: (jobIds) => ipcRenderer.invoke('queue:remove-jobs', jobIds),

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "version": "4.7.2",
+  "notes": {
+    "zh-CN": [
+      "task wait --timeout 0 立即返回且不取消后台任务。",
+      "task wait --timeout 仅接受 0 至 60 秒的整数；非法或越界值会明确报错。"
+    ],
+    "en-US": [
+      "task wait --timeout 0 returns immediately without cancelling background work.",
+      "task wait --timeout accepts only whole seconds from 0 through 60; invalid or out-of-range values return an error."
+    ]
+  }
+}

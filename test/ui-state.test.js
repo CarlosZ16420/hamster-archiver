@@ -85,6 +85,8 @@ test('only a fresh automatic duplicate skip is removed from the queue selection'
 
 test('running queue intake remains available while settings stay locked', () => {
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
 
   assert.match(app, /job\?\.deferredUntilNextRun === true\s*\? '等待下次入库'/);
   assert.match(app, /for \(const jobId of uiState\.newlyAutoSkippedJobIds\(previousJobs, mergedState\.jobs \|\| \[\]\)\)/);
@@ -95,6 +97,15 @@ test('running queue intake remains available while settings stay locked', () => 
   assert.match(app, /async function prepareQueueIntake\(\) \{\s*if \(currentState\?\.running\) return true;/);
   assert.match(app, /job\.deferredUntilNextRun !== true[\s\S]*job\.status === 'queued'/);
   assert.match(app, /setConfigControlsLocked\(state\.running\)/);
+  assert.match(html, /id="queue-concurrency"[\s\S]*?<option value="1">1<\/option>[\s\S]*?<option value="2">2<\/option>[\s\S]*?<option value="3">3<\/option>/);
+  assert.match(html, /id="start-inventory-only"[^>]*>不压缩入库<\/button>/);
+  assert.match(html, /id="start-queue"[^>]*>压缩入库<\/button>/);
+  assert.match(app, /dividerCell\.textContent = `待启动 · \$\{pendingJobs\.length\} 项`/);
+  assert.match(app, /startQueue\(\[\.\.\.selectedJobIds\]\)/);
+  assert.match(app, /startInventoryOnlyQueue\(\[\.\.\.selectedJobIds\]\)/);
+  assert.match(app, /clear-queue'\)\.disabled = state\.running/);
+  assert.match(app, /clear-duplicates'\)\.disabled = state\.running/);
+  assert.match(preload, /startQueue: \(jobIds = \[\]\) => ipcRenderer\.invoke\('queue:start', jobIds\)/);
 });
 
 test('similarity evidence distinguishes identical content from a complete project duplicate', () => {
@@ -714,7 +725,7 @@ test('automatic update checks do not change header status or show failure notifi
   assert.doesNotMatch(main, /stableBranch:\s*options\?\.silent/);
 });
 
-test('warehouse controls expose the new batch menu, queue viewport and thumbnail outline behavior', () => {
+test('warehouse controls expose the batch menu, queue viewport and thumbnail icon breathing', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
@@ -728,9 +739,8 @@ test('warehouse controls expose the new batch menu, queue viewport and thumbnail
   assert.doesNotMatch(html, />批量追加标签<\/button>|>批量修改备份位置<\/button>/);
   assert.match(app, /rows\.length > 10/);
   assert.match(styles, /#task-list-container\.queue-scrollable[^}]*overflow-y:\s*auto/);
-  assert.match(styles, /#catalog-grid-view:hover::after[^}]*thumbnail-outline-breathe/);
-  assert.match(styles, /@keyframes thumbnail-outline-breathe[^}]*scale\(1\)[\s\S]*scale\(1\.15\)/);
-  assert.match(styles, /#catalog-grid-view::after[^}]*inset:\s*-2px;[^}]*border-radius:\s*10px;/s);
+  assert.match(styles, /#catalog-grid-view:hover svg[^}]*thumbnail-button-breathe/);
+  assert.doesNotMatch(styles, /thumbnail-outline-(?:breathe|ripple)|#catalog-grid-view::(?:before|after)/);
   assert.match(app, /archiveApp\.logToast\(String\(message \|\| ''\), isError \? 'error' : 'info'\)/);
   assert.match(preload, /logToast: \(message, level = 'info'\) => ipcRenderer\.invoke\('app:log-toast', message, level\)/);
   assert.match(html, /id="hide-uncompressed-tag"[\s\S]*不展示“未压缩”标签/);

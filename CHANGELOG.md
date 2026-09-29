@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.8.0-beta.mac.2 · macOS Beta
+
+### 中文
+
+- 首次提供 macOS 12 及以上 Apple Silicon 与 Intel 通用架构 DMG；内置已验证的官方 7-Zip，资料默认位于用户的 Application Support 目录。Mac 版支持桌面整理、7z/ZIP 归档、系统应用菜单与可选 CLI/MCP。
+- 扫描跳过符号链接，路径比较兼顾 Mac 常见的大小写及 Unicode 差异；归档继续核对卷身份和可用空间。视频抽帧需另配 FFmpeg。Mac 暂不支持自动移入废纸篓、本机压缩包的仓库删除和应用内安装更新。
+- 自上一公开正式版 4.6.18 起，归档保留空目录并在发布前核对完整源清单；搜索不再截断 2000 条结果；固定批次、1–3 项并发和逐项暂停取消已加入；未压缩目录校对减少重复工作。
+- CLI/MCP 增加 v2 任务、持久回执和同身份恢复；`task wait --timeout 0` 保持后台运行，非法等待值明确报错。仓库格式兼容，无需迁移。
+- 本 Beta 没有 Apple Developer ID 签名与公证。安装前核对 DMG 的 SHA-256，并按 macOS 安全提示决定是否打开。Windows 最新正式版保持 4.6.18。完整说明见 `docs/releases/public-release-notes-v4.8.0-beta.mac.2.md`。
+
+### English
+
+- The first universal macOS DMG supports Apple Silicon and Intel on macOS 12 or later. It includes verified official 7-Zip, stores data under Application Support, and offers desktop organization, 7z/ZIP archiving, native menus, and optional CLI/MCP.
+- Scanning skips symlinks; path checks account for common Mac case and Unicode differences, while archiving checks volume identity and available space. Video frames need a separate FFmpeg. Automatic Trash moves, deletion of local archived packages through the library, and in-app update installation are unavailable on Mac.
+- Since public stable 4.6.18, archives preserve empty folders and verify complete source structure before publication. Search no longer truncates results at 2,000; fixed batches, 1–3 concurrent jobs, per-job pause/cancel, and more efficient uncompressed folder review are included.
+- CLI/MCP adds v2 tasks, durable receipts, and same-identity recovery. `task wait --timeout 0` leaves background work running, and invalid wait values return errors. The catalog format remains compatible without migration.
+- This beta has no Apple Developer ID signature or notarization. Verify the DMG SHA-256 before deciding whether to open it through macOS security settings. Windows stable remains 4.6.18. See `docs/releases/public-release-notes-v4.8.0-beta.mac.2.md` for complete notes.
+
 ## 4.6.18
 
 # Hamster Archiver 4.6.18

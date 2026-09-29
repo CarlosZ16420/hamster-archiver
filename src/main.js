@@ -6,6 +6,7 @@ const crypto = require('node:crypto');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, shell, Tray } = require('electron');
 const { AppStore, writeJsonAtomic } = require('./core/store');
 const { QueueManager } = require('./core/queue-manager');
+const { performanceTrace } = require('./core/performance-trace');
 const {
   makeArchiveStagingDirectory,
   makeDefaultConfig,
@@ -42,13 +43,13 @@ const { formatReleaseNotes } = require('./core/release-notes');
 const { findTrashItems, isTrashItemPresent, restoreTrashItem } = require('./core/recycle-bin');
 const { verifyReleaseManifestAtStartup } = require('./core/startup-integrity');
 const { resolveDevelopmentUserDataRoot } = require('./core/development-paths');
-const { isValidMcpDiagnosticFile, isValidMcpReadyFile, takeDesktopLaunchRequest } = require('./core/mcp-launch');
+const { isValidMcpDiagnosticFile, isValidMcpReadyFile, mcpTempDirectory, takeDesktopLaunchRequest } = require('./core/mcp-launch');
 const rendererI18n = require('./renderer/i18n');
 
 // Let Windows choose the nearest native-size frame from the multi-resolution
 // ICO. Passing the 1024px PNG here makes the title-bar icon downsample at
 // runtime and produces a visibly soft 16px glyph.
-const appIconPath = path.join(__dirname, '..', 'assets', 'app-icon.ico');
+const appIconPath = path.join(__dirname, '..', 'assets', process.platform === 'darwin' ? 'app-icon.png' : 'app-icon.ico');
 const releasesUrl = 'https://github.com/CarlosZ16420/hamster-archiver/releases';
 const packageMetadata = require('../package.json');
 const distributionMode = packageMetadata.distributionMode === 'installed' ? 'installed' : 'portable';
@@ -65,6 +66,7 @@ let shutdownLogInProgress = false;
 let shutdownLogComplete = false;
 let scheduleTimer = null;
 let mcpServer = null;
+let recentGpuFailure = null;
 let mcpServerStarting = null;
 let mcpApplicationServices = null;
 let integrationManager = null;
@@ -87,6 +89,7 @@ const applicationInitialized = new Promise((resolve) => { resolveApplicationInit
 let lastCatalogPushSignature = '';
 const isSmokeTest = process.env.HAMSTER_SMOKE_TEST === '1';
 const isStartupIntegrityTest = process.env.HAMSTER_STARTUP_INTEGRITY_TEST === '1';
+if (isSmokeTest && process.platform === 'darwin') console.log('HAMSTER_MAC_SMOKE_BOOT');
 if (isSmokeTest) {
   // Electron may outlive the test runner's captured output pipe for a few milliseconds.
   // A closed diagnostic pipe must not surface as a main-process JavaScript error dialog.
@@ -100,7 +103,7 @@ const projectRoot = path.resolve(__dirname, '..');
 const defaultElectronUserDataRoot = app.getPath('userData');
 const applicationRoot = isSmokeTest && process.env.HAMSTER_SMOKE_USER_DATA_DIR
   ? path.join(path.resolve(process.env.HAMSTER_SMOKE_USER_DATA_DIR), 'portable-root')
-  : app.isPackaged ? path.dirname(app.getPath('exe')) : projectRoot;
+  : app.isPackaged ? (process.platform === 'darwin' ? process.resourcesPath : path.dirname(app.getPath('exe'))) : projectRoot;
 const activeUserDataLocationPath = isSmokeTest || !isInstalledDistribution
   ? userDataLocationPath(applicationRoot)
   : userDataLocationPath(defaultElectronUserDataRoot);
@@ -119,15 +122,16 @@ const electronRuntimeDirectory = (isSmokeTest || isStartupIntegrityTest) && proc
 app.setPath('userData', electronRuntimeDirectory);
 const hasSingleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
 const startupDesktopMcpRequest = hasSingleInstanceLock && !isSmokeTest
-  ? takeDesktopLaunchRequest({ applicationExecutable: process.execPath })
+  ? takeDesktopLaunchRequest({ applicationExecutable: process.execPath,
+      tempDirectory: mcpTempDirectory(process.argv) })
   : null;
 const startupRequestsMcp = Boolean(startupDesktopMcpRequest) || process.argv.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1';
-if (isSmokeTest) {
+if (isSmokeTest && process.platform !== 'darwin') {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('disable-gpu');
   app.commandLine.appendSwitch('disable-gpu-compositing');
 }
-app.setAppUserModelId('com.carlosz.hamsterarchiver');
+if (process.platform === 'win32') app.setAppUserModelId('com.carlosz.hamsterarchiver');
 
 function usesEnglishUi() {
   if (queueManager?.config?.language) return queueManager.config.language === 'en-US';
@@ -176,11 +180,8 @@ async function runLoggedAction(label, operation) {
 }
 
 function logStartupTiming(stage, details = {}) {
-  console.log(`HAMSTER_STARTUP_TIMING ${JSON.stringify({
-    stage,
-    elapsedMs: Math.round(Date.now() - startupStartedAt),
-    ...details
-  })}`);
+  performanceTrace.record({ stage, elapsedMs: Date.now() - startupStartedAt,
+    candidateCount: details.records, mode: details.cacheHit ? 'cache_hit' : undefined });
 }
 
 function catalogPushSignature(catalog) {
@@ -195,10 +196,23 @@ if (!hasSingleInstanceLock) {
   app.quit();
 }
 
+app.on('child-process-gone', (_event, details) => {
+  if (details?.type !== 'GPU' || details.reason === 'clean-exit') return;
+  recentGpuFailure = { type: 'GPU', reason: String(details.reason || 'unknown').slice(0, 64),
+    exitCode: Number.isInteger(details.exitCode) ? details.exitCode : null,
+    at: new Date().toISOString() };
+  if (mcpServer) void mcpServer.updateDiagnostic({ stage: 'child-process-gone',
+    knownCause: 'gpu_process_failure', childProcess: recentGpuFailure }).catch(() => {});
+});
+
 app.on('second-instance', (_event, argv) => {
-  const desktopRequest = takeDesktopLaunchRequest({ applicationExecutable: process.execPath });
+  const desktopRequest = takeDesktopLaunchRequest({ applicationExecutable: process.execPath,
+    tempDirectory: mcpTempDirectory(argv) });
   const effectiveArgs = desktopRequest
-    ? ['--enable-mcp', '--background', `--mcp-ready-file=${desktopRequest.readyFile}`, `--mcp-diagnostic-file=${desktopRequest.diagnosticFile}`, ...(desktopRequest.showUi ? ['--show-ui'] : [])]
+    ? ['--enable-mcp', '--background', `--mcp-temp-dir=${mcpTempDirectory(argv)}`,
+        `--mcp-ready-file=${desktopRequest.readyFile}`, `--mcp-diagnostic-file=${desktopRequest.diagnosticFile}`,
+        ...(desktopRequest.launchAttemptId ? [`--mcp-launch-attempt-id=${desktopRequest.launchAttemptId}`] : []),
+        ...(desktopRequest.showUi ? ['--show-ui'] : [])]
     : argv;
   if (effectiveArgs.includes('--enable-mcp')) {
     void enableMcpForArguments(effectiveArgs).catch(async (error) => {
@@ -217,12 +231,12 @@ function argumentValue(argv, name) {
 
 function validatedMcpReadyFile(argv) {
   const value = argumentValue(argv, '--mcp-ready-file');
-  return isValidMcpReadyFile(value) ? path.resolve(value) : null;
+  return isValidMcpReadyFile(value, mcpTempDirectory(argv)) ? path.resolve(value) : null;
 }
 
 function validatedMcpDiagnosticFile(argv) {
   const value = argumentValue(argv, '--mcp-diagnostic-file');
-  return isValidMcpDiagnosticFile(value) ? path.resolve(value) : null;
+  return isValidMcpDiagnosticFile(value, mcpTempDirectory(argv)) ? path.resolve(value) : null;
 }
 
 async function writeMcpReadyFile(argv) {
@@ -232,6 +246,7 @@ async function writeMcpReadyFile(argv) {
     schemaVersion: 2,
     connectionFile: mcpServer.connectionFile,
     instanceId: mcpServer.instanceId,
+    launchAttemptId: argumentValue(argv, '--mcp-launch-attempt-id') || null,
     startedAt: mcpServer.startedAt
   });
 }
@@ -243,6 +258,7 @@ async function writeMcpStartupDiagnostic(argv, error, stage = 'startup') {
     schemaVersion: 1,
     code: error?.code || 'STARTUP_FAILED',
     stage,
+    launchAttemptId: argumentValue(argv, '--mcp-launch-attempt-id') || null,
     message: String(error?.message || error || 'Hamster Archiver failed to start.'),
     at: new Date().toISOString()
   }).catch(() => {});
@@ -300,7 +316,7 @@ async function createStartupWindow() {
       sandbox: true
     }
   });
-  startupWindow.removeMenu();
+  if (process.platform !== 'darwin') startupWindow.removeMenu();
   logStartupTiming('startup-window-created');
   startupWindow.once('ready-to-show', () => {
     if (!isStartupIntegrityTest) startupWindow?.show();
@@ -335,7 +351,8 @@ function clearMcpIdleTimer() {
 }
 
 function hasActiveMcpWork() {
-  return (queueManager?.jobs || []).some((job) => job.mcpRequestId && ![
+  return (queueManager?.jobs || []).some((job) => job.mcpRequestId &&
+    job.automationStartAuthorized !== false && ![
     'failed', 'cancelled', 'skipped_duplicate'
   ].includes(job.status) && !String(job.status || '').startsWith('completed'));
 }
@@ -439,19 +456,33 @@ async function enableMcpForArguments(argv) {
   if (!mcpServerStarting) {
     mcpServerStarting = require('./core/mcp-server')
       .startMcpServer(queueManager, queueManager.config.userDataDirectory, app.getVersion(), {
+        launchAttemptId: argumentValue(argv, '--mcp-launch-attempt-id') || null,
         services: mcpApplicationServices,
         onSessionCountChanged: handleMcpSessionCountChanged,
         getRuntimeStatus: () => ({
           pid: process.pid,
+          applicationRoot,
+          userDataRoot: configuredUserDataRoot,
+          repositoryDirectory: queueManager.config.repositoryDirectory,
           background: startedAsMcpBackground,
           windowCount: BrowserWindow.getAllWindows().length,
           hasVisibleWindow: BrowserWindow.getAllWindows().some((window) => window.isVisible())
         })
       })
-      .then((server) => { mcpServer = server; return server; })
+      .then((server) => {
+        mcpServer = server;
+        if (recentGpuFailure && Date.now() - Date.parse(recentGpuFailure.at) < 60_000) {
+          void server.updateDiagnostic({ stage: 'child-process-gone',
+          knownCause: 'gpu_process_failure', childProcess: recentGpuFailure }).catch(() => {});
+        }
+        if (queueManager?.runtimeIdentity) queueManager.runtimeIdentity.instanceId = server.instanceId;
+        return server;
+      })
       .catch((error) => { mcpServerStarting = null; throw error; });
   }
   await mcpServerStarting;
+  const launchAttemptId = argumentValue(argv, '--mcp-launch-attempt-id');
+  if (launchAttemptId) await mcpServer.updateDiagnostic({ launchAttemptId, stage: 'ready' });
   createMcpTray();
   await writeMcpReadyFile(argv);
   handleMcpSessionCountChanged(mcpServer.sessionCount);
@@ -751,6 +782,7 @@ async function promptAndLaunchPreparedInstaller({ prepared, version, releaseUrl 
 }
 
 async function runLocalPackageUpdate(release = null) {
+  if (process.platform === 'darwin') throw new Error('Mac 版请从 GitHub 发布页手动下载新版应用。');
   const english = queueManager?.config?.language === 'en-US';
   if (!app.isPackaged || isSmokeTest) {
     throw new Error(english
@@ -976,7 +1008,7 @@ function createWindow() {
     }
   });
 
-  mainWindow.removeMenu();
+  if (process.platform !== 'darwin') mainWindow.removeMenu();
   mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
     console.error(`PRELOAD_ERROR ${preloadPath}: ${error.stack || error.message}`);
     void appendRuntimeLog('error', `界面预加载失败：${error.message}`).catch(() => {});
@@ -1366,7 +1398,9 @@ function createWindow() {
           overviewMatchesPrototype: document.querySelector('.warehouse-overview-head')?.parentElement?.classList.contains('warehouse-summary') &&
             !document.querySelector('.warehouse-overview')?.innerText.includes('仓库活跃度') &&
             document.querySelectorAll('.warehouse-metrics > .warehouse-metric').length === 4,
-          hasInventoryDate: document.querySelector('#catalog-detail')?.innerText.includes('入库时间'),
+          hasInventoryDate: document.querySelector('#catalog-detail')?.innerText.includes(
+            ${JSON.stringify(usesEnglishUi() ? 'Inventory time' : '入库时间')}
+          ),
           hasBackupFilter: document.querySelectorAll('#catalog-backup-filter option').length >=
             (${process.env.HAMSTER_SMOKE_REAL_CATALOG === '1' || Boolean(process.env.HAMSTER_SMOKE_IMPORT_DIRECTORY) ? 1 : 2}),
           hasBackupSetting: Boolean(document.querySelector('#record-backup-location') && document.querySelector('#backup-location')),
@@ -1587,7 +1621,7 @@ function registerIpc() {
     assertTrustedSender(event);
     const check = () => checkForUpdates({
       currentVersion: app.getVersion(),
-      distributionMode: isInstalledDistribution ? 'installed' : 'portable',
+      distributionMode: process.platform === 'darwin' ? 'mac' : isInstalledDistribution ? 'installed' : 'portable',
       includeHistory: options?.silent !== true,
       stableBranch: 'main',
       fetchImpl: net.fetch,
@@ -1607,6 +1641,7 @@ function registerIpc() {
 
   ipcMain.handle('app:install-checked-update', async (event, version) => {
     assertTrustedSender(event);
+    if (process.platform === 'darwin') throw new Error('Mac 版请从 GitHub 发布页手动下载新版应用。');
     const english = queueManager?.config?.language === 'en-US';
     const result = checkedUpdate;
     if (updateInstallInFlight || !result?.updateAvailable || !result.installable || result.latestVersion !== version) {
@@ -1644,6 +1679,7 @@ function registerIpc() {
 
   ipcMain.handle('app:update-from-package', async (event) => {
     assertTrustedSender(event);
+    if (process.platform === 'darwin') throw new Error('Mac 版请从 GitHub 发布页手动下载新版应用。');
     if (updateInstallInFlight) throw new Error(queueManager?.config?.language === 'en-US' ? 'Please check for updates again.' : '请重新检查更新。');
     updateInstallInFlight = true;
     try {
@@ -1912,17 +1948,17 @@ function registerIpc() {
     return queueManager.retryJob(jobId);
   });
 
-  ipcMain.handle('queue:start', async (event) => {
+  ipcMain.handle('queue:start', async (event, jobIds = []) => {
     assertTrustedSender(event);
     await waitForCatalog();
     if (!await ensureArchiveOutputDirectoryBeforeStart()) return queueManager.getState();
-    return queueManager.startArchiveQueue();
+    return queueManager.startArchiveQueue(Array.isArray(jobIds) ? jobIds : []);
   });
 
-  ipcMain.handle('queue:start-inventory-only', async (event) => {
+  ipcMain.handle('queue:start-inventory-only', async (event, jobIds = []) => {
     assertTrustedSender(event);
     await waitForCatalog();
-    return queueManager.startInventoryOnlyQueue();
+    return queueManager.startInventoryOnlyQueue(Array.isArray(jobIds) ? jobIds : []);
   });
 
   ipcMain.handle('queue:pause', async (event) => {
@@ -2128,9 +2164,18 @@ function registerIpc() {
 
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const workspaceRoot = applicationRoot;
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' }, { role: 'fileMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }
+    ]));
+  }
   logStartupTiming('electron-ready');
   const startupMcpArgs = startupDesktopMcpRequest
-    ? ['--enable-mcp', '--background', `--mcp-ready-file=${startupDesktopMcpRequest.readyFile}`, `--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`, ...(startupDesktopMcpRequest.showUi ? ['--show-ui'] : [])]
+    ? ['--enable-mcp', '--background', `--mcp-temp-dir=${mcpTempDirectory(process.argv)}`,
+        `--mcp-ready-file=${startupDesktopMcpRequest.readyFile}`, `--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`,
+        ...(startupDesktopMcpRequest.launchAttemptId
+          ? [`--mcp-launch-attempt-id=${startupDesktopMcpRequest.launchAttemptId}`] : []),
+        ...(startupDesktopMcpRequest.showUi ? ['--show-ui'] : [])]
     : process.argv;
   const mcpRequested = !isSmokeTest && (startupMcpArgs.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1');
   startedAsMcpBackground = mcpRequested && startupMcpArgs.includes('--background') && !startupMcpArgs.includes('--show-ui');
@@ -2161,6 +2206,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     await store.loadSettings(defaultConfig),
     userDataLayout
   );
+  if (process.platform === 'darwin') config.autoTrashCompleted = false;
   delete config.ffprobePath;
   config.sevenZipPath = normalizePortableProgramPath(config.sevenZipPath, workspaceRoot, PORTABLE_SEVEN_ZIP_PATH);
   config.ffmpegPath = normalizePortableProgramPath(config.ffmpegPath, workspaceRoot, PORTABLE_FFMPEG_PATH);
@@ -2169,6 +2215,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   }
   if (!(await pathExists(resolveApplicationPath(workspaceRoot, config.ffmpegPath)))) {
     config.ffmpegPath = PORTABLE_FFMPEG_PATH;
+    if (process.platform === 'darwin') config.videoFrameBackup = false;
   }
   if (process.env.HAMSTER_SMOKE_LIBRARY_DIR) {
     config.archiveOutputDirectory = process.env.HAMSTER_SMOKE_LIBRARY_DIR;
@@ -2188,12 +2235,14 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   queueManager = new QueueManager(store, config, {
     createThumbnails,
     storeCatalogImage,
-    trashItem: (targetPath) => shell.trashItem(targetPath),
+    trashItem: process.platform === 'darwin' ? undefined : (targetPath) => shell.trashItem(targetPath),
     findTrashItems,
     isTrashItemPresent,
     restoreTrashItem,
     resolveProgramPath: (configuredPath) => resolveApplicationPath(workspaceRoot, configuredPath)
   });
+  queueManager.runtimeIdentity = { applicationRoot, userDataRoot: configuredUserDataRoot,
+    instanceId: null };
   const deferCatalog = !isSmokeTest && !isStartupIntegrityTest && !startedAsMcpBackground;
   await queueManager.initialize({ deferCatalog });
   await queueManager.log('info', `应用已启动：版本 ${app.getVersion()}。`, null, false);
@@ -2211,6 +2260,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     return null;
   });
   if (isSmokeTest && process.env.HAMSTER_SMOKE_IMPORT_DIRECTORY) {
+    if (process.platform === 'darwin') console.log('HAMSTER_MAC_SMOKE_PREPARE_ARCHIVE');
+    if (process.platform === 'darwin') console.log(`HAMSTER_MAC_SMOKE_FREE_MEMORY_MIB ${Math.round(queueManager.availableMemoryBytes() / (1024 * 1024))}`);
     const importDirectory = path.resolve(process.env.HAMSTER_SMOKE_IMPORT_DIRECTORY);
     const smokeToolRoot = process.env.HAMSTER_SMOKE_TOOL_ROOT
       ? path.resolve(process.env.HAMSTER_SMOKE_TOOL_ROOT)
@@ -2239,10 +2290,19 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       backupLocation: ''
     });
     await queueManager.scanSource(importDirectory);
+    if (process.platform === 'darwin') console.log('HAMSTER_MAC_SMOKE_SCANNED');
     for (let cycle = 0; cycle < 4; cycle += 1) {
       await queueManager.confirmAllDuplicateJobs();
-      await queueManager.startArchiveQueue();
+      // Duplicate confirmation may start its own batch. Wait for that batch
+      // before deciding whether the remaining jobs need an explicit start.
+      await new Promise((resolve) => setImmediate(resolve));
       if (queueManager.running) await new Promise((resolve) => queueManager.once('idle', resolve));
+      const remainingQueueIds = queueManager.pendingStartCandidates([], (job) =>
+        job.status === 'queued' && job.taskKind !== 'catalog_refresh').jobs.map((job) => job.id);
+      if (remainingQueueIds.length > 0) {
+        await queueManager.startArchiveQueue(remainingQueueIds);
+        if (queueManager.running) await new Promise((resolve) => queueManager.once('idle', resolve));
+      }
       const pendingDuplicate = queueManager.jobs.some((job) => [
         'awaiting_confirmation', 'awaiting_duplicate_confirmation'
       ].includes(job.status));
@@ -2495,7 +2555,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   });
 }).catch(async (error) => {
   const failedArgs = startupDesktopMcpRequest
-    ? [`--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`]
+    ? [`--mcp-temp-dir=${mcpTempDirectory(process.argv)}`,
+        `--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`]
     : process.argv;
   await writeMcpStartupDiagnostic(failedArgs, error);
   await appendRuntimeLog('error', `应用启动失败：${error.message}`).catch(() => {});

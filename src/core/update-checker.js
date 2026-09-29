@@ -269,6 +269,7 @@ async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeo
 }
 
 function selectReleaseAsset(release, distributionMode, adapter) {
+  if (distributionMode === 'mac') return null;
   const latestVersion = String(release.tag_name || '').replace(/^v/i, '');
   const assets = Array.isArray(release.assets) ? release.assets : [];
   const expectedAssetName = (distributionMode === 'installed'
@@ -328,8 +329,22 @@ async function checkForUpdates({
   environment = process.env,
   stableBranch = ''
 } = {}) {
+  if (distributionMode === 'mac') return {
+    currentVersion,
+    latestVersion: null,
+    updateAvailable: false,
+    releaseUrl: RELEASES_URL,
+    releaseNotes: '',
+    releases: [],
+    historyIncomplete: false,
+    distributionMode: 'mac',
+    installable: false,
+    asset: null,
+    provider: 'github',
+    source: null
+  };
   if (typeof fetchImpl !== 'function') throw new Error('当前运行环境不支持联网检查更新。');
-  const normalizedDistributionMode = distributionMode === 'installed' ? 'installed' : 'portable';
+  const normalizedDistributionMode = distributionMode === 'mac' ? 'mac' : distributionMode === 'installed' ? 'installed' : 'portable';
   const github = createGithubAdapter();
   let adapter = github;
   let release;

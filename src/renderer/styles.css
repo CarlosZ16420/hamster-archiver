@@ -1099,6 +1099,12 @@ main { max-width: 1780px; padding: 24px 28px 50px; }
 .action-menu-popover { position: absolute; z-index: 20; top: calc(100% + 6px); right: 0; display: grid; min-width: 190px; overflow: hidden; padding: 5px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: var(--shadow-lg); }
 .queue-settings-menu .action-menu-popover { right: auto; left: 0; }
 .queue-settings-popover { width: min(340px, calc(100vw - 48px)); padding: 12px; overflow: visible; }
+.queue-concurrency-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--line-soft); }
+.queue-concurrency-setting strong, .queue-concurrency-setting small { display: block; }
+.queue-concurrency-setting small { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.queue-concurrency-setting select { min-width: 64px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; color: var(--ink); background: var(--panel-nested); }
+.queue-batch-divider td { padding: 9px 12px; color: var(--muted); background: var(--panel-nested); text-align: center; font-size: 11px; font-weight: 800; letter-spacing: .04em; }
+.action-menu.disabled > summary { opacity: .5; pointer-events: none; }
 .queue-setting-toggle { display: flex; align-items: flex-start; gap: 9px; cursor: pointer; }
 .queue-setting-toggle input { margin-top: 2px; accent-color: var(--accent); }
 .queue-setting-toggle strong, .queue-setting-toggle small { display: block; }
@@ -1300,6 +1306,7 @@ main { max-width: 1560px; padding: 22px 26px 40px; }
 .integration-mode { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, auto); gap: 10px; align-items: center; margin: 10px 0; }
 .integration-list { display: grid; gap: 7px; }
 .integration-card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 10px; padding: 9px 10px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel-soft); }
+.integration-card[hidden], .post-option-card[hidden] { display: none; }
 .integration-card div { display: grid; gap: 2px; min-width: 0; }
 .integration-card small, .integration-status { color: var(--text-muted); font-size: 12px; }
 .integration-card[data-modified="true"] .integration-status { color: var(--danger); }
@@ -1493,12 +1500,9 @@ main { max-width: 1560px; padding: 22px 26px 40px; }
 .view-button { position: relative; display: grid; place-items: center; width: 32px; height: 30px; padding: 0; border: 0; border-radius: 8px; color: var(--muted); background: transparent; }
 .view-button svg { width: 16px; height: 16px; fill: currentColor; }
 #catalog-grid-view svg { width: 24px; height: 24px; }
-#catalog-grid-view::after { content: ''; position: absolute; inset: -2px; border: 1px solid rgba(0,0,0,.3); border-radius: 10px; opacity: 0; pointer-events: none; }
 #catalog-grid-view:hover svg { animation: thumbnail-button-breathe 2.6s ease-in-out infinite; }
-#catalog-grid-view:hover::after { animation: thumbnail-outline-breathe 2.6s ease-out infinite; }
 @keyframes thumbnail-button-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .68; } }
-@keyframes thumbnail-outline-breathe { 0% { opacity: .38; transform: scale(1); } 85%, 100% { opacity: 0; transform: scale(1.15); } }
-@media (prefers-reduced-motion: reduce) { #catalog-grid-view:hover svg, #catalog-grid-view:hover::after { animation: none; } #catalog-grid-view:hover::after { opacity: .2; transform: scale(1); } }
+@media (prefers-reduced-motion: reduce) { #catalog-grid-view:hover svg { animation: none; } }
 .view-button.active { color: var(--paper); background: var(--ink); }
 .library-tools-menu { flex: 0 0 auto; }
 .library-tools-menu > summary { height: 36px; padding: 8px 11px; font-size: 12px; white-space: nowrap; }

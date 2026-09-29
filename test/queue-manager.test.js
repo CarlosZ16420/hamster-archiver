@@ -10,6 +10,7 @@ const { QueueManager, resolveCatalogCompressionBackupLocation } = require('../sr
 const { CancelledError, createArchivePublicationReceipt } = require('../src/core/archive-engine');
 const { buildManifest } = require('../src/core/manifest');
 const { AppStore } = require('../src/core/store');
+const { ApplicationTaskService } = require('../src/core/application-task-service');
 const { LARGE_TASK_BYTES, MIB } = require('../src/core/constants');
 
 class FakeStore {
@@ -54,6 +55,15 @@ function blockingRunner(calls, started) {
     started();
     await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
     throw new CancelledError();
+  };
+}
+
+function successfulArchiveResult(job) {
+  return {
+    archiveFiles: [{ name: `${job.id}.7z`, size: Math.max(1, Math.floor(Number(job.totalBytes) / 2)) }],
+    archiveTotalBytes: Math.max(1, Math.floor(Number(job.totalBytes) / 2)),
+    manifest: [], directories: [], skippedFiles: [], passwordScheme: 'none', hasPassword: false,
+    verifiedAt: new Date().toISOString()
   };
 }
 
@@ -121,6 +131,22 @@ test('shutdown waiting includes fire-and-forget runtime log writes', async () =>
   releaseWrite();
   await waiting;
   assert.equal(manager.hasPendingLogWrites(), false);
+});
+
+test('throttled progress keeps one pending update per concurrent task', async () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const events = [];
+  manager.on('progress', (progress) => events.push(progress));
+  const first = { ...queuedJob('first-progress'), status: 'compressing', progress: 25 };
+  const second = { ...queuedJob('second-progress'), status: 'verifying', progress: 70 };
+
+  manager.emitProgressThrottled(first, 5);
+  manager.emitProgressThrottled(second, 5);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+
+  assert.deepEqual(events.map((event) => [event.jobId, event.percentage]), [
+    ['first-progress', 25], ['second-progress', 70]
+  ]);
 });
 
 test('shutdown cancels current job and does not start the next queued job', async () => {
@@ -338,6 +364,29 @@ test('deferred large additions keep their confirmation warning', async (t) => {
   assert.match(manager.jobs[0].stageText, /超过 10 GiB.*等待手动确认.*等待下次入库/);
 });
 
+test('manual, drop and automation intake reject a source path already anywhere in the active queue', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-duplicate-source-intake-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'same.mp4');
+  await fs.writeFile(sourcePath, 'same');
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'), smallItemFilter: false
+  });
+
+  await manager.addSingle(sourcePath);
+  manager.jobs[0].status = 'awaiting_duplicate_confirmation';
+
+  await manager.addSingle(sourcePath);
+  await assert.rejects(() => manager.addSingle(sourcePath, {
+    requestId: 'automation-duplicate', taskId: 'task-duplicate', explicit: true, mode: 'archive'
+  }), (error) => error.code === 'SOURCE_ALREADY_QUEUED');
+  assert.equal(manager.jobs.length, 1);
+
+  manager.jobs = [];
+  await Promise.all([manager.addSingle(sourcePath), manager.addSingle(sourcePath)]);
+  assert.equal(manager.jobs.length, 1);
+});
+
 test('archive start keeps its selected batch fixed across persistence awaits', async () => {
   const calls = [];
   let releaseFirstPersist;
@@ -384,18 +433,65 @@ test('failed resume aborts the current task and stops the queue', async () => {
   manager.running = true;
   manager.paused = true;
   manager.jobs = [{ ...queuedJob('paused'), status: 'compressing' }];
-  manager.pauseController = { resume: async () => {
-    const error = new Error('PowerShell timeout');
-    error.code = 'PROCESS_CONTROL_TIMEOUT';
-    throw error;
-  } };
-  manager.abortController = { abort: () => { aborted = true; } };
+  manager.activeRuns.set('paused', {
+    jobId: 'paused', pauseController: { resume: async () => {
+      const error = new Error('PowerShell timeout');
+      error.code = 'PROCESS_CONTROL_TIMEOUT';
+      throw error;
+    } }, abortController: { abort: () => { aborted = true; } }
+  });
 
-  await assert.rejects(() => manager.resumeCurrent(), /已安全取消当前任务/);
+  await assert.rejects(() => manager.resumeCurrent(), /已安全取消活动任务/);
 
   assert.equal(aborted, true);
   assert.equal(manager.stopRequested, true);
   assert.equal(manager.paused, false);
+});
+
+test('a partial multi-task pause failure resumes tasks that were already paused', async () => {
+  let firstPaused = false;
+  let firstResumeCalls = 0;
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.running = true;
+  manager.jobs = [
+    { ...queuedJob('pause-first'), status: 'compressing' },
+    { ...queuedJob('pause-second'), status: 'verifying' }
+  ];
+  manager.activeRuns.set('pause-first', {
+    jobId: 'pause-first', abortController: new AbortController(),
+    pauseController: {
+      pause: async () => { firstPaused = true; },
+      resume: async () => { firstPaused = false; firstResumeCalls += 1; }
+    }
+  });
+  manager.activeRuns.set('pause-second', {
+    jobId: 'pause-second', abortController: new AbortController(),
+    pauseController: { pause: async () => { throw new Error('pause failed'); }, resume: async () => {} }
+  });
+
+  await assert.rejects(() => manager.pauseCurrent(), /pause failed/);
+  assert.equal(firstPaused, false);
+  assert.equal(firstResumeCalls, 1);
+  assert.equal(manager.paused, false);
+  assert.equal(manager.stopRequested, false);
+});
+
+test('cancelling a paused task always sends abort even when resume fails', async () => {
+  let aborted = false;
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.running = true;
+  manager.jobs = [{ ...queuedJob('cancel-paused'), status: 'compressing' }];
+  manager.activeRuns.set('cancel-paused', {
+    jobId: 'cancel-paused',
+    abortController: { abort: () => { aborted = true; } },
+    pauseController: { resume: async () => { throw new Error('resume failed'); } }
+  });
+
+  await manager.cancelJob('cancel-paused');
+
+  assert.equal(aborted, true);
+  assert.equal(manager.jobs[0].stageText, '正在安全取消');
+  assert.ok(manager.logs.some((entry) => /取消信号已继续发送/.test(entry.message)));
 });
 
 test('disk-space safety failure stops the whole queue before the next task', async () => {
@@ -416,7 +512,7 @@ test('disk-space safety failure stops the whole queue before the next task', asy
   assert.match(manager.jobs[0].stageText, /磁盘空间安全停止/);
 });
 
-test('clear queue stops current work and removes every task', async () => {
+test('clear queue is rejected while a batch runs and leaves the batch intact', async () => {
   let signalStarted;
   const started = new Promise((resolve) => { signalStarted = resolve; });
   const calls = [];
@@ -427,11 +523,12 @@ test('clear queue stops current work and removes every task', async () => {
 
   const running = manager.startQueue();
   await started;
-  await manager.clearQueue();
+  await assert.rejects(() => manager.clearQueue(), /执行期间不能清理队列/);
+  await manager.stopForShutdown();
   await running;
 
   assert.deepEqual(calls, ['first']);
-  assert.deepEqual(manager.jobs, []);
+  assert.deepEqual(manager.jobs.map((job) => job.id), ['first', 'second']);
   assert.equal(manager.running, false);
 });
 
@@ -651,7 +748,10 @@ test('nonblocking preflight similarity notice still waits for the user to select
 test('automatic exact-duplicate checking can keep the skipped queue item and persistent log', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-keep-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const manifest = [{ relativePath: 'same.txt', name: 'same.txt', size: 4, md5: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }];
+  const sourcePath = path.join(root, 'incoming');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'same.txt'), 'same');
+  const manifest = await buildManifest(sourcePath, 'directory');
   const manager = new QueueManager(new FakeStore(), {
     archiveOutputDirectory: path.join(root, 'output'),
     archiveStagingDirectory: path.join(root, 'staging'),
@@ -662,7 +762,7 @@ test('automatic exact-duplicate checking can keep the skipped queue item and per
     archiveRunner: async (_job, _config, hooks) => hooks.onManifestReady(manifest)
   });
   manager.catalog = [{ id: 'existing', title: '已入库项目', displayName: '已入库项目', manifest }];
-  manager.jobs = [queuedJob('incoming')];
+  manager.jobs = [{ ...queuedJob('incoming'), sourcePath, totalBytes: 4 }];
 
   await manager.startQueue();
 
@@ -745,6 +845,258 @@ test('direct intake routes a same-path uncompressed directory to explicit update
   }
 });
 
+test('intake and deletion serialize around an uncompressed record in both modes', async (t) => {
+  for (const mode of ['archive', 'inventory_only']) {
+    for (const first of ['intake', 'delete']) {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), `hamster-delete-intake-${mode}-${first}-`));
+      t.after(() => fs.rm(root, { recursive: true, force: true }));
+      const sourcePath = path.join(root, 'source');
+      await fs.mkdir(sourcePath);
+      await fs.writeFile(path.join(sourcePath, 'safe.txt'), 'original');
+      const store = new FakeStore();
+      let releaseSave;
+      let saveStarted;
+      const started = new Promise((resolve) => { saveStarted = resolve; });
+      const gate = new Promise((resolve) => { releaseSave = resolve; });
+      if (first === 'intake') {
+        store.saveJobs = async (_repository, jobs) => {
+          saveStarted();
+          await gate;
+          store.jobs = structuredClone(jobs);
+        };
+      } else {
+        store.saveCatalog = async () => {
+          saveStarted();
+          await gate;
+        };
+      }
+      const manager = new QueueManager(store, {
+        repositoryDirectory: path.join(root, 'warehouse'),
+        archiveStagingDirectory: path.join(root, 'staging'),
+        smallItemFilter: false
+      });
+      manager.catalog = [{
+        id: 'old', title: 'source', displayName: 'source', archiveState: 'uncompressed',
+        sourceDisposition: 'kept', sourceType: 'directory', sourcePath, originalSourcePath: sourcePath,
+        manifest: await buildManifest(sourcePath, 'directory')
+      }];
+      const intake = () => manager.addSingle(sourcePath, { requestId: `${mode}-${first}`, mode });
+      const deletion = () => manager.deleteCatalogRecords(['old']);
+      const leading = first === 'intake' ? intake() : deletion();
+      await started;
+      const trailing = first === 'intake' ? deletion() : intake();
+      releaseSave();
+      const [firstResult, secondResult] = await Promise.all([leading, trailing]);
+      const deleted = first === 'intake' ? secondResult : firstResult;
+      assert.equal(await fs.readFile(path.join(sourcePath, 'safe.txt'), 'utf8'), 'original');
+      if (first === 'intake') {
+        assert.deepEqual(deleted.deletedIds, []);
+        assert.equal(deleted.failures[0].code, 'CATALOG_RECORD_IN_USE');
+        assert.equal(manager.jobs[0].sourceCatalogRecordId, 'old');
+        await manager.cancelJob(manager.jobs[0].id);
+        assert.deepEqual((await deletion()).deletedIds, ['old']);
+      } else {
+        assert.deepEqual(deleted.deletedIds, ['old']);
+        assert.equal(manager.jobs[0].sourceCatalogRecordId, null);
+        assert.equal(manager.jobs[0].taskKind, 'intake');
+      }
+      assert.equal(manager.catalog.some((record) => record.id === 'old'), false);
+    }
+  }
+});
+
+test('restored dependent jobs reserve records and requestId replay keeps one job', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-delete-restart-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'safe.txt'), 'original');
+  const store = new FakeStore();
+  const config = { repositoryDirectory: path.join(root, 'warehouse'),
+    archiveStagingDirectory: path.join(root, 'staging'), smallItemFilter: false };
+  const manager = new QueueManager(store, config);
+  manager.catalog = [{ id: 'old', title: 'source', displayName: 'source', archiveState: 'uncompressed',
+    sourceDisposition: 'kept', sourceType: 'directory', sourcePath, originalSourcePath: sourcePath,
+    manifest: await buildManifest(sourcePath, 'directory') }];
+  const service = new ApplicationTaskService(manager);
+  service.schedule = async () => {};
+  const request = { requestId: 'same-request', paths: [sourcePath], mode: 'inventory_only', waitMilliseconds: 0 };
+  const first = await service.submit(request);
+  const replay = await service.submit(request);
+  assert.equal(replay.task.id, first.task.id);
+  assert.equal(manager.jobs.length, 1);
+
+  const restored = new QueueManager(store, config);
+  restored.catalog = structuredClone(manager.catalog);
+  restored.jobs = structuredClone(store.jobs);
+  const blocked = await restored.deleteCatalogRecords(['old']);
+  assert.equal(blocked.failures[0].code, 'CATALOG_RECORD_IN_USE');
+  assert.deepEqual(blocked.deletedIds, []);
+  await restored.cancelJob(restored.jobs[0].id);
+  assert.deepEqual((await restored.deleteCatalogRecords(['old'])).deletedIds, ['old']);
+  assert.equal(await fs.readFile(path.join(sourcePath, 'safe.txt'), 'utf8'), 'original');
+});
+
+test('automation ledger acceptance cannot get ahead of the deletion boundary', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-ledger-delete-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'safe.txt'), 'original');
+  let releaseLedger;
+  let ledgerStarted;
+  const started = new Promise((resolve) => { ledgerStarted = resolve; });
+  const gate = new Promise((resolve) => { releaseLedger = resolve; });
+  const store = new FakeStore();
+  store.saveAutomationRequests = async () => { ledgerStarted(); await gate; };
+  const manager = new QueueManager(store, { repositoryDirectory: path.join(root, 'warehouse'),
+    archiveStagingDirectory: path.join(root, 'staging'), smallItemFilter: false });
+  manager.catalog = [{ id: 'old', title: 'source', displayName: 'source', archiveState: 'uncompressed',
+    sourceDisposition: 'kept', sourceType: 'directory', sourcePath, originalSourcePath: sourcePath,
+    manifest: await buildManifest(sourcePath, 'directory') }];
+  const service = new ApplicationTaskService(manager);
+  service.schedule = async () => {};
+  const input = { requestId: 'ledger-first', paths: [sourcePath], mode: 'archive',
+    archiveOutputDirectory: path.join(root, 'archives'), sourceDisposition: 'keep', waitMilliseconds: 0 };
+  const first = service.submit(input);
+  await started;
+  const deletion = manager.deleteCatalogRecords(['old']);
+  const replay = service.submit(input);
+  assert.equal(await Promise.race([
+    replay.then(() => 'resolved'),
+    new Promise((resolve) => setTimeout(() => resolve('pending'), 30))
+  ]), 'pending');
+  releaseLedger();
+  const accepted = await first;
+  const deleted = await deletion;
+  const repeated = await replay;
+  assert.equal(deleted.failures[0].code, 'CATALOG_RECORD_IN_USE');
+  assert.deepEqual(deleted.deletedIds, []);
+  assert.equal(manager.jobs[0].sourceCatalogRecordId, 'old');
+  assert.equal(repeated.task.id, accepted.task.id);
+  assert.equal(manager.jobs.length, 1);
+  assert.equal(await fs.readFile(path.join(sourcePath, 'safe.txt'), 'utf8'), 'original');
+});
+
+test('failed automation ledger saves never replay an empty accepted receipt', async (t) => {
+  for (const failedSave of [1, 'refresh', 2]) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), `hamster-ledger-save-${failedSave}-`));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const sourcePath = path.join(root, 'source');
+    await fs.mkdir(sourcePath);
+    await fs.writeFile(path.join(sourcePath, 'safe.txt'), 'original');
+    const store = new FakeStore();
+    let failed = false;
+    store.saveAutomationRequests = async (entries) => {
+      const pending = entries.find((entry) => entry.requestId === `failed-save-${failedSave}`);
+      const failAtThisStage = failedSave === 1
+        ? pending?.recoveryRequired && !pending.jobs.length
+        : failedSave === 'refresh'
+          ? pending?.recoveryRequired && pending.jobs.length > 0
+          : pending && !pending.recoveryRequired;
+      if (!failed && failAtThisStage) {
+        failed = true;
+        throw new Error('ledger unavailable');
+      }
+    };
+    const manager = new QueueManager(store, { repositoryDirectory: path.join(root, 'warehouse'),
+      archiveStagingDirectory: path.join(root, 'staging'), smallItemFilter: false });
+    manager.catalog = [{ id: 'old', title: 'source', displayName: 'source', archiveState: 'uncompressed',
+      sourceDisposition: 'kept', sourceType: 'directory', sourcePath, originalSourcePath: sourcePath,
+      manifest: await buildManifest(sourcePath, 'directory') }];
+    const service = new ApplicationTaskService(manager);
+    service.schedule = async () => {};
+    const input = { requestId: `failed-save-${failedSave}`, paths: [sourcePath], mode: 'inventory_only',
+      waitMilliseconds: 0 };
+    await assert.rejects(service.submit(input), /ledger unavailable/);
+    const persisted = manager.findAutomationRequest(input.requestId);
+    if (failedSave === 1) {
+      assert.equal(persisted, null);
+      assert.equal(manager.jobs.length, 0);
+      const retried = await service.submit(input);
+      assert.equal(retried.task.status, 'queued');
+    } else {
+      assert.equal(persisted.recoveryRequired, true);
+      assert.equal(manager.jobs.length, 1);
+      const replay = await service.submit(input);
+      assert.equal(replay.task.status, 'recovery_required');
+      assert.deepEqual(replay.task.jobIds, [manager.jobs[0].id]);
+      assert.deepEqual(replay.failures, []);
+      if (failedSave === 'refresh') assert.deepEqual(persisted.jobIds, []);
+      let starts = 0;
+      manager.startQueue = async () => { starts += 1; };
+      service.schedule = ApplicationTaskService.prototype.schedule.bind(service);
+      await service.schedule();
+      assert.equal(starts, 0);
+      await service.cancel(replay.task.id);
+      assert.equal(manager.jobs[0].status, 'cancelled');
+    }
+    assert.equal(await fs.readFile(path.join(sourcePath, 'safe.txt'), 'utf8'), 'original');
+  }
+});
+
+test('catalog batch admission and retry cannot race with deletion', async (t) => {
+  for (const action of ['compression', 'refresh', 'retry']) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), `hamster-delete-${action}-`));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const sourcePath = path.join(root, 'source');
+    await fs.mkdir(sourcePath);
+    await fs.writeFile(path.join(sourcePath, 'safe.txt'), 'original');
+    let releaseSave;
+    let saveStarted;
+    const started = new Promise((resolve) => { saveStarted = resolve; });
+    const gate = new Promise((resolve) => { releaseSave = resolve; });
+    const store = new FakeStore();
+    store.saveJobs = async (_repository, jobs) => {
+      saveStarted();
+      await gate;
+      store.jobs = structuredClone(jobs);
+    };
+    const manager = new QueueManager(store, { repositoryDirectory: path.join(root, 'warehouse'),
+      archiveStagingDirectory: path.join(root, 'staging') });
+    manager.catalog = [{ id: 'old', title: 'source', displayName: 'source', archiveState: 'uncompressed',
+      sourceDisposition: 'kept', sourceType: 'directory', sourcePath, originalSourcePath: sourcePath,
+      manifest: await buildManifest(sourcePath, 'directory') }];
+    let admission;
+    if (action === 'compression') admission = manager.queueCatalogRecordsForCompression(['old']);
+    else if (action === 'refresh') admission = manager.queueCatalogRecordsForRefresh(['old']);
+    else {
+      const job = manager.createJob({ sourcePath, sourceType: 'directory', displayName: 'source',
+        fileCount: 1, totalBytes: 8, processingMode: 'inventory_only', taskKind: 'catalog_refresh',
+        sourceCatalogRecordId: 'old' });
+      job.status = 'failed';
+      manager.jobs = [job];
+      admission = manager.retryJob(job.id);
+    }
+    await started;
+    const deletion = manager.deleteCatalogRecords(['old']);
+    releaseSave();
+    await admission;
+    const result = await deletion;
+    assert.deepEqual(result.deletedIds, [], action);
+    assert.equal(result.failures[0].code, 'CATALOG_RECORD_IN_USE', action);
+    assert.equal(manager.jobs.length, 1, action);
+  }
+});
+
+test('an already missing source record fails with a recoverable code', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-missing-source-record-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    archiveStagingDirectory: path.join(root, 'staging')
+  });
+  const job = manager.createJob({ sourcePath: path.join(root, 'source'), sourceType: 'directory',
+    displayName: 'source', fileCount: 1, totalBytes: 8, processingMode: 'inventory_only',
+    taskKind: 'catalog_refresh', sourceCatalogRecordId: 'gone' });
+  manager.jobs = [job];
+  await manager.runOne(job);
+  assert.equal(job.status, 'failed');
+  assert.equal(job.errorCode, 'CATALOG_SOURCE_RECORD_MISSING');
+  assert.match(job.errorMessage, /取消此任务并重新接收/);
+  await assert.rejects(manager.retryJob(job.id), (error) => error.code === 'CATALOG_SOURCE_RECORD_MISSING');
+});
+
 test('same-source metadata without complete MD5 never reports an exact duplicate', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-partial-reuse-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -801,7 +1153,6 @@ test('same-source complete tree skips before MD5 while preserving empty-director
     directories: ['empty'], fileCount: 1, originalBytes: manifest[0].size,
     sourceTreeSnapshotComplete: true, skippedFiles: []
   }];
-
   await manager.addSingle(sourcePath);
   const idle = new Promise((resolve) => manager.once('idle', resolve));
   await manager.startInventoryOnlyQueue();
@@ -836,13 +1187,162 @@ test('same-source fast path rejects incomplete historical snapshots', async (t) 
     directories: [], fileCount: 2, originalBytes: stats.size,
     sourceTreeSnapshotComplete: false, skippedFiles: [{ path: 'missing.txt' }]
   }];
-
   await manager.addSingle(sourcePath, { requestId: 'incomplete', mode: 'inventory_only' });
   await manager.startQueue();
 
   assert.equal(manager.jobs[0].status, 'completed');
   assert.equal(manager.catalog.length, 2);
   assert.equal(manager.jobs[0].exactProjectMatches, undefined);
+});
+
+async function makeSourceAlias(t, sourcePath) {
+  const alias = path.join(path.dirname(sourcePath), 'source-alias');
+  try { await fs.symlink(sourcePath, alias, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { t.skip(`Directory alias creation unavailable: ${error.code}`); return null; }
+  return alias;
+}
+
+test('same-source complete tree matches a historical directory alias', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-complete-alias-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  await fs.mkdir(path.join(sourcePath, 'empty'), { recursive: true });
+  await fs.writeFile(path.join(sourcePath, 'same.txt'), 'same-content');
+  const alias = await makeSourceAlias(t, sourcePath);
+  if (!alias) return;
+  const manifest = await buildManifest(sourcePath, 'directory', {
+    skipTinyMd5Files: true, tinyFileMd5ThresholdBytes: 5 * 1024
+  });
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'), smallItemFilter: false, autoSkipExactDuplicates: true
+  });
+  manager.catalog = [{ id: 'alias-record', title: 'source', displayName: 'source',
+    archiveState: 'compressed', sourceDisposition: 'kept', sourceType: 'directory',
+    sourcePath: alias, originalSourcePath: alias, manifest, directories: ['empty'],
+    fileCount: 1, originalBytes: manifest[0].size, sourceTreeSnapshotComplete: true, skippedFiles: [] }];
+
+  await manager.addSingle(sourcePath);
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startInventoryOnlyQueue();
+  await idle;
+
+  assert.equal(manager.jobs[0].status, 'skipped_duplicate');
+  assert.equal(manager.jobs[0].exactProjectMatches[0].verification, 'same_source_tree');
+});
+
+test('incomplete historical snapshot through an alias cannot auto-skip its own source', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-incomplete-alias-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'same.txt'), 'new!');
+  const alias = await makeSourceAlias(t, sourcePath);
+  if (!alias) return;
+  const stats = await fs.stat(path.join(sourcePath, 'same.txt'));
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'), smallItemFilter: false, autoSkipExactDuplicates: true
+  });
+  manager.catalog = [{ id: 'incomplete-alias', title: 'history', displayName: 'history',
+    sourceType: 'directory', sourcePath: alias, originalSourcePath: alias,
+    manifest: [{ relativePath: 'same.txt', name: 'same.txt', size: stats.size,
+      modifiedAtMs: stats.mtimeMs, modifiedAt: stats.mtime.toISOString() }],
+    directories: [], fileCount: 2, originalBytes: stats.size,
+    sourceTreeSnapshotComplete: false, skippedFiles: [{ path: 'missing.txt' }] }];
+
+  await manager.addSingle(sourcePath, { requestId: 'incomplete-alias', mode: 'inventory_only' });
+  await manager.startQueue();
+
+  assert.equal(manager.jobs[0].status, 'completed');
+  assert.equal(manager.catalog.length, 2);
+  assert.equal(manager.jobs[0].exactProjectMatches, undefined);
+});
+
+test('a historical fallback alias cannot prove a partial-MD5 duplicate of the current source', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-partial-fallback-alias-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  const historicalPath = path.join(root, 'historical');
+  await Promise.all([fs.mkdir(sourcePath), fs.mkdir(historicalPath)]);
+  await Promise.all([
+    fs.writeFile(path.join(sourcePath, 'same.txt'), 'same'),
+    fs.writeFile(path.join(historicalPath, 'same.txt'), 'diff')
+  ]);
+  const alias = await makeSourceAlias(t, sourcePath);
+  if (!alias) return;
+  const manifest = await buildManifest(sourcePath, 'directory', {
+    skipTinyMd5Files: true, tinyFileMd5ThresholdBytes: 5 * 1024
+  });
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'), smallItemFilter: false, autoSkipExactDuplicates: true
+  });
+  manager.catalog = [{ id: 'partial-history', title: 'history', sourceType: 'directory',
+    originalSourcePath: historicalPath, sourcePath: alias, manifest, directories: [] }];
+
+  const result = await manager.verifyExactProjectMatches({
+    id: 'current', sourcePath, sourceType: 'directory'
+  }, manifest);
+
+  assert.deepEqual(result.matches, []);
+  assert.equal(result.verificationIncomplete, true);
+});
+
+test('the 65th reachable partial-MD5 candidate remains under manual review', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-path-budget-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'same.txt'), 'same-content');
+  const manifest = await buildManifest(sourcePath, 'directory', {
+    skipTinyMd5Files: true, tinyFileMd5ThresholdBytes: 5 * 1024
+  });
+  const store = new FakeStore();
+  store.findCatalogIdsByProjectShape = () => manager.catalog.map((record) => record.id);
+  const manager = new QueueManager(store, {
+    repositoryDirectory: path.join(root, 'warehouse'), smallItemFilter: false, autoSkipExactDuplicates: true
+  });
+  const candidatePaths = Array.from({ length: 65 }, (_, index) => path.join(root, `candidate-${index}`));
+  await Promise.all(candidatePaths.map((candidatePath) => fs.mkdir(candidatePath)));
+  const candidates = candidatePaths.map((candidatePath, index) => ({
+    id: `lost-${index}`, title: `history-${index}`, sourceType: 'directory',
+    originalSourcePath: candidatePath, manifest, directories: []
+  }));
+  manager.catalog = candidates.slice(0, 64);
+  const withinBudget = await manager.verifyExactProjectMatches({ id: 'new', sourcePath, sourceType: 'directory' }, manifest);
+  manager.catalog = candidates;
+
+  const result = await manager.verifyExactProjectMatches({ id: 'new', sourcePath, sourceType: 'directory' }, manifest);
+
+  assert.equal(withinBudget.verificationIncomplete, false);
+  assert.equal(result.matches.length, 0);
+  assert.equal(result.verificationIncomplete, true);
+});
+
+test('partial-MD5 history can verify a legacy sourcePath without originalSourcePath', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-legacy-source-path-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  const previousPath = path.join(root, 'previous');
+  await Promise.all([fs.mkdir(sourcePath), fs.mkdir(previousPath)]);
+  await Promise.all([
+    fs.writeFile(path.join(sourcePath, 'same.txt'), 'same-content'),
+    fs.writeFile(path.join(previousPath, 'same.txt'), 'same-content')
+  ]);
+  const manifest = await buildManifest(sourcePath, 'directory', {
+    skipTinyMd5Files: true, tinyFileMd5ThresholdBytes: 5 * 1024
+  });
+  const historicalManifest = await buildManifest(previousPath, 'directory', {
+    skipTinyMd5Files: true, tinyFileMd5ThresholdBytes: 5 * 1024
+  });
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'), smallItemFilter: false, autoSkipExactDuplicates: true
+  });
+  manager.catalog = [{ id: 'legacy', title: 'previous', sourceType: 'directory',
+    sourcePath: previousPath, manifest: historicalManifest, directories: [] }];
+
+  const result = await manager.verifyExactProjectMatches({ id: 'new', sourcePath, sourceType: 'directory' }, manifest);
+
+  assert.deepEqual(result.matches.map((record) => record.id), ['legacy']);
+  assert.equal(result.verificationIncomplete, false);
 });
 
 test('same-source fast path requires an identical empty-directory list', async (t) => {
@@ -867,10 +1367,9 @@ test('same-source fast path requires an identical empty-directory list', async (
   await manager.addSingle(sourcePath, { requestId: 'directory-shape', mode: 'inventory_only' });
   await manager.startQueue();
 
-  assert.equal(manager.jobs[0].status, 'skipped_duplicate');
-  assert.equal(manager.jobs[0].exactProjectMatches[0].verification, undefined);
-  const savedManifest = await manager.store.loadPendingManifest(manager.config.repositoryDirectory, manager.jobs[0].id);
-  assert.ok(savedManifest.every((file) => /^[a-f0-9]{32}$/.test(file.md5)));
+  assert.equal(manager.jobs[0].status, 'completed');
+  assert.equal(manager.catalog.length, 2);
+  assert.equal(manager.jobs[0].exactProjectMatches?.length || 0, 0);
 });
 
 test('historical MD5 coverage is not reused as the current task fingerprint during scanning', async (t) => {
@@ -950,6 +1449,80 @@ test('automatic exact verification fills safeguard MD5 gaps for a copied source 
 
   assert.equal(manager.jobs[0].status, 'skipped_duplicate');
   assert.equal(manager.jobs[0].stageText, '与仓库内项目完全一致，已自动跳过');
+});
+
+test('concurrent identical projects wait for a committed catalog result', async (t) => {
+  for (const failFirstSave of [false, true]) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), `hamster-concurrent-duplicate-${failFirstSave}-`));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const sources = ['first', 'second'].map((name) => path.join(root, name));
+    for (const source of sources) {
+      await fs.mkdir(source);
+      await fs.writeFile(path.join(source, 'same.bin'), Buffer.alloc(2048, 7));
+    }
+    const store = new FakeStore();
+    if (failFirstSave) {
+      let failed = false;
+      store.saveCatalog = async () => {
+        if (!failed) { failed = true; throw new Error('first catalog write failed'); }
+      };
+    }
+    const manager = new QueueManager(store, {
+      repositoryDirectory: path.join(root, 'warehouse'),
+      archiveStagingDirectory: path.join(root, 'staging'),
+      queueConcurrency: 2, autoSkipExactDuplicates: true, autoSkipExactDuplicateAction: 'keep'
+    }, { availableMemoryBytes: () => 8 * 1024 ** 3 });
+    manager.jobs = sources.map((sourcePath, index) => ({
+      ...queuedJob(index === 0 ? 'first' : 'second'), sourcePath, processingMode: 'inventory_only',
+      totalBytes: 2048, intakeModeSelected: true
+    }));
+
+    await manager.startQueue();
+
+    assert.equal(manager.catalog.length, 1, String(failFirstSave));
+    assert.equal(manager.jobs.filter((job) => job.status === 'completed').length, 1);
+    assert.equal(manager.jobs.filter((job) => job.status === (failFirstSave ? 'failed' : 'skipped_duplicate')).length, 1);
+    for (const source of sources) await fs.access(path.join(source, 'same.bin'));
+  }
+});
+
+test('queue exact verification does not complete a current manifest for a partial historical candidate', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-queue-progressive-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const current = path.join(root, 'current');
+  const historical = path.join(root, 'historical');
+  await fs.mkdir(current);
+  await fs.mkdir(historical);
+  for (let index = 0; index < 32; index += 1) {
+    const name = `${String(index).padStart(2, '0')}.bin`;
+    await fs.writeFile(path.join(current, name), `value-${String(index).padStart(2, '0')}`);
+    await fs.writeFile(path.join(historical, name), index === 0 ? 'other-00' : `value-${String(index).padStart(2, '0')}`);
+  }
+  const currentManifest = await buildManifest(current, 'directory', {
+    skipTinyMd5Files: true, tinyFileMd5ThresholdBytes: 1024
+  });
+  const historicalComplete = await buildManifest(historical, 'directory');
+  const historicalPartial = historicalComplete.map((file, index) => index === 0
+    ? { ...file } : { ...file, md5: undefined });
+  const manager = new QueueManager(new FakeStore(), { repositoryDirectory: path.join(root, 'warehouse') });
+  manager.catalog = [{
+    id: 'historical', title: 'historical', sourceType: 'directory',
+    sourcePath: historical, originalSourcePath: historical, manifest: historicalPartial
+  }];
+  let reads = 0;
+  const original = fsSync.createReadStream;
+  fsSync.createReadStream = (...args) => { reads += 1; return original(...args); };
+  try {
+    const result = await manager.verifyExactProjectMatches({
+      ...queuedJob('current'), sourcePath: current, sourceType: 'directory'
+    }, currentManifest);
+    assert.equal(result.matches.length, 0);
+    assert.equal(result.verificationIncomplete, false);
+    assert.equal(result.manifest.filter((file) => file.md5).length, 1);
+    assert.equal(reads, 1);
+  } finally {
+    fsSync.createReadStream = original;
+  }
 });
 
 test('automatic exact-duplicate checking hashes copied sources and skips matches against compressed and uncompressed records', async (t) => {
@@ -1220,7 +1793,10 @@ test('completed queue report reuses the catalog manifest without matching the re
 test('automatic exact-duplicate checking can remove only the queue item while retaining its log', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-remove-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const manifest = [{ relativePath: 'same.txt', name: 'same.txt', size: 4, md5: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }];
+  const sourcePath = path.join(root, 'incoming');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'same.txt'), 'same');
+  const manifest = await buildManifest(sourcePath, 'directory');
   const manager = new QueueManager(new FakeStore(), {
     archiveOutputDirectory: path.join(root, 'output'),
     archiveStagingDirectory: path.join(root, 'staging'),
@@ -1231,7 +1807,7 @@ test('automatic exact-duplicate checking can remove only the queue item while re
     archiveRunner: async (_job, _config, hooks) => hooks.onManifestReady(manifest)
   });
   manager.catalog = [{ id: 'existing', title: '已入库项目', displayName: '已入库项目', manifest }];
-  manager.jobs = [queuedJob('incoming')];
+  manager.jobs = [{ ...queuedJob('incoming'), sourcePath, totalBytes: 4 }];
 
   await manager.startQueue();
 
@@ -1601,6 +2177,30 @@ test('catalog fuzzy search ranks matches and supports time and filename sorting'
   assert.equal(manager.getCatalogSuggestions('美女台湾')[0].id, 'older');
 });
 
+test('catalog search scans each candidate manifest only once', () => {
+  const store = new FakeStore();
+  store.findCatalogIdsBySearchTerms = () => ['needle'];
+  let relativePathReads = 0;
+  const file = { size: 12, md5: 'a'.repeat(32) };
+  Object.defineProperty(file, 'relativePath', {
+    enumerable: true,
+    get() {
+      relativePathReads += 1;
+      return 'nested/needle.txt';
+    }
+  });
+  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  manager.catalog = [{
+    id: 'needle', title: '普通项目', displayName: '普通项目', tags: [], manifest: [file], directories: []
+  }];
+
+  const [result] = manager.searchCatalog({ query: 'needle' });
+
+  assert.equal(result.id, 'needle');
+  assert.deepEqual(result.matchedFiles, [{ relativePath: 'nested/needle.txt', size: 12, md5: 'a'.repeat(32) }]);
+  assert.equal(relativePathReads, 1);
+});
+
 test('the uncompressed system tag uses the normal exact tag filter', () => {
   const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
   manager.catalog = [
@@ -1948,11 +2548,586 @@ test('finish next and pause runs one queued task only', async () => {
     })
   });
   manager.jobs = [queuedJob('first'), queuedJob('second')];
-  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  const paused = new Promise((resolve) => manager.on('state', (state) => {
+    if (state.paused && state.runningCount === 0) resolve();
+  }));
   await manager.finishNextAndPause();
-  await idle;
+  await paused;
   assert.equal(manager.jobs[0].status, 'completed');
   assert.equal(manager.jobs[1].status, 'queued');
+  assert.equal(manager.running, true);
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.stopForShutdown();
+  await idle;
+});
+
+test('warehouse refresh added during a run stays in the pending-start region', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-live-refresh-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'existing-source');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'one.txt'), 'one');
+  let releaseFirst;
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const calls = [];
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse')
+  }, {
+    archiveRunner: async (job) => {
+      calls.push(job.id);
+      markFirstStarted();
+      await firstGate;
+      return successfulArchiveResult(job);
+    }
+  });
+  manager.catalog = [{
+    id: 'existing-record', jobId: 'old-job', title: '现有目录', displayName: '现有目录',
+    recordType: 'archive', archiveState: 'uncompressed', sourceType: 'directory',
+    sourcePath, originalSourcePath: sourcePath, sourceDisposition: 'kept',
+    fileCount: 1, originalBytes: 3, manifest: [{ relativePath: 'one.txt', name: 'one.txt', size: 3 }],
+    directories: [], tags: ['未压缩']
+  }];
+  manager.jobs = [{ ...queuedJob('current'), totalBytes: 100, intakeModeSelected: true }];
+
+  const running = manager.startQueue();
+  await firstStarted;
+  const result = await manager.queueCatalogRecordsForRefresh(['existing-record']);
+  const refresh = manager.jobs.find((job) => job.taskKind === 'catalog_refresh');
+  assert.equal(result.queuedCount, 1);
+  assert.equal(refresh.deferredUntilNextRun, true);
+  assert.equal(refresh.runBatchId, null);
+  assert.deepEqual(calls, ['current']);
+  releaseFirst();
+  await running;
+
+  assert.equal(refresh.status, 'queued');
+  assert.deepEqual(calls, ['current']);
+});
+
+test('current batch runs up to the configured concurrency and never pulls in a late task', async () => {
+  const calls = [];
+  const releases = new Map();
+  let markThreeStarted;
+  let markFourStarted;
+  const threeStarted = new Promise((resolve) => { markThreeStarted = resolve; });
+  const fourStarted = new Promise((resolve) => { markFourStarted = resolve; });
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', queueConcurrency: 3
+  }, {
+    availableMemoryBytes: () => 8 * 1024 ** 3,
+    archiveRunner: async (job) => {
+      calls.push(job.id);
+      if (calls.length === 3) markThreeStarted();
+      if (calls.length === 4) markFourStarted();
+      await new Promise((resolve) => { releases.set(job.id, resolve); });
+      return successfulArchiveResult(job);
+    }
+  });
+  manager.jobs = ['first', 'second', 'third', 'fourth'].map((id) => ({
+    ...queuedJob(id), totalBytes: 100, intakeModeSelected: true
+  }));
+
+  const running = manager.startQueue();
+  await threeStarted;
+  assert.deepEqual(calls, ['first', 'second', 'third']);
+  manager.jobs.push({ ...queuedJob('late'), totalBytes: 100, intakeModeSelected: true, runBatchId: null });
+  releases.get('second')();
+  await fourStarted;
+  assert.equal(calls[3], 'fourth');
+  assert.equal(calls.includes('late'), false);
+  for (const release of releases.values()) release();
+  await running;
+
+  assert.equal(manager.jobs.find((job) => job.id === 'late').status, 'queued');
+  assert.equal(manager.jobs.find((job) => job.id === 'late').runBatchId, null);
+});
+
+test('cancelling one concurrent task leaves the other active task running', async () => {
+  const calls = [];
+  let startedCount = 0;
+  let markBothStarted;
+  let releaseSecond;
+  const bothStarted = new Promise((resolve) => { markBothStarted = resolve; });
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', queueConcurrency: 2
+  }, {
+    availableMemoryBytes: () => 8 * 1024 ** 3,
+    archiveRunner: async (job, _config, _hooks, signal) => {
+      calls.push(job.id);
+      startedCount += 1;
+      if (startedCount === 2) markBothStarted();
+      if (job.id === 'first') {
+        await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+        throw new CancelledError();
+      }
+      await new Promise((resolve) => { releaseSecond = resolve; });
+      assert.equal(signal.aborted, false);
+      return successfulArchiveResult(job);
+    }
+  });
+  manager.jobs = ['first', 'second'].map((id) => ({ ...queuedJob(id), totalBytes: 100, intakeModeSelected: true }));
+
+  const running = manager.startQueue();
+  await bothStarted;
+  await manager.cancelJob('first');
+  if (manager.jobs[0].status !== 'cancelled') {
+    await new Promise((resolve) => manager.on('state', () => {
+      if (manager.jobs[0].status === 'cancelled') resolve();
+    }));
+  }
+  assert.equal(manager.activeRuns.has('second'), true);
+  assert.equal(manager.jobs[1].status, 'inventorying');
+  releaseSecond();
+  await running;
+
+  assert.deepEqual(calls, ['first', 'second']);
+  assert.equal(manager.jobs[0].status, 'cancelled');
+  assert.equal(manager.jobs[1].status, 'completed');
+});
+
+test('memory admission delays only new tasks and resumes after memory recovers', async () => {
+  const calls = [];
+  let availableMemory = 1024 * MIB;
+  let markFirstStarted;
+  let markAllStarted;
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  const allStarted = new Promise((resolve) => { markAllStarted = resolve; });
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', queueConcurrency: 3
+  }, {
+    availableMemoryBytes: () => availableMemory,
+    archiveRunner: async (job, _config, _hooks, signal) => {
+      calls.push(job.id);
+      if (calls.length === 1) markFirstStarted();
+      if (calls.length === 3) markAllStarted();
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      throw new CancelledError();
+    }
+  });
+  manager.jobs = ['first', 'second', 'third'].map((id) => ({ ...queuedJob(id), intakeModeSelected: true }));
+
+  const running = manager.startQueue();
+  await firstStarted;
+  if (!manager.memoryWaiting) {
+    await new Promise((resolve) => manager.on('state', (state) => {
+      if (state.memoryWaiting) resolve();
+    }));
+  }
+  assert.deepEqual(calls, ['first']);
+  assert.equal(manager.jobs[0].status, 'inventorying');
+  availableMemory = 8 * 1024 ** 3;
+  manager.wakeQueueScheduler();
+  await allStarted;
+  await manager.stopForShutdown();
+  await running;
+
+  assert.deepEqual(calls, ['first', 'second', 'third']);
+});
+
+test('parent and child sources that may move are never active together', async () => {
+  const calls = [];
+  let releaseFirst;
+  let releaseSecond;
+  let markFirstStarted;
+  let markSecondStarted;
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  const secondStarted = new Promise((resolve) => { markSecondStarted = resolve; });
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', queueConcurrency: 2, moveCompleted: true, processedSourceDirectory: 'E:\\done'
+  }, {
+    availableMemoryBytes: () => 8 * 1024 ** 3,
+    archiveRunner: async (job) => {
+      calls.push(job.id);
+      if (job.id === 'parent') {
+        markFirstStarted();
+        await new Promise((resolve) => { releaseFirst = resolve; });
+      } else {
+        markSecondStarted();
+        await new Promise((resolve) => { releaseSecond = resolve; });
+      }
+      return successfulArchiveResult(job);
+    }
+  });
+  manager.jobs = [
+    { ...queuedJob('parent'), sourcePath: 'E:\\source\\project', totalBytes: 100, intakeModeSelected: true },
+    { ...queuedJob('child'), sourcePath: 'E:\\source\\project\\child', totalBytes: 100, intakeModeSelected: true }
+  ];
+
+  const running = manager.startQueue();
+  await firstStarted;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ['parent']);
+  releaseFirst();
+  await secondStarted;
+  releaseSecond();
+  await running;
+  assert.deepEqual(calls, ['parent', 'child']);
+});
+
+test('a pause in progress cannot fill a freed concurrency slot', async () => {
+  const calls = [];
+  let releaseFirst;
+  let releaseSecond;
+  let releaseSecondPause;
+  let markBothStarted;
+  const bothStarted = new Promise((resolve) => { markBothStarted = resolve; });
+  let controllerCount = 0;
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', queueConcurrency: 2
+  }, {
+    availableMemoryBytes: () => 8 * 1024 ** 3,
+    createPauseController: () => {
+      controllerCount += 1;
+      const ordinal = controllerCount;
+      return {
+        paused: false,
+        pause() {
+          if (ordinal === 2) return new Promise((resolve) => { releaseSecondPause = resolve; });
+          return Promise.resolve();
+        },
+        resume: async () => {},
+        waitIfPaused: async () => {}
+      };
+    }
+  });
+  manager.runOne = async (job) => {
+    calls.push(job.id);
+    if (calls.length === 2) markBothStarted();
+    if (job.id === 'first') await new Promise((resolve) => { releaseFirst = resolve; });
+    if (job.id === 'second') await new Promise((resolve) => { releaseSecond = resolve; });
+    job.status = 'completed';
+  };
+  manager.jobs = ['first', 'second', 'third'].map((id) => ({ ...queuedJob(id), intakeModeSelected: true }));
+
+  const running = manager.startQueue();
+  await bothStarted;
+  const pausing = manager.pauseCurrent();
+  releaseFirst();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ['first', 'second']);
+  releaseSecondPause();
+  await pausing;
+  releaseSecond();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, ['first', 'second']);
+  await manager.resumeCurrent();
+  await running;
+  assert.deepEqual(calls, ['first', 'second', 'third']);
+});
+
+test('junction aliases, cross-output paths and same-name moves cannot run together', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-concurrent-paths-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const parent = path.join(root, 'parent');
+  const child = path.join(parent, 'child');
+  const other = path.join(root, 'other');
+  const alias = path.join(root, 'parent-alias');
+  await fs.mkdir(child, { recursive: true });
+  await fs.mkdir(other);
+  let junctionAvailable = true;
+  try { await fs.symlink(parent, alias, 'junction'); }
+  catch (error) {
+    junctionAvailable = false;
+    t.diagnostic(`junction scenario unavailable: ${error.code}`);
+  }
+
+    const cases = [
+    {
+      name: 'junction parent and real child',
+      config: { moveCompleted: true, processedSourceDirectory: path.join(root, 'done') },
+      first: { sourcePath: alias }, second: { sourcePath: child }
+    },
+    {
+      name: 'output inside another source',
+      config: {},
+      first: { sourcePath: parent },
+      second: { sourcePath: other, archiveOutputDirectory: path.join(parent, 'output') }
+    },
+    {
+      name: 'same-name video move destination',
+      config: { moveCompleted: true, processedSourceDirectory: path.join(root, 'done') },
+      first: { sourcePath: path.join(parent, 'clip.mp4'), sourceType: 'video' },
+      second: { sourcePath: path.join(other, 'clip.mp4'), sourceType: 'video' }
+    }
+  ];
+  await fs.writeFile(cases[2].first.sourcePath, 'first');
+  await fs.writeFile(cases[2].second.sourcePath, 'second');
+  for (const scenario of cases.filter((scenario) => junctionAvailable || scenario.name !== 'junction parent and real child')) {
+    const calls = [];
+    let releaseFirst;
+    let markFirstStarted;
+    const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+    const manager = new QueueManager(new FakeStore(), {
+      libraryDir: path.join(root, 'library'), archiveOutputDirectory: path.join(root, 'archives'),
+      archiveStagingDirectory: path.join(root, 'staging'), queueConcurrency: 2, ...scenario.config
+    }, { availableMemoryBytes: () => 8 * 1024 ** 3 });
+    manager.runOne = async (job) => {
+      calls.push(job.id);
+      if (job.id === 'first') {
+        markFirstStarted();
+        await new Promise((resolve) => { releaseFirst = resolve; });
+      }
+      job.status = 'completed';
+    };
+    manager.jobs = [
+      { ...queuedJob('first'), intakeModeSelected: true, ...scenario.first },
+      { ...queuedJob('second'), intakeModeSelected: true, ...scenario.second }
+    ];
+    const running = manager.startQueue();
+    await firstStarted;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(calls, ['first'], scenario.name);
+    releaseFirst();
+    await running;
+    assert.deepEqual(calls, ['first', 'second'], scenario.name);
+  }
+});
+
+test('same output reservation and same catalog record are serialized by the real scheduler', async () => {
+  for (const conflictKind of ['output', 'catalog']) {
+    const calls = [];
+    const releases = new Map();
+    let markFirstStarted;
+    let markSecondStarted;
+    const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+    const secondStarted = new Promise((resolve) => { markSecondStarted = resolve; });
+    const manager = new QueueManager(new FakeStore(), {
+      libraryDir: 'E:\\library', archiveOutputDirectory: 'E:\\archives', queueConcurrency: 2
+    });
+    manager.runOne = async (job) => {
+      calls.push(job.id);
+      job.status = 'compressing';
+      if (calls.length === 1) markFirstStarted();
+      else markSecondStarted();
+      await new Promise((resolve) => { releases.set(job.id, resolve); });
+      job.status = 'completed';
+    };
+    const first = { ...queuedJob(`${conflictKind}-first`), intakeModeSelected: true };
+    const second = { ...queuedJob(`${conflictKind}-second`), intakeModeSelected: true };
+    if (conflictKind === 'output') {
+      first.archiveBaseName = 'same-name.7z';
+      second.archiveBaseName = 'same-name.7z';
+    } else {
+      first.sourceCatalogRecordId = 'same-record';
+      second.sourceChangeTargetRecordId = 'same-record';
+    }
+    manager.jobs = [first, second];
+
+    const running = manager.startQueue();
+    await firstStarted;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(calls, [first.id], `${conflictKind} conflict started concurrently`);
+    releases.get(first.id)();
+    await secondStarted;
+    releases.get(second.id)();
+    await running;
+    assert.deepEqual(calls, [first.id, second.id]);
+  }
+});
+
+test('tasks that target the same catalog record cannot run together after source review', () => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library', queueConcurrency: 2 });
+  const active = { ...queuedJob('active'), sourceCatalogRecordId: 'record-one' };
+  const reviewed = { ...queuedJob('reviewed'), sourceCatalogRecordId: null, sourceChangeTargetRecordId: 'record-one' };
+  manager.jobs = [active, reviewed];
+  manager.activeRuns.set(active.id, { jobId: active.id });
+
+  assert.equal(manager.activeRunConflict(reviewed), 'catalog');
+});
+
+test('pause waits until every active source move has finished', async () => {
+  let pauseCalls = 0;
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  manager.running = true;
+  manager.jobs = [{ ...queuedJob('moving'), status: 'moving' }];
+  manager.activeRuns.set('moving', {
+    jobId: 'moving',
+    pauseController: { pause: async () => { pauseCalls += 1; } }
+  });
+
+  await assert.rejects(() => manager.pauseCurrent(), /等待处理完成后再暂停/);
+  assert.equal(pauseCalls, 0);
+  assert.equal(manager.paused, false);
+});
+
+test('source disposition becomes non-interruptible before move or trash starts', async () => {
+  let markSourceDispositionStarted;
+  let releaseSourceDisposition;
+  const sourceDispositionStarted = new Promise((resolve) => { markSourceDispositionStarted = resolve; });
+  const sourceDispositionGate = new Promise((resolve) => { releaseSourceDisposition = resolve; });
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', moveCompleted: true, processedSourceDirectory: 'E:\\completed'
+  }, {
+    archiveRunner: async (job) => successfulArchiveResult(job)
+  });
+  manager.completeSourceDisposition = async (record) => {
+    markSourceDispositionStarted();
+    await sourceDispositionGate;
+    record.sourceDisposition = 'moved';
+    return 'source moved';
+  };
+  manager.jobs = [{ ...queuedJob('source-disposition-gate'), totalBytes: 100, intakeModeSelected: true }];
+
+  const running = manager.startQueue();
+  await sourceDispositionStarted;
+
+  assert.equal(manager.jobs[0].status, 'moving');
+  await assert.rejects(() => manager.pauseCurrent(), /等待处理完成后再暂停/);
+  await assert.rejects(() => manager.cancelJob(manager.jobs[0].id), /当前阶段不能取消/);
+  releaseSourceDisposition();
+  await running;
+  assert.equal(manager.jobs[0].status, 'completed');
+});
+
+test('one failed concurrent catalog commit cannot roll back another successful task', async () => {
+  class ConcurrentCommitStore extends FakeStore {
+    constructor() {
+      super();
+      this.saveCalls = 0;
+      this.savedCatalog = [];
+    }
+    async saveCatalog(_directory, catalog) {
+      this.saveCalls += 1;
+      if (this.saveCalls === 1) throw new Error('first commit failed');
+      this.savedCatalog = structuredClone(catalog);
+    }
+  }
+  const store = new ConcurrentCommitStore();
+  let bothArchived;
+  let archiveCount = 0;
+  const archived = new Promise((resolve) => { bothArchived = resolve; });
+  const manager = new QueueManager(store, {
+    libraryDir: 'E:\\library', queueConcurrency: 2
+  }, {
+    availableMemoryBytes: () => 8 * 1024 ** 3,
+    archiveRunner: async (job) => {
+      archiveCount += 1;
+      if (archiveCount === 2) bothArchived();
+      await archived;
+      return successfulArchiveResult(job);
+    }
+  });
+  manager.jobs = [
+    { ...queuedJob('commit-first'), totalBytes: 100, intakeModeSelected: true },
+    { ...queuedJob('commit-second'), totalBytes: 100, intakeModeSelected: true }
+  ];
+
+  await manager.startQueue();
+
+  assert.equal(manager.jobs.filter((job) => job.status === 'failed').length, 1);
+  assert.equal(manager.jobs.filter((job) => job.status === 'completed').length, 1);
+  assert.equal(manager.catalog.length, 1);
+  assert.equal(store.savedCatalog.length, 1);
+  assert.equal(store.savedCatalog[0].archiveJobId, manager.jobs.find((job) => job.status === 'completed').id);
+});
+
+test('pause and cancel are honored while a task waits for the final catalog commit', async () => {
+  for (const action of ['pause', 'cancel']) {
+    let releaseCatalogBlock;
+    let markCatalogBlockStarted;
+    const catalogBlockStarted = new Promise((resolve) => { markCatalogBlockStarted = resolve; });
+    const catalogBlock = new Promise((resolve) => { releaseCatalogBlock = resolve; });
+    const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+      archiveRunner: async (job) => successfulArchiveResult(job)
+    });
+    manager.jobs = [{ ...queuedJob(`${action}-before-commit`), totalBytes: 100, intakeModeSelected: true }];
+    const blockingOperation = manager.runCatalogOperation(async () => {
+      markCatalogBlockStarted();
+      await catalogBlock;
+    });
+    await catalogBlockStarted;
+    const waitingForCommit = new Promise((resolve) => manager.on('state', () => {
+      if (manager.jobs[0].stageText === '正在更新相似关系并写入仓库记录') resolve();
+    }));
+
+    const running = manager.startQueue();
+    await waitingForCommit;
+    if (action === 'pause') await manager.pauseCurrent();
+    else await manager.cancelJob(manager.jobs[0].id);
+    releaseCatalogBlock();
+    await blockingOperation;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(manager.catalog.length, 0);
+
+    if (action === 'pause') {
+      const catalogOperationResult = await Promise.race([
+        manager.runCatalogOperation(() => 'catalog-lock-released'),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('paused task retained catalog lock')), 250))
+      ]);
+      assert.equal(catalogOperationResult, 'catalog-lock-released');
+    }
+
+    if (action === 'pause') await manager.resumeCurrent();
+    await running;
+    assert.equal(manager.jobs[0].status, action === 'pause' ? 'completed' : 'cancelled');
+    assert.equal(manager.catalog.length, action === 'pause' ? 1 : 0);
+  }
+});
+
+test('cancelling during a successful catalog save preserves the source and records a completed intake', async () => {
+  class GatedCommitStore extends FakeStore {
+    constructor() {
+      super();
+      this.saveCalls = 0;
+      this.savedCatalog = [];
+      this.saveStarted = new Promise((resolve) => { this.markSaveStarted = resolve; });
+      this.saveGate = new Promise((resolve) => { this.releaseSave = resolve; });
+    }
+    async saveCatalog(_directory, catalog) {
+      this.saveCalls += 1;
+      if (this.saveCalls === 1) {
+        this.markSaveStarted();
+        await this.saveGate;
+      }
+      this.savedCatalog = structuredClone(catalog);
+    }
+  }
+  const store = new GatedCommitStore();
+  let sourceDispositionCalls = 0;
+  const manager = new QueueManager(store, {
+    libraryDir: 'E:\\library', moveCompleted: true, processedSourceDirectory: 'E:\\completed'
+  }, { archiveRunner: async (job) => successfulArchiveResult(job) });
+  manager.completeSourceDisposition = async () => {
+    sourceDispositionCalls += 1;
+    return 'source moved';
+  };
+  manager.jobs = [{ ...queuedJob('cancel-during-save'), totalBytes: 100, intakeModeSelected: true }];
+
+  const running = manager.startQueue();
+  await store.saveStarted;
+  await manager.cancelJob('cancel-during-save');
+  store.releaseSave();
+  await running;
+
+  assert.equal(sourceDispositionCalls, 0);
+  assert.equal(manager.jobs[0].status, 'completed');
+  assert.equal(manager.catalog[0].sourceDisposition, 'move_skipped_stopping');
+  assert.match(manager.catalog[0].sourceActionError, /源项目保持原位/);
+  assert.equal(store.savedCatalog[0].sourceDisposition, 'move_skipped_stopping');
+});
+
+test('selected intake starts only applicable selected tasks and never falls back to all', async () => {
+  const calls = [];
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+    archiveRunner: async (job) => {
+      calls.push(job.id);
+      return successfulArchiveResult(job);
+    }
+  });
+  manager.jobs = ['first', 'second', 'third'].map((id) => ({ ...queuedJob(id), totalBytes: 100 }));
+
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startArchiveQueue(['second']);
+  await idle;
+  assert.deepEqual(calls, ['second']);
+  assert.equal(manager.jobs[0].status, 'queued');
+  assert.equal(manager.jobs[2].status, 'queued');
+
+  manager.jobs[0].taskKind = 'catalog_refresh';
+  await assert.rejects(() => manager.startArchiveQueue(['first']), /当前选择中没有可执行任务/);
+  assert.deepEqual(calls, ['second']);
 });
 
 test('schedule refuses a task whose estimate exceeds the remaining window', () => {
@@ -1991,24 +3166,35 @@ test('a scanned task waits for an explicit intake mode and is ignored by the sch
 });
 
 test('manual compressed-intake selection outside the schedule is recorded in the run log', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+    archiveRunner: async (job) => successfulArchiveResult(job)
+  });
   manager.jobs = [{
     ...queuedJob('scheduled'),
     intakeModeSelected: false,
     stageText: '等待选择入库方式'
   }];
   manager.canStartScheduledJob = () => ({ allowed: false, estimatedMs: 60_000, remainingMs: 0 });
-  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  const waiting = new Promise((resolve) => manager.on('state', (state) => {
+    if (state.scheduleWaiting) resolve();
+  }));
 
   await manager.startArchiveQueue();
-  await idle;
+  await waiting;
 
   assert.equal(manager.jobs[0].processingMode, 'archive');
   assert.equal(manager.jobs[0].intakeModeSelected, true);
   assert.equal(manager.scheduleWaiting, true);
+  assert.equal(manager.running, true);
+  assert.ok(manager.jobs[0].runBatchId);
   assert.ok(manager.logs.some((entry) => /已选择压缩入库/.test(entry.message)));
   assert.ok(manager.logs.some((entry) => /不在定时运行时段；已记录入库方式/.test(entry.message)));
-  assert.ok(manager.logs.some((entry) => entry.message === '队列已进入定时等待。'));
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  manager.canStartScheduledJob = () => ({ allowed: true, estimatedMs: 60_000, remainingMs: 120_000 });
+  manager.scheduleWaiting = false;
+  manager.wakeQueueScheduler();
+  await idle;
+  assert.equal(manager.jobs[0].status, 'completed');
 });
 
 test('compression estimates use persisted recent speed samples', async () => {
@@ -2038,6 +3224,158 @@ test('abnormal compression ratio waits for explicit inventory confirmation', asy
   assert.equal(manager.catalog.length, 0);
   await manager.confirmAnomaly('odd');
   assert.equal(manager.jobs[0].status, 'completed');
+  assert.equal(manager.catalog.length, 1);
+});
+
+test('anomaly confirmation refuses parent-child source conflicts before catalog commit', async () => {
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', moveCompleted: true, processedSourceDirectory: 'E:\\completed'
+  });
+  const anomaly = {
+    ...queuedJob('anomaly-parent'),
+    sourcePath: 'E:\\source\\project',
+    status: 'awaiting_anomaly_confirmation',
+    pendingCatalogRecord: {
+      id: 'anomaly-parent-record', jobId: 'anomaly-parent', title: 'parent', displayName: 'parent',
+      recordType: 'archive', manifest: [], directories: [], archiveFiles: [{ name: 'parent.7z', size: 1 }],
+      completionAction: 'move', sourceDisposition: 'move_pending', completedAt: new Date().toISOString()
+    }
+  };
+  const activeChild = {
+    ...queuedJob('active-child'),
+    sourcePath: 'E:\\source\\project\\child',
+    status: 'compressing'
+  };
+  manager.jobs = [anomaly, activeChild];
+  manager.activeRuns.set(activeChild.id, { jobId: activeChild.id });
+
+  await assert.rejects(() => manager.confirmAnomaly(anomaly.id), /上级\/子级目录正在被其他任务处理/);
+
+  assert.equal(manager.catalog.length, 0);
+  assert.equal(anomaly.status, 'awaiting_anomaly_confirmation');
+  assert.equal(anomaly.pendingCatalogRecord.id, 'anomaly-parent-record');
+});
+
+test('anomaly confirmation protects its frozen move target after settings change', async () => {
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', moveCompleted: false, processedSourceDirectory: 'E:\\new-done'
+  });
+  const anomaly = {
+    ...queuedJob('anomaly-move'), sourcePath: 'E:\\incoming\\clip.mp4', sourceType: 'video',
+    status: 'awaiting_anomaly_confirmation',
+    pendingCatalogRecord: {
+      id: 'anomaly-move-record', jobId: 'anomaly-move', title: 'clip', displayName: 'clip',
+      recordType: 'archive', manifest: [], directories: [], archiveFiles: [{ name: 'clip.7z', size: 1 }],
+      completionAction: 'move', completionDestination: 'E:\\old-done',
+      sourceDisposition: 'move_pending', completedAt: new Date().toISOString()
+    }
+  };
+  const active = {
+    ...queuedJob('active-target'), sourcePath: 'E:\\old-done\\clip.mp4', sourceType: 'video', status: 'compressing'
+  };
+  manager.jobs = [anomaly, active];
+  manager.activeRuns.set(active.id, { jobId: active.id });
+
+  await assert.rejects(() => manager.confirmAnomaly(anomaly.id), /上级\/子级目录正在被其他任务处理/);
+
+  assert.equal(manager.catalog.length, 0);
+  assert.equal(anomaly.status, 'awaiting_anomaly_confirmation');
+});
+
+test('anomalous output reservation blocks the same output until confirmation', async () => {
+  const calls = [];
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: 'E:\\library', archiveOutputDirectory: 'E:\\archives', queueConcurrency: 2,
+    autoSkipExactDuplicates: false, similarityEnabled: false
+  }, {
+    availableMemoryBytes: () => 8 * 1024 ** 3,
+    archiveRunner: async (job) => {
+      calls.push(job.id);
+      const abnormal = job.id === 'anomaly-output-first';
+      return {
+        archiveFiles: [{ name: job.archiveBaseName, size: abnormal ? 200 : 50 }],
+        archiveTotalBytes: abnormal ? 200 : 50,
+        manifest: [{ relativePath: `${job.id}.bin`, name: `${job.id}.bin`, size: 100, md5: job.id }],
+        directories: [], skippedFiles: [], passwordScheme: 'none', hasPassword: false,
+        verifiedAt: new Date().toISOString()
+      };
+    }
+  });
+  const first = { ...queuedJob('anomaly-output-first'), archiveBaseName: 'shared-output.7z', totalBytes: 100, intakeModeSelected: true };
+  const second = { ...queuedJob('anomaly-output-second'), archiveBaseName: 'shared-output.7z', totalBytes: 100, intakeModeSelected: true };
+  manager.jobs = [first, second];
+
+  const running = manager.startQueue();
+  while (first.status !== 'awaiting_anomaly_confirmation' || manager.activeRuns.size > 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual(calls, [first.id]);
+  assert.equal(manager.running, true);
+
+  await manager.confirmAnomaly(first.id);
+  await running;
+
+  assert.deepEqual(calls, [first.id, second.id]);
+  assert.equal(first.status, 'completed');
+  assert.equal(second.status, 'completed');
+});
+
+test('startup rebuilds output reservations for unresolved anomalous archives', async () => {
+  class AnomalyStore extends FakeStore {
+    async loadJobs() {
+      return [{
+        ...queuedJob('persisted-anomaly'),
+        archiveBaseName: 'persisted-output.7z',
+        status: 'awaiting_anomaly_confirmation',
+        pendingCatalogRecord: {
+          id: 'persisted-anomaly-record', archiveBaseName: 'persisted-output.7z',
+          archiveDirectory: 'E:\\archives', sourceDisposition: 'kept'
+        }
+      }];
+    }
+  }
+  const manager = new QueueManager(new AnomalyStore(), {
+    repositoryDirectory: 'E:\\library', archiveOutputDirectory: 'E:\\archives', similarityEnabled: false
+  });
+  await manager.initialize();
+  const queued = { ...queuedJob('new-output'), archiveBaseName: 'persisted-output.7z' };
+
+  assert.equal(manager.activeRunConflict(queued), 'output');
+});
+
+test('confirm and discard anomaly actions are mutually exclusive per task', async () => {
+  const store = new FakeStore();
+  let markSaveStarted;
+  let releaseSave;
+  const saveStarted = new Promise((resolve) => { markSaveStarted = resolve; });
+  const saveGate = new Promise((resolve) => { releaseSave = resolve; });
+  store.saveCatalog = async () => {
+    markSaveStarted();
+    await saveGate;
+  };
+  const manager = new QueueManager(store, {
+    repositoryDirectory: 'E:\\library', archiveOutputDirectory: 'E:\\archives', similarityEnabled: false
+  }, { trashItem: async () => {} });
+  const job = {
+    ...queuedJob('anomaly-operation-lock'),
+    status: 'awaiting_anomaly_confirmation',
+    pendingCatalogRecord: {
+      id: 'anomaly-operation-record', jobId: 'anomaly-operation-lock', title: 'locked', displayName: 'locked',
+      recordType: 'archive', manifest: [], directories: [], archiveFiles: [{ name: 'locked.7z', size: 1 }],
+      completionAction: 'keep', sourceDisposition: 'kept', completedAt: new Date().toISOString()
+    }
+  };
+  manager.jobs = [job];
+
+  const confirming = manager.confirmAnomaly(job.id);
+  await saveStarted;
+  await assert.rejects(() => manager.confirmAnomaly(job.id), /正在处理中/);
+  await assert.rejects(() => manager.discardAnomalousArchive(job.id), /正在处理中/);
+  releaseSave();
+  await confirming;
+
+  assert.equal(job.status, 'completed');
   assert.equal(manager.catalog.length, 1);
 });
 
@@ -2088,8 +3426,8 @@ test('normalization retains the most recent 200 dismissed similarity ids', async
 });
 
 test('BUG1 regression: a 0.789 percent archive ratio is held for review and discard preserves source', async (t) => {
-  const originalBytes = 16_575_432_670;
-  const archiveBytes = 130_838_769;
+  const originalBytes = 100_000;
+  const archiveBytes = 789;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-bug1-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const sourcePath = path.join(root, 'BUG1-source');
@@ -2104,7 +3442,7 @@ test('BUG1 regression: a 0.789 percent archive ratio is held for review and disc
   }, {
     archiveRunner: async () => {
       await fs.mkdir(libraryDir, { recursive: true });
-      await fs.writeFile(path.join(libraryDir, 'bug1.7z.001'), 'fake archive');
+      await fs.writeFile(path.join(libraryDir, 'bug1.7z.001'), Buffer.alloc(archiveBytes));
       return {
       archiveFolder: null,
       archiveFiles: [{ name: 'bug1.7z.001', size: archiveBytes }],
@@ -2235,6 +3573,45 @@ test('silent recycle-bin loss stops the queue until the user acknowledges the sa
   assert.equal(manager.jobs[1].status, 'completed');
   assert.equal(manager.catalog[1].sourceDisposition, 'kept');
   await fs.access(secondSource);
+});
+
+test('concurrent source trash waits for the first retention check before touching another source', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-concurrent-trash-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sources = ['first', 'second'].map((name) => path.join(root, name));
+  for (const source of sources) {
+    await fs.mkdir(source);
+    await fs.writeFile(path.join(source, 'file.bin'), 'safe');
+  }
+  const trashCalls = [];
+  const manager = new QueueManager(new FakeStore(), {
+    libraryDir: path.join(root, 'library'), autoTrashCompleted: true, queueConcurrency: 2
+  }, {
+    availableMemoryBytes: () => 8 * 1024 ** 3,
+    archiveRunner: async (job) => ({
+      archiveFiles: [{ name: `${job.id}.7z`, size: 1 }], archiveTotalBytes: 1,
+      manifest: [{ relativePath: 'file.bin', name: 'file.bin', size: 4, md5: 'abc' }],
+      directories: [], verifiedAt: new Date().toISOString()
+    }),
+    validateSourceBeforeDisposition: async () => {},
+    trashItem: async (targetPath) => {
+      trashCalls.push(targetPath);
+      await fs.rm(targetPath, { recursive: true, force: true });
+    },
+    isTrashItemPresent: async () => { throw new Error('recycle bin unavailable'); }
+  });
+  manager.jobs = sources.map((sourcePath, index) => ({
+    ...queuedJob(index === 0 ? 'first' : 'second'), sourcePath, intakeModeSelected: true,
+    totalBytes: 4
+  }));
+
+  await manager.startQueue();
+
+  assert.equal(trashCalls.length, 1);
+  assert.equal(manager.getState().safetyHalt.type, 'trash_retention');
+  const untouched = sources.find((source) => source !== trashCalls[0]);
+  await fs.access(untouched);
+  assert.equal(manager.catalog.find((record) => record.sourcePath === untouched)?.sourceDisposition, 'kept');
 });
 
 test('recycle-bin safety halt survives an application restart', async () => {
@@ -2584,6 +3961,44 @@ test('catalog deletion undo restores its archive, thumbnails and full record', a
   assert.equal(manager.getState().undoDepth, 0);
 });
 
+test('catalog deletion undo preserves a new archive created during recycle-bin restore', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-catalog-undo-conflict-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const archiveDirectory = path.join(root, 'archives');
+  const stagingDirectory = path.join(root, 'staging');
+  const archivePath = path.join(archiveDirectory, 'item.7z');
+  const trashPath = path.join(root, 'system-trash', 'archive');
+  await fs.mkdir(archiveDirectory, { recursive: true });
+  await fs.mkdir(path.dirname(trashPath), { recursive: true });
+  await fs.writeFile(archivePath, 'original');
+  const manager = new QueueManager(new FakeStore(), {
+    archiveOutputDirectory: archiveDirectory,
+    repositoryDirectory: path.join(root, 'repository'),
+    archiveStagingDirectory: stagingDirectory,
+    similarityEnabled: false
+  }, {
+    trashItem: async (targetPath) => fs.rename(targetPath, trashPath),
+    restoreTrashItem: async (targetPath) => {
+      await fs.writeFile(archivePath, 'new owner');
+      await fs.rename(trashPath, targetPath);
+      return true;
+    }
+  });
+  manager.catalog = [{
+    id: 'undo-conflict', title: 'Undo conflict', recordType: 'archive', archiveDirectory,
+    archiveFiles: [{ name: 'item.7z', size: 8 }]
+  }];
+  const deleted = await manager.deleteCatalogRecords(['undo-conflict']);
+  assert.deepEqual(deleted.deletedIds, ['undo-conflict']);
+
+  await assert.rejects(manager.undoCatalogAction(), /原压缩包无法安全撤回.*隔离文件/);
+  assert.equal(await fs.readFile(archivePath, 'utf8'), 'new owner');
+  assert.equal(manager.catalog.length, 0);
+  const quarantineRoot = path.join(stagingDirectory, 'delete-quarantine');
+  const [quarantineName] = await fs.readdir(quarantineRoot);
+  assert.equal(await fs.readFile(path.join(quarantineRoot, quarantineName, 'item.7z'), 'utf8'), 'original');
+});
+
 test('catalog operation tracking waits for a deletion before shutdown', async () => {
   let releaseTrash;
   const trashGate = new Promise((resolve) => { releaseTrash = resolve; });
@@ -2692,6 +4107,102 @@ test('catalog deletion quarantines archive volumes atomically and rejects paths 
   assert.equal(trashed.length, 2);
   assert.ok(trashed.some((targetPath) => targetPath.includes('delete-quarantine')));
   assert.ok(trashed.some((targetPath) => targetPath.endsWith('thumbnails\\job-safe')));
+});
+
+test('catalog deletion preserves a same-size archive replacement and its record', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-archive-identity-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const archiveDirectory = path.join(root, 'archives');
+  const archivePath = path.join(archiveDirectory, 'item.7z');
+  await fs.mkdir(archiveDirectory, { recursive: true });
+  await fs.writeFile(archivePath, 'original');
+  const original = await fs.stat(archivePath, { bigint: true });
+  const replacementPath = path.join(archiveDirectory, 'replacement.tmp');
+  await fs.writeFile(replacementPath, 'replaced');
+  await fs.rename(replacementPath, archivePath);
+  const store = new FakeStore();
+  store.saveCatalog = async (_library, records) => { store.catalog = structuredClone(records); };
+  let trashCalls = 0;
+  const manager = new QueueManager(store, {
+    archiveOutputDirectory: archiveDirectory,
+    repositoryDirectory: path.join(root, 'repository'),
+    archiveStagingDirectory: path.join(root, 'staging')
+  }, { trashItem: async () => { trashCalls += 1; } });
+  manager.catalog = [{
+    id: 'identity-record', title: 'Identity', recordType: 'archive', archiveDirectory,
+    archiveFiles: [{ name: 'item.7z', size: Number(original.size), identity: {
+      device: String(original.dev), inode: String(original.ino),
+      modifiedNs: String(original.mtimeNs), createdNs: String(original.birthtimeNs)
+    } }]
+  }];
+
+  const result = await manager.deleteCatalogRecords(['identity-record']);
+  assert.deepEqual(result.deletedIds, []);
+  assert.match(result.failures[0].message, /身份与记录不符/);
+  assert.equal(manager.catalog[0].id, 'identity-record');
+  assert.equal(await fs.readFile(archivePath, 'utf8'), 'replaced');
+  assert.equal(trashCalls, 0);
+});
+
+test('catalog deletion never overwrites a new file when quarantine rollback fails', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-delete-rollback-conflict-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const archiveDirectory = path.join(root, 'archives');
+  const stagingDirectory = path.join(root, 'staging');
+  const archivePath = path.join(archiveDirectory, 'item.7z');
+  await fs.mkdir(archiveDirectory, { recursive: true });
+  await fs.writeFile(archivePath, 'original');
+  const original = await fs.stat(archivePath, { bigint: true });
+  const manager = new QueueManager(new FakeStore(), {
+    archiveOutputDirectory: archiveDirectory,
+    repositoryDirectory: path.join(root, 'repository'),
+    archiveStagingDirectory: stagingDirectory
+  }, { trashItem: async () => {
+    await fs.writeFile(archivePath, 'new owner');
+    throw new Error('回收站暂不可用');
+  } });
+  manager.catalog = [{
+    id: 'rollback-conflict', title: 'Rollback conflict', recordType: 'archive', archiveDirectory,
+    archiveFiles: [{ name: 'item.7z', size: Number(original.size), identity: {
+      device: String(original.dev), inode: String(original.ino),
+      modifiedNs: String(original.mtimeNs), createdNs: String(original.birthtimeNs)
+    } }]
+  }];
+
+  const result = await manager.deleteCatalogRecords(['rollback-conflict']);
+  assert.deepEqual(result.deletedIds, []);
+  assert.match(result.failures[0].message, /部分文件未能回滚.*隔离目录/);
+  assert.equal(manager.catalog[0].id, 'rollback-conflict');
+  assert.equal(await fs.readFile(archivePath, 'utf8'), 'new owner');
+  const quarantineRoot = path.join(stagingDirectory, 'delete-quarantine');
+  const [quarantineName] = await fs.readdir(quarantineRoot);
+  assert.equal(await fs.readFile(path.join(quarantineRoot, quarantineName, 'item.7z'), 'utf8'), 'original');
+});
+
+test('catalog deletion preserves a legacy archive when its recorded size differs', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-legacy-archive-size-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const archiveDirectory = path.join(root, 'archives');
+  const archivePath = path.join(archiveDirectory, 'item.7z');
+  await fs.mkdir(archiveDirectory, { recursive: true });
+  await fs.writeFile(archivePath, 'replacement');
+  let trashCalls = 0;
+  const manager = new QueueManager(new FakeStore(), {
+    archiveOutputDirectory: archiveDirectory,
+    repositoryDirectory: path.join(root, 'repository'),
+    archiveStagingDirectory: path.join(root, 'staging')
+  }, { trashItem: async () => { trashCalls += 1; } });
+  manager.catalog = [{
+    id: 'legacy-record', title: 'Legacy', recordType: 'archive', archiveDirectory,
+    archiveFiles: [{ name: 'item.7z', size: 8 }]
+  }];
+
+  const result = await manager.deleteCatalogRecords(['legacy-record']);
+  assert.deepEqual(result.deletedIds, []);
+  assert.match(result.failures[0].message, /身份与记录不符/);
+  assert.equal(manager.catalog[0].id, 'legacy-record');
+  assert.equal(await fs.readFile(archivePath, 'utf8'), 'replacement');
+  assert.equal(trashCalls, 0);
 });
 
 test('catalog deletion can restore a moved original before removing the archive record', async (t) => {
@@ -3041,6 +4552,70 @@ test('inventory-only queue stores a verified manifest without creating an archiv
   assert.equal(manager.catalog[0].tags[0], '未压缩');
   assert.equal(manager.catalog[0].sourceDisposition, 'kept');
   assert.equal((await fs.stat(sourcePath)).isDirectory(), true);
+});
+
+test('automatic exact-duplicate skip rejects a manifest made before a new source file appeared', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-auto-skip-stale-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'incoming');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'same.txt'), 'same');
+  const staleManifest = await buildManifest(sourcePath, 'directory');
+  await fs.writeFile(path.join(sourcePath, 'new.txt'), 'new');
+  const manager = new QueueManager(new FakeStore(), {
+    archiveOutputDirectory: path.join(root, 'output'),
+    archiveStagingDirectory: path.join(root, 'staging'),
+    repositoryDirectory: path.join(root, 'warehouse'),
+    autoSkipExactDuplicates: true
+  }, { archiveRunner: async (_job, _config, hooks) => hooks.onManifestReady(staleManifest) });
+  manager.catalog = [{ id: 'existing', title: '已入库项目', manifest: staleManifest }];
+  manager.jobs = [{ ...queuedJob('incoming'), sourcePath, totalBytes: 4 }];
+  await manager.startQueue();
+  assert.equal(manager.jobs[0].errorCode, 'SOURCE_CHANGED');
+  assert.notEqual(manager.jobs[0].status, 'skipped_duplicate');
+});
+
+test('frequent progress sends only the current job without rebuilding state', async () => {
+  const manager = new QueueManager(new FakeStore(), { repositoryDirectory: 'E:\\warehouse' });
+  manager.catalog = Array.from({ length: 1200 }, (_, index) => ({ id: `record-${index}` }));
+  manager.getState = () => { throw new Error('full state must not be built for progress'); };
+  const events = [];
+  manager.on('progress', (progress) => events.push(progress));
+  const job = { id: 'progress-job', status: 'inventorying', progress: 12, stageText: '正在生成缩略图' };
+  manager.emitProgressThrottled(job, 1);
+  job.progress = 34;
+  job.stageText = '正在生成缩略图 · 已处理 4/10';
+  manager.emitProgressThrottled(job, 1);
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.deepEqual(events, [{ jobId: 'progress-job', stage: 'inventorying', percentage: 34,
+    stageText: '正在生成缩略图 · 已处理 4/10' }]);
+  assert.ok(JSON.stringify(events[0]).length < 300);
+});
+
+test('inventory-only detects a new file before catalog commit', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-inventory-changed-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source-item');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'one.txt'), 'inventory only');
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'),
+    archiveOutputDirectory: path.join(root, 'archives'),
+    archiveStagingDirectory: path.join(root, 'staging')
+  }, {
+    createThumbnails: async (_job, manifest) => {
+      await fs.writeFile(path.join(sourcePath, 'new.txt'), 'added after manifest');
+      return manifest;
+    }
+  });
+  manager.jobs = [manager.createJob({ sourcePath, sourceType: 'directory', displayName: '直接入库示例',
+    fileCount: 1, totalBytes: 14 })];
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startInventoryOnlyQueue();
+  await idle;
+  assert.equal(manager.catalog.length, 0);
+  assert.notEqual(manager.jobs[0].status, 'completed');
+  assert.equal(manager.jobs[0].errorCode, 'SOURCE_CHANGED');
 });
 
 test('warehouse compression scans at execution time and waits for a decision when the source changed', async (t) => {
@@ -3572,6 +5147,92 @@ test('anomaly confirmation restores the in-memory catalog when persistence fails
   assert.equal(job.pendingCatalogRecord.id, pendingRecord.id);
 });
 
+test('anomaly confirmation reports a completed move when the final catalog save fails', async () => {
+  const store = new FakeStore();
+  const persistedLogs = [];
+  store.appendLog = async (_directory, entry) => { persistedLogs.push(entry); };
+  let catalogSaveCalls = 0;
+  store.saveCatalog = async (_directory, records) => {
+    catalogSaveCalls += 1;
+    if (catalogSaveCalls === 1) {
+      store.catalog = structuredClone(records);
+      return;
+    }
+    const error = new Error('simulated final catalog denial');
+    error.code = 'EACCES';
+    throw error;
+  };
+  const movedTo = 'E:\\completed\\anomaly-move-failure';
+  const manager = new QueueManager(store, {
+    repositoryDirectory: 'E:\\warehouse',
+    similarityEnabled: false
+  }, {
+    moveCompletedItem: async () => movedTo,
+    validateSourceBeforeDisposition: async () => {}
+  });
+  const job = {
+    ...queuedJob('anomaly-move-failure'),
+    status: 'awaiting_anomaly_confirmation',
+    pendingCatalogRecord: {
+      id: 'anomaly-move-failure-record',
+      jobId: 'anomaly-move-failure',
+      title: 'anomaly',
+      displayName: 'anomaly',
+      recordType: 'archive',
+      manifest: [],
+      archiveFiles: [{ name: 'anomaly.7z', size: 1 }],
+      completionAction: 'move',
+      completionDestination: 'E:\\completed',
+      sourceDisposition: 'move_pending',
+      completedAt: new Date().toISOString()
+    }
+  };
+  manager.jobs = [job];
+
+  await manager.confirmAnomaly(job.id);
+
+  assert.equal(job.status, 'completed_cleanup_failed');
+  assert.equal(job.errorCode, 'SOURCE_DISPOSITION_COMMIT_FAILED');
+  assert.match(job.stageText, /源文件后处理已完成/);
+  assert.equal(job.sourceDispositionRecovery.movedTo, movedTo);
+  assert.equal(job.pendingCatalogRecord, undefined);
+  assert.equal(manager.catalog[0].sourceDisposition, 'moved');
+  assert.equal(store.catalog[0].sourceDisposition, 'move_pending');
+  assert.ok(persistedLogs.some((entry) => entry.message.includes(movedTo)));
+  await assert.rejects(manager.confirmAnomaly(job.id), /没有等待确认的大小异常/);
+  const cleared = await manager.clearCompletedJobs();
+  assert.equal(cleared.removedCount, 0);
+  assert.equal(manager.jobs[0], job);
+});
+
+test('background similarity maintenance waits for the catalog operation boundary', async () => {
+  const store = new FakeStore();
+  let rebuildStarted = false;
+  let saveStarted = false;
+  store.saveCatalog = async () => { saveStarted = true; };
+  const manager = new QueueManager(store, { repositoryDirectory: 'E:\\warehouse' });
+  manager.rebuildAllSimilarityRelations = async () => { rebuildStarted = true; };
+  let releaseCatalogBlock;
+  let markCatalogBlockStarted;
+  const catalogBlockStarted = new Promise((resolve) => { markCatalogBlockStarted = resolve; });
+  const blocker = manager.runCatalogOperation(async () => {
+    markCatalogBlockStarted();
+    await new Promise((resolve) => { releaseCatalogBlock = resolve; });
+  });
+  await catalogBlockStarted;
+
+  const maintenance = manager.rebuildAndPersistSimilarityRelations('maintenance');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(rebuildStarted, false);
+  assert.equal(saveStarted, false);
+
+  releaseCatalogBlock();
+  await blocker;
+  await maintenance;
+  assert.equal(rebuildStarted, true);
+  assert.equal(saveStarted, true);
+});
+
 test('cancelling during thumbnails recovers the published archive and does not commit the catalog', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-cancel-after-publication-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -3608,7 +5269,7 @@ test('cancelling during thumbnails recovers the published archive and does not c
       };
     },
     createThumbnails: async () => {
-      manager.abortController.abort();
+      manager.activeRuns.get('cancel-after-publication').abortController.abort();
       throw new CancelledError();
     }
   });
@@ -3701,6 +5362,7 @@ test('source disposition commit failure is reported without falsely claiming tha
   await fs.access(path.join(movedTo, 'source.bin'));
   await fs.access(path.join(output, job.archiveBaseName));
   assert.ok(manager.logs.some((entry) => entry.level === 'error' && entry.message.includes('请勿重试归档')));
+  assert.ok(manager.logs.some((entry) => entry.level === 'error' && entry.message.includes(movedTo)));
 });
 
 async function pathExistsForTest(targetPath) {
@@ -3825,13 +5487,18 @@ test('unchanged refresh preserves content objects and does not generate previews
 });
 
 test('individual backup review blocks only conflicts and preserves queued settings and large-task review', async (t) => {
-  const { manager, record } = await refreshFixture(t);
+  const { root, sourcePath, manager, record } = await refreshFixture(t);
   manager.config.recordBackupLocation = true;
   manager.config.backupLocation = 'current-backup';
+  const updatePath = path.join(root, 'update-source');
+  const samePath = path.join(root, 'same-source');
+  await fs.cp(sourcePath, updatePath, { recursive: true });
+  await fs.cp(sourcePath, samePath, { recursive: true });
   manager.catalog = [
     { ...record, id: 'keep', backupLocation: 'old-backup' },
-    { ...record, id: 'update', backupLocation: 'another-backup', originalBytes: LARGE_TASK_BYTES + 1 },
-    { ...record, id: 'same', backupLocation: 'current-backup' }
+    { ...record, id: 'update', sourcePath: updatePath, originalSourcePath: updatePath,
+      backupLocation: 'another-backup', originalBytes: LARGE_TASK_BYTES + 1 },
+    { ...record, id: 'same', sourcePath: samePath, originalSourcePath: samePath, backupLocation: 'current-backup' }
   ];
   await manager.queueCatalogRecordsForCompression(['keep', 'update', 'same'], { confirmBackupLocationIndividually: true });
   const [keep, update, same] = manager.jobs;
@@ -3977,6 +5644,65 @@ test('same-source drag and parent scan use cached counts without enumerating the
   assert.equal(manager.jobs[0].sourceCatalogRecordId, record.id);
 });
 
+test('same-source intake recognizes a catalog path through a directory alias', async (t) => {
+  const { root, sourcePath, manager, record } = await refreshFixture(t);
+  const alias = path.join(os.tmpdir(), `hamster-source-alias-${path.basename(root)}`);
+  try { await fs.symlink(root, alias, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { t.skip(`Directory alias creation unavailable: ${error.code}`); return; }
+  t.after(() => fs.unlink(alias));
+  record.sourcePath = record.originalSourcePath = path.join(alias, path.basename(sourcePath));
+
+  await manager.addSingle(sourcePath);
+
+  assert.equal(manager.jobs[0].sourceCatalogRecordId, record.id);
+  assert.equal(manager.jobs[0].taskKind, 'pending_existing');
+  assert.equal(manager.jobs[0].summaryPending, true);
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startInventoryOnlyQueue();
+  await idle;
+  assert.equal(manager.jobs[0].status, 'completed');
+  assert.equal(manager.catalog.length, 1);
+});
+
+test('same-source intake recognizes a direct directory alias with a different name', async (t) => {
+  const { root, sourcePath, manager, record } = await refreshFixture(t);
+  const alias = path.join(root, 'renamed-alias');
+  try { await fs.symlink(sourcePath, alias, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { t.skip(`Directory alias creation unavailable: ${error.code}`); return; }
+  record.sourcePath = record.originalSourcePath = alias;
+
+  await manager.addSingle(sourcePath);
+
+  assert.equal(manager.jobs[0].sourceCatalogRecordId, record.id);
+  assert.equal(manager.jobs[0].taskKind, 'pending_existing');
+  assert.equal(manager.jobs[0].summaryPending, true);
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.startInventoryOnlyQueue();
+  await idle;
+  assert.equal(manager.jobs[0].status, 'completed');
+  assert.equal(manager.catalog.length, 1);
+});
+
+test('concurrent direct intake and junction-root scanning keep one canonical source task', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-intake-junction-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const parent = path.join(root, 'parent');
+  const source = path.join(parent, 'project');
+  const alias = path.join(root, 'parent-alias');
+  await fs.mkdir(source, { recursive: true });
+  await fs.writeFile(path.join(source, 'sample.txt'), 'one');
+  try { await fs.symlink(parent, alias, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { t.skip(`Junction creation unavailable: ${error.code}`); return; }
+  const manager = new QueueManager(new FakeStore(), {
+    repositoryDirectory: path.join(root, 'warehouse'), smallItemFilter: false
+  });
+  await Promise.all([manager.addSingle(source), manager.addSingle(path.join(alias, 'project'))]);
+  assert.equal(manager.jobs.length, 1);
+  assert.equal(manager.jobs[0].sourcePath, await fs.realpath(source));
+  await manager.scanSource(alias);
+  assert.equal(manager.jobs.length, 1);
+});
+
 test('shutdown retains unfinished inventory refresh as queued in its original batch', async (t) => {
   const { manager, record } = await refreshFixture(t);
   const job = manager.createJob({ sourcePath: record.sourcePath, sourceType: 'directory', displayName: 'refresh',
@@ -3985,9 +5711,9 @@ test('shutdown retains unfinished inventory refresh as queued in its original ba
   manager.jobs = [job];
   let started;
   const startSignal = new Promise((resolve) => { started = resolve; });
-  manager.prepareExistingSourceOperation = async () => {
+  manager.prepareExistingSourceOperation = async (_job, _record, _manifest, runContext) => {
     started();
-    await new Promise((resolve) => manager.abortController.signal.addEventListener('abort', resolve, { once: true }));
+    await new Promise((resolve) => runContext.abortController.signal.addEventListener('abort', resolve, { once: true }));
     throw new CancelledError();
   };
   const running = manager.startQueue([job.id]);

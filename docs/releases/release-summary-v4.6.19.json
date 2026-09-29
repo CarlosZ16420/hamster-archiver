@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.6.19",
+  "notes": {
+    "zh-CN": [
+      "仓库搜索不再遗漏超过 2000 条的常见词或 MD5 匹配项；大小异常确认后会准确提示源文件已执行的移动及恢复位置。",
+      "缩略图进度改为轻量更新；普通记录状态变化不再重建无关仓库索引。",
+      "未压缩入库和完全重复自动跳过前重新核对源目录，自定义暂存路径继续保留。",
+      "性能诊断仅留在进程内，用户资料与仓库格式无需迁移。"
+    ],
+    "en-US": [
+      "Warehouse search includes matches beyond 2,000 items; abnormal archive confirmation reports completed source moves and recovery details accurately.",
+      "Thumbnail progress uses lightweight updates, and metadata-only saves avoid unrelated warehouse index rebuilds.",
+      "Inventory-only commits and exact duplicate auto-skip recheck the source; custom staging remains respected.",
+      "Performance diagnostics stay in memory, with no warehouse or user data migration."
+    ]
+  }
+}

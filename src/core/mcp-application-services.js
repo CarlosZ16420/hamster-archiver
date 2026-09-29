@@ -80,6 +80,7 @@ async function assertNoLinkedAncestor(targetPath, fsImpl = fsp) {
 async function inspectUserDataState(root, { fsImpl = fsp } = {}) {
   const resolvedRoot = normalizePath(root, '当前用户数据目录');
   const hash = crypto.createHash('sha256');
+  const exitStableHash = crypto.createHash('sha256');
   const impact = { files: 0, directories: 0, bytes: 0 };
 
   async function visit(absolutePath, relativePath) {
@@ -90,7 +91,9 @@ async function inspectUserDataState(root, { fsImpl = fsp } = {}) {
     const normalizedRelative = String(relativePath || '').replace(/\\/g, '/');
     if (stats.isDirectory()) {
       impact.directories += 1;
-      hash.update(`d\0${normalizedRelative}\0${Math.trunc(stats.mtimeMs)}\0`);
+      const entry = `d\0${normalizedRelative}\0${Math.trunc(stats.mtimeMs)}\0`;
+      hash.update(entry);
+      exitStableHash.update(entry);
       const entries = (await fsImpl.readdir(absolutePath, { withFileTypes: true }))
         .filter((entry) => relativePath || !MIGRATION_SKIPPED_ROOT_ENTRIES.has(entry.name))
         .sort((left, right) => left.name.localeCompare(right.name, 'en'));
@@ -105,11 +108,20 @@ async function inspectUserDataState(root, { fsImpl = fsp } = {}) {
     }
     impact.files += 1;
     impact.bytes += stats.size;
-    hash.update(`f\0${normalizedRelative}\0${stats.size}\0${Math.trunc(stats.mtimeMs)}\0`);
+    const entry = `f\0${normalizedRelative}\0${stats.size}\0${Math.trunc(stats.mtimeMs)}\0`;
+    hash.update(entry);
+    exitStableHash.update(normalizedRelative === 'logs/app.log'
+      ? `f\0${normalizedRelative}\0exit-log\0`
+      : entry);
   }
 
   await visit(resolvedRoot, '');
-  return { root: resolvedRoot, impact, treeFingerprint: hash.digest('hex') };
+  return {
+    root: resolvedRoot,
+    impact,
+    treeFingerprint: hash.digest('hex'),
+    exitStableTreeFingerprint: exitStableHash.digest('hex')
+  };
 }
 
 function stateFingerprint(payload) {
@@ -290,6 +302,7 @@ function createMcpApplicationServices(context = {}) {
       targetPid: processId,
       currentVersion: String(app.getVersion()),
       expectedSourceTreeFingerprint: finalSource.treeFingerprint,
+      expectedExitStableSourceTreeFingerprint: finalSource.exitStableTreeFingerprint,
       originalLocation,
       runRoot,
       startedFile,
@@ -363,7 +376,7 @@ function createMcpApplicationServices(context = {}) {
         if (!['manual', 'automatic'].includes(mode)) throw codedError('INVALID_UPDATE_MODE', '更新检查模式无效。');
         const result = await checkForUpdates({
           currentVersion: app.getVersion(),
-          distributionMode: isInstalledDistribution ? 'installed' : 'portable',
+          distributionMode: process.platform === 'darwin' ? 'mac' : isInstalledDistribution ? 'installed' : 'portable',
           includeHistory: mode === 'manual',
           stableBranch: 'main',
           fetchImpl: net?.fetch,
@@ -373,6 +386,7 @@ function createMcpApplicationServices(context = {}) {
         return publicUpdateResult(result);
       },
       async install({ version } = {}) {
+        if (process.platform === 'darwin') throw codedError('UPDATE_UNSUPPORTED', 'Mac 版请从 GitHub 发布页手动下载新版应用。');
         if (updateInstallInFlight) throw codedError('UPDATE_BUSY', '另一项更新操作正在进行。');
         if (!app.isPackaged) throw codedError('PACKAGED_APP_REQUIRED', '只有打包后的 Windows 应用可以执行自动更新。');
         ensureQueueIdle('更新');
@@ -403,6 +417,7 @@ function createMcpApplicationServices(context = {}) {
         }
       },
       async installPackage({ packagePath } = {}) {
+        if (process.platform === 'darwin') throw codedError('UPDATE_UNSUPPORTED', 'Mac 版请从 GitHub 发布页手动下载新版应用。');
         if (updateInstallInFlight) throw codedError('UPDATE_BUSY', '另一项更新操作正在进行。');
         if (!app.isPackaged) throw codedError('PACKAGED_APP_REQUIRED', '只有打包后的 Windows 应用可以从本地发行包更新。');
         ensureQueueIdle('更新');

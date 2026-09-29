@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hamster-archiver:task-receipt:v2",
+  "title": "Hamster Archiver task receipt v2",
+  "type": "object",
+  "required": ["schemaVersion", "ok", "task", "outcome", "runtime", "effectiveOptions", "summary", "jobs", "results", "existingRecords", "failures", "warnings", "decision", "nextAction", "evidence"],
+  "properties": {
+    "schemaVersion": { "const": 2 },
+    "ok": { "type": "boolean" },
+    "task": {
+      "type": "object",
+      "required": ["id", "requestId", "status", "terminal", "jobIds"],
+      "properties": {
+        "id": { "type": "string" },
+        "requestId": { "type": "string" },
+        "status": { "enum": ["accepted", "preparing", "queued", "running", "needs_input", "needs_confirmation", "paused", "completed", "completed_with_warnings", "partial_failed", "failed", "cancelling", "cancelled", "recovery_required"] },
+        "terminal": { "type": "boolean" },
+        "jobIds": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "outcome": { "enum": ["pending", "needs_input", "no_change", "created", "updated", "already_present", "skipped", "completed", "partial_failed", "failed", "cancelled", "recovery_required"] },
+    "runtime": {
+      "type": "object",
+      "required": ["applicationRoot", "userDataRoot", "repositoryDirectory", "instanceId"],
+      "properties": {
+        "applicationRoot": { "type": ["string", "null"] },
+        "userDataRoot": { "type": ["string", "null"] },
+        "repositoryDirectory": { "type": "string" },
+        "instanceId": { "type": ["string", "null"] }
+      }
+    },
+    "effectiveOptions": {
+      "type": "object",
+      "required": ["mode", "sourceDisposition", "layout", "onDuplicate"],
+      "properties": {
+        "mode": { "enum": ["archive", "inventory_only"] },
+        "sourceDisposition": { "enum": ["keep", "move", "trash"] },
+        "layout": { "enum": ["single", "children", "ask"] },
+        "onDuplicate": { "enum": ["use_existing", "ask", "create_new", "skip"] }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["requestedProjects", "created", "updated", "reused", "skipped", "failed", "cancelled", "pending"],
+      "properties": {
+        "requestedProjects": { "type": ["integer", "null"], "minimum": 0 },
+        "created": { "type": "integer", "minimum": 0 },
+        "updated": { "type": "integer", "minimum": 0 },
+        "reused": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "cancelled": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "jobs": { "type": "array", "items": { "type": "object", "required": ["id", "status"], "properties": { "id": { "type": "string" }, "status": { "enum": ["queued", "inventorying", "compressing", "verifying", "moving", "cancelling", "awaiting_confirmation", "awaiting_duplicate_confirmation", "awaiting_source_change_confirmation", "awaiting_anomaly_confirmation", "awaiting_trash_safety_confirmation", "completed", "completed_cleanup_failed", "skipped_duplicate", "failed", "cancelled"] }, "sourceDispositionRecovery": { "type": "object", "required": ["action", "sourceDisposition", "originalSourcePath", "movedTo", "trashedAt"], "properties": { "action": { "enum": ["move", "trash"] }, "sourceDisposition": { "enum": ["moved", "moved_source_retained", "trashed"] }, "originalSourcePath": { "type": "string" }, "movedTo": { "type": "string" }, "trashedAt": { "type": "string" } } } } } },
+    "results": { "type": "array", "items": { "type": "object", "required": ["recordId", "action", "archiveVerification"], "properties": { "recordId": { "type": "string" }, "action": { "enum": ["created", "updated"] }, "archiveVerification": { "enum": ["verified", "unknown", "not_applicable"] } } } },
+    "existingRecords": { "type": "array" },
+    "failures": { "type": "array" },
+    "warnings": { "type": "array" },
+    "decision": { "type": ["object", "null"] },
+    "nextAction": { "type": ["object", "null"] },
+    "evidence": { "type": ["object", "null"] }
+  }
+}

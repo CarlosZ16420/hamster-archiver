@@ -105,7 +105,7 @@ async function runUserDataMigration(plan, dependencies = {}) {
       throw new Error('目标目录在应用退出前已经出现，已停止迁移以避免覆盖或合并。');
     }
     const current = await inspectState(plan.sourceDirectory, { fsImpl });
-    if (current.treeFingerprint !== plan.expectedSourceTreeFingerprint) {
+    if (current.exitStableTreeFingerprint !== plan.expectedExitStableSourceTreeFingerprint) {
       throw new Error('应用退出后的用户数据状态与调度时不一致，已停止迁移。');
     }
 
@@ -184,6 +184,7 @@ async function readPlan(planPath, fsImpl = fs) {
     'applicationRoot', 'runRoot', 'startedFile', 'cancelledFile', 'validationFile'
   ];
   if (plan.schemaVersion !== 1 || !Number.isSafeInteger(plan.targetPid) || plan.targetPid <= 0 ||
+      !/^[0-9a-f]{64}$/.test(plan.expectedExitStableSourceTreeFingerprint) ||
       requiredPaths.some((key) => !path.isAbsolute(String(plan[key] || '')))) {
     throw new Error('用户数据迁移计划无效。');
   }

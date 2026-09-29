@@ -5,6 +5,7 @@ const fsSync = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 const { createProjectFingerprint, normalizeName, similarityCandidateKeys } = require('./duplicate-check');
+const { performanceTrace } = require('./performance-trace');
 
 const SCHEMA_VERSION = 3;
 const WAREHOUSE_INITIALIZED_MARKER = '.warehouse-initialized';
@@ -29,6 +30,39 @@ function stableJson(value) {
 
 function contentHash(json) {
   return crypto.createHash('sha256').update(json).digest('hex');
+}
+
+function indexedManifest(record) {
+  return (Array.isArray(record?.manifest) ? record.manifest : []).map((file) => [
+    String(file.relativePath || ''), String(file.name || ''), Number(file.size) || 0,
+    String(file.md5 || ''), String(file.mediaType || '')
+  ]);
+}
+
+function classifyCatalogChange(previous, next) {
+  if (!previous) return {
+    tagsChanged: true, fileIndexChanged: true, nameIndexChanged: true,
+    searchIndexChanged: true, similarityIndexChanged: true, projectFingerprintChanged: true
+  };
+  const oldManifest = indexedManifest(previous);
+  const newManifest = indexedManifest(next);
+  const fileIndexChanged = stableJson(oldManifest) !== stableJson(newManifest);
+  const nameIndexChanged = previous.title !== next.title || previous.displayName !== next.displayName;
+  const tagsChanged = stableJson(previous.tags || []) !== stableJson(next.tags || []);
+  const searchIndexChanged = nameIndexChanged || tagsChanged ||
+    ['notes', 'backupLocation', 'sourcePath', 'archiveBaseName'].some((key) => previous[key] !== next[key]) ||
+    stableJson(oldManifest.map((file) => file[0])) !== stableJson(newManifest.map((file) => file[0]));
+  const videoExtensionsChanged = stableJson((previous.manifest || []).map((file) => file.extension)) !==
+    stableJson((next.manifest || []).map((file) => file.extension));
+  const similarityInputsChanged = nameIndexChanged || fileIndexChanged || videoExtensionsChanged ||
+    previous.sourceType !== next.sourceType || previous.totalBytes !== next.totalBytes ||
+    previous.originalBytes !== next.originalBytes;
+  const similarityIndexChanged = similarityInputsChanged &&
+    stableJson(similarityCandidateKeys(previous, [])) !== stableJson(similarityCandidateKeys(next, []));
+  const projectFingerprintChanged = stableJson(oldManifest.map((file) => [file[0] || file[1], file[2], file[3]])) !==
+    stableJson(newManifest.map((file) => [file[0] || file[1], file[2], file[3]]));
+  return { tagsChanged, fileIndexChanged, nameIndexChanged, searchIndexChanged,
+    similarityIndexChanged, projectFingerprintChanged };
 }
 
 function initializeSchema(database) {
@@ -253,6 +287,14 @@ function loadCatalog(database) {
 }
 
 function saveCatalog(database, records, options = {}) {
+  const transactionStartedAt = performance.now();
+  const timings = new Map();
+  const timed = (stage, action) => {
+    const startedAt = performance.now();
+    try { return action(); } finally {
+      timings.set(stage, (timings.get(stage) || 0) + performance.now() - startedAt);
+    }
+  };
   const normalized = Array.isArray(records) ? records : [];
   const deleteMissing = options.deleteMissing !== false;
   const sortIndexById = options.sortIndexById instanceof Map ? options.sortIndexById : null;
@@ -307,17 +349,12 @@ function saveCatalog(database, records, options = {}) {
       content_hash = excluded.content_hash,
       complete_md5 = excluded.complete_md5
   `);
-  const indexedQuery = database.prepare('SELECT record_id FROM catalog_search_terms WHERE record_id = ? LIMIT 1');
+  const indexedQuery = database.prepare('SELECT record_id FROM catalog_project_fingerprints WHERE record_id = ? LIMIT 1');
   const indexedIds = new Set(deleteMissing
-    ? database.prepare('SELECT DISTINCT record_id FROM catalog_search_terms').all().map((row) => row.record_id)
+    ? database.prepare('SELECT record_id FROM catalog_project_fingerprints').all().map((row) => row.record_id)
     : normalized.filter((record) => indexedQuery.get(String(record?.id || ''))).map((record) => String(record.id)));
   const previousJsonQuery = database.prepare('SELECT record_json FROM catalog_records WHERE id = ?');
-  const withoutRelationships = (record) => {
-    const { similarRecords, possibleDuplicate, similarityVersion, ...rest } = record;
-    return stableJson(rest);
-  };
-
-  return withTransaction(database, () => {
+  const result = withTransaction(database, () => {
     let changed = 0;
     for (let index = 0; index < normalized.length; index += 1) {
       const record = normalized[index];
@@ -325,19 +362,19 @@ function saveCatalog(database, records, options = {}) {
       const id = String(record.id);
       if (keepIds.has(id)) throw new Error(`仓库记录 id 重复：${id}`);
       keepIds.add(id);
+      const jsonStartedAt = performance.now();
       const json = stableJson(record);
       const hash = contentHash(json);
+      timings.set('catalog-json', (timings.get('catalog-json') || 0) + performance.now() - jsonStartedAt);
       const previous = existing.get(id);
       const sortIndex = sortIndexById?.get(id) ?? index;
       if (previous?.content_hash === hash && indexedIds.has(id)) {
         if (Number(previous.sort_index) !== sortIndex) updateSortIndex.run(sortIndex, id);
         continue;
       }
-      // Relationship-only updates do not invalidate files, search keys or
-      // fingerprints. Verify against persisted JSON rather than trusting a hint.
-      const relationshipsOnly = previous && indexedIds.has(id) &&
-        withoutRelationships(JSON.parse(previousJsonQuery.get(id).record_json)) === withoutRelationships(record);
-      upsertRecord.run(
+      const changes = classifyCatalogChange(previous && indexedIds.has(id)
+        ? JSON.parse(previousJsonQuery.get(id).record_json) : null, record);
+      timed('catalog-json', () => upsertRecord.run(
         id,
         sortIndex,
         String(record.title || ''),
@@ -350,50 +387,41 @@ function saveCatalog(database, records, options = {}) {
         record.possibleDuplicate ? 1 : 0,
         hash,
         json
-      );
-      if (relationshipsOnly) {
-        changed += 1;
-        continue;
+      ));
+      if (changes.tagsChanged) {
+        deleteTags.run(id);
+        for (const tag of Array.isArray(record.tags) ? record.tags : []) insertTag.run(id, String(tag));
       }
-      deleteTags.run(id);
-      for (const tag of Array.isArray(record.tags) ? record.tags : []) {
-        insertTag.run(id, String(tag));
+      if (changes.fileIndexChanged) timed('catalog-files-index', () => {
+        deleteFiles.run(id);
+        for (const [fileIndex, file] of (Array.isArray(record.manifest) ? record.manifest : []).entries()) {
+          insertFile.run(id, fileIndex, String(file.relativePath || ''), String(file.name || ''),
+            Number(file.size) || 0, String(file.md5 || ''), String(file.mediaType || ''));
+        }
+      });
+      if (changes.nameIndexChanged) {
+        deleteNameKeys.run(id);
+        for (const name of [record.title, record.displayName]) {
+          const nameKey = normalizeName(String(name || ''));
+          if (nameKey) insertNameKey.run(id, nameKey);
+        }
       }
-      deleteFiles.run(id);
-      for (const [fileIndex, file] of (Array.isArray(record.manifest) ? record.manifest : []).entries()) {
-        insertFile.run(
-          id,
-          fileIndex,
-          String(file.relativePath || ''),
-          String(file.name || ''),
-          Number(file.size) || 0,
-          String(file.md5 || ''),
-          String(file.mediaType || '')
-        );
-      }
-      deleteNameKeys.run(id);
-      for (const name of [record.title, record.displayName]) {
-        const nameKey = normalizeName(String(name || ''));
-        if (nameKey) insertNameKey.run(id, nameKey);
-      }
-      deleteSearchTerms.run(id);
-      const searchableFields = [
-        record.title, record.displayName, ...(record.tags || []), record.notes,
-        record.backupLocation, record.sourcePath, record.archiveBaseName,
-        ...(record.manifest || []).map((file) => file.relativePath)
-      ];
-      for (const term of new Set(searchableFields.flatMap(searchGrams))) insertSearchTerm.run(id, term);
-      deleteSimilarityKeys.run(id);
-      for (const key of similarityCandidateKeys(record, [])) insertSimilarityKey.run(id, key);
-      const fingerprint = createProjectFingerprint(record.manifest);
-      upsertProjectFingerprint.run(
-        id,
-        fingerprint.fileCount,
-        fingerprint.totalBytes,
-        fingerprint.shapeHash,
-        fingerprint.contentHash,
-        fingerprint.completeMd5 ? 1 : 0
-      );
+      if (changes.searchIndexChanged) timed('catalog-search-index', () => {
+        deleteSearchTerms.run(id);
+        const searchableFields = [record.title, record.displayName, ...(record.tags || []), record.notes,
+          record.backupLocation, record.sourcePath, record.archiveBaseName,
+          ...(record.manifest || []).map((file) => file.relativePath)];
+        for (const term of new Set(searchableFields.flatMap(searchGrams))) insertSearchTerm.run(id, term);
+      });
+      if (changes.similarityIndexChanged) timed('catalog-similarity-keys', () => {
+        deleteSimilarityKeys.run(id);
+        for (const key of similarityCandidateKeys(record, [])) insertSimilarityKey.run(id, key);
+      });
+      if (changes.projectFingerprintChanged) timed('catalog-project-fingerprint', () => {
+        const fingerprint = createProjectFingerprint(record.manifest);
+        upsertProjectFingerprint.run(id, fingerprint.fileCount, fingerprint.totalBytes,
+          fingerprint.shapeHash, fingerprint.contentHash, fingerprint.completeMd5 ? 1 : 0);
+      });
       changed += 1;
     }
     if (deleteMissing) for (const id of existing.keys()) {
@@ -404,6 +432,11 @@ function saveCatalog(database, records, options = {}) {
     }
     return { changed, total: normalized.length };
   });
+  for (const [stage, elapsedMs] of timings) performanceTrace.record({ stage, elapsedMs,
+    candidateCount: result.changed });
+  performanceTrace.record({ stage: 'catalog-transaction-total',
+    elapsedMs: performance.now() - transactionStartedAt, candidateCount: result.changed });
+  return result;
 }
 
 function saveCatalogRecords(database, records, sortIndexById) {
@@ -418,7 +451,8 @@ function queryIdsByValues(database, table, column, values, limit = 2000) {
     SELECT record_id, COUNT(*) AS hits FROM ${table}
     WHERE ${column} IN (${placeholders})
     GROUP BY record_id ORDER BY hits DESC LIMIT ?
-  `).all(...normalized, Math.max(1, Math.min(10000, Number(limit) || 2000))).map((row) => row.record_id);
+  `).all(...normalized, limit === Infinity ? -1 : Math.max(1, Math.min(10000, Number(limit) || 2000)))
+    .map((row) => row.record_id);
 }
 
 function findCatalogIdsByExactName(database, nameKey, limit = 20) {
@@ -437,7 +471,7 @@ function findCatalogIdsBySimilarityKeys(database, keys, limit = 2000) {
 
 function findCatalogIdsByMd5(database, md5, limit = 2000) {
   return database.prepare('SELECT DISTINCT record_id FROM catalog_files WHERE md5 = ? LIMIT ?')
-    .all(String(md5 || '').toLowerCase(), Math.max(1, Math.min(10000, Number(limit) || 2000)))
+    .all(String(md5 || '').toLowerCase(), limit === Infinity ? -1 : Math.max(1, Math.min(10000, Number(limit) || 2000)))
     .map((row) => row.record_id);
 }
 

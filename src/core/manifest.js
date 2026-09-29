@@ -6,6 +6,9 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { CancelledError } = require('./archive-engine-errors');
 const { isImageFile, isVideoFile } = require('./constants');
+const { walkSourceMetadata } = require('./source-metadata');
+const { sameSourceMetadata, canReuseFingerprint } = require('./file-metadata');
+const { performanceTrace } = require('./performance-trace');
 
 const DEFAULT_LARGE_FOLDER_FILE_THRESHOLD = 500;
 const DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT = 200;
@@ -101,7 +104,7 @@ function compareSourceSnapshots(baseline, current) {
   for (const file of next.files) {
     const before = previousFiles.get(file.relativePath);
     if (!before) addedFiles.push(file);
-    else if (before.entryType !== file.entryType || before.size !== file.size || before.modifiedAtMs !== file.modifiedAtMs) {
+    else if (before.entryType !== file.entryType || !sameSourceMetadata(before, file)) {
       modifiedFiles.push({ before, after: file });
     } else unchangedFiles.push(file);
   }
@@ -214,62 +217,25 @@ function portableRelativePath(value) {
 
 async function collectFiles(sourcePath, sourceType, options = {}) {
   const { signal, pauseController, onSkippedFile = () => {} } = options;
-  if (sourceType === 'video') {
-    const stats = await fs.stat(sourcePath);
-    const files = [{
-      absolutePath: sourcePath,
-      relativePath: path.basename(sourcePath),
-      name: path.basename(sourcePath),
-      extension: path.extname(sourcePath).toLowerCase(),
-      size: stats.size,
-      modifiedAtMs: stats.mtimeMs,
-      modifiedAt: stats.mtime.toISOString(),
-      mediaType: 'video'
-    }];
-    Object.defineProperty(files, 'directories', { value: [], enumerable: false });
-    return files;
-  }
-
   const files = [];
   const directories = [];
-  const pending = [sourcePath];
-  while (pending.length > 0) {
-    await pauseController?.waitIfPaused(signal);
-    if (signal?.aborted) throw new CancelledError();
-    const current = pending.pop();
-    let directory;
-    try {
-      directory = await fs.opendir(current);
-    } catch (error) {
-      onSkippedFile({ path: portableRelativePath(path.relative(sourcePath, current)) || '.', reason: error.message, code: error.code || 'READ_FAILED', type: 'directory' });
-      continue;
-    }
-    for await (const entry of directory) {
-      if (entry.isSymbolicLink()) continue;
-      const entryPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        directories.push(portableRelativePath(path.relative(sourcePath, entryPath)));
-        pending.push(entryPath);
-      } else if (entry.isFile()) {
-        let stats;
-        try {
-          stats = await fs.stat(entryPath);
-        } catch (error) {
-          onSkippedFile({ path: portableRelativePath(path.relative(sourcePath, entryPath)), reason: error.message, code: error.code || 'STAT_FAILED', type: 'file' });
-          continue;
-        }
-        files.push({
-          absolutePath: entryPath,
-          relativePath: portableRelativePath(path.relative(sourcePath, entryPath)),
-          name: entry.name,
-          extension: path.extname(entry.name).toLowerCase(),
-          size: stats.size,
-          modifiedAtMs: stats.mtimeMs,
-          modifiedAt: stats.mtime.toISOString(),
-          mediaType: isVideoFile(entry.name) ? 'video' : isImageFile(entry.name) ? 'image' : 'file'
-        });
-      }
-    }
+  for await (const entry of walkSourceMetadata(sourcePath, sourceType, {
+    signal, pauseController,
+    onSkipped: ({ relativePath, type, error }) => onSkippedFile({ path: relativePath,
+      reason: error.message, code: error.code || (type === 'file' ? 'STAT_FAILED' : 'READ_FAILED'), type })
+  })) {
+    if (entry.type === 'directory') { directories.push(entry.relativePath); continue; }
+    files.push({
+      absolutePath: entry.absolutePath,
+      relativePath: entry.relativePath,
+      name: entry.name,
+      extension: path.extname(entry.name).toLowerCase(),
+      size: entry.stats.size,
+      modifiedAtMs: entry.stats.mtimeMs,
+      modifiedAt: entry.stats.mtime.toISOString(),
+      mediaType: sourceType === 'video' || isVideoFile(entry.name) ? 'video'
+        : isImageFile(entry.name) ? 'image' : 'file'
+    });
   }
   files.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN'));
   directories.sort((left, right) => left.localeCompare(right, 'zh-CN'));
@@ -278,6 +244,7 @@ async function collectFiles(sourcePath, sourceType, options = {}) {
 }
 
 async function buildManifest(sourcePath, sourceType, options = {}) {
+  const metadataStartedAt = Date.now();
   const {
     signal,
     pauseController,
@@ -317,6 +284,7 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
   let processedBytes = 0;
   let processedFiles = 0;
   const manifest = [];
+  let hashedBytes = 0;
 
   onPlan({
     totalFiles: files.length,
@@ -327,6 +295,8 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
     threshold,
     simplified
   });
+  performanceTrace.record({ jobId: options.jobId, stage: 'manifest-build-metadata',
+    elapsedMs: Date.now() - metadataStartedAt, fileCount: files.length });
 
   if (typeof options.onMetadataReady === 'function') {
     const metadataManifest = files.map(({ absolutePath: _absolutePath, ...file }) => ({ ...file }));
@@ -335,6 +305,8 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
     await options.onMetadataReady(metadataManifest, directories);
   }
 
+  const hashStartedAt = Date.now();
+
   for (let index = 0; index < files.length; index += 1) {
     if (signal?.aborted) throw new CancelledError();
     const file = files[index];
@@ -342,8 +314,7 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
     let md5;
     let afterStats;
     const reusableFile = reusable.get(file.relativePath);
-    const canReuse = reusableFile && Number(reusableFile.size) === Number(file.size) &&
-      Number(reusableFile.modifiedAtMs) === Number(file.modifiedAtMs);
+    const canReuse = canReuseFingerprint(reusableFile, file);
     if (selectedForMd5 && canReuse && /^[a-f0-9]{32}$/i.test(String(reusableFile.md5 || ''))) {
       md5 = String(reusableFile.md5).toLowerCase();
       processedBytes += file.size;
@@ -351,6 +322,7 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
     } else if (selectedForMd5 && !canReuse) {
       try {
         md5 = await hashFileMd5(file.absolutePath, signal, pauseController);
+        hashedBytes += file.size;
         afterStats = await fs.stat(file.absolutePath);
       } catch (error) {
         if (error instanceof CancelledError || error.code === 'TASK_CANCELLED' || error.code === 'SOURCE_CHANGED') throw error;
@@ -363,7 +335,7 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
         md5 = undefined;
         // Keep the complete source listing even when its optional fingerprint fails.
       }
-      if (afterStats && (afterStats.size !== file.size || afterStats.mtimeMs !== file.modifiedAtMs)) {
+      if (afterStats && !sameSourceMetadata(file, { size: afterStats.size, modifiedAtMs: afterStats.mtimeMs })) {
         const error = new Error(`散列期间源文件发生变化：${file.relativePath}`);
         error.code = 'SOURCE_CHANGED';
         throw error;
@@ -408,6 +380,8 @@ async function buildManifest(sourcePath, sourceType, options = {}) {
   if (selectedFiles.length === 0) {
     onProgress({ processedFiles: 0, totalFiles: 0, processedBytes: 0, totalBytes: 0, percent: 100 });
   }
+  performanceTrace.record({ jobId: options.jobId, stage: 'manifest-content-hash',
+    elapsedMs: Date.now() - hashStartedAt, fileCount: selectedFiles.length, hashedBytes });
   const sourceSnapshot = preparedSnapshot || sourceSnapshotFromManifest(sourcePath, sourceType, manifest, directories, {
     complete: skippedFiles.length === 0,
     errors: skippedFiles.map((item) => ({ relativePath: item.path, code: item.code, kind: item.type }))
@@ -462,56 +436,60 @@ async function completeManifestMd5(sourcePath, sourceType, manifest, options = {
 }
 
 async function verifyManifestMd5AgainstCompleteCandidates(sourcePath, sourceType, manifest, candidates, options = {}) {
-  const { signal, pauseController, onProgress = () => {} } = options;
+  const { signal, pauseController, onProgress = () => {}, getCandidatePaths = () => [] } = options;
   const normalizePath = (value) => String(value || '').replace(/\\/g, '/')
     .normalize('NFKC')
     .toLocaleLowerCase('zh-CN');
+  const validMd5 = (value) => /^[a-f0-9]{32}$/.test(value);
   const workingManifest = (manifest || []).map((file) => ({ ...file }));
-  let remaining = (candidates || []).map((record) => {
+  const currentPaths = workingManifest.map((file) => normalizePath(file.relativePath || file.name));
+  if (currentPaths.length === 0 || currentPaths.some((value) => !value) || new Set(currentPaths).size !== currentPaths.length) {
+    return { manifest: workingManifest, matches: [], hashedFiles: 0, hashedBytes: 0, verificationIncomplete: false };
+  }
+  let remaining = (candidates || []).flatMap((record) => {
     const files = new Map();
     for (const file of record?.manifest || []) {
       const relativePath = normalizePath(file?.relativePath || file?.name);
       const md5 = String(file?.md5 || '').trim().toLocaleLowerCase('en-US');
-      if (!relativePath || files.has(relativePath) || !/^[a-f0-9]{32}$/.test(md5)) return null;
-      files.set(relativePath, { size: Number(file?.size), md5 });
+      if (!relativePath || files.has(relativePath)) return [];
+      files.set(relativePath, { ...file, md5: validMd5(md5) ? md5 : null });
     }
-    return files.size === workingManifest.length ? { record, files } : null;
-  }).filter(Boolean);
+    if (files.size !== workingManifest.length || workingManifest.some((file) => {
+      const candidate = files.get(normalizePath(file.relativePath || file.name));
+      return !candidate || Number(candidate.size) !== Number(file.size);
+    })) return [];
+    if ([...files.values()].every((file) => file.md5)) return [{ record, files, sourcePath: null, verifiedCount: 0 }];
+    const paths = [...new Set(getCandidatePaths(record).filter((value) => typeof value === 'string' && value.trim()))]
+      .filter((candidatePath) => path.resolve(candidatePath) !== path.resolve(sourcePath));
+    return paths.length === 0 ? [] : [{ record,
+      files: new Map([...files].map(([key, entry]) => [key, { ...entry }])), originalFiles: files,
+      sourcePaths: paths, pathIndex: 0, sourcePath: paths[0], verifiedCount: 0 }];
+  });
   if (remaining.length === 0) {
-    return { manifest: workingManifest, matches: [], hashedFiles: 0, hashedBytes: 0 };
+    return { manifest: workingManifest, matches: [], hashedFiles: 0, hashedBytes: 0, verificationIncomplete: false };
   }
 
-  const knownFiles = workingManifest.filter((file) => /^[a-f0-9]{32}$/i.test(String(file?.md5 || '')));
+  const knownFiles = workingManifest.filter((file) => validMd5(String(file?.md5 || '').toLowerCase()));
   for (const file of knownFiles) {
     const relativePath = normalizePath(file.relativePath || file.name);
     const md5 = String(file.md5).toLocaleLowerCase('en-US');
     remaining = remaining.filter(({ files }) => {
       const candidate = files.get(relativePath);
-      return candidate && candidate.size === Number(file.size) && candidate.md5 === md5;
+      return candidate && (!candidate.md5 || candidate.md5 === md5);
     });
-    if (remaining.length === 0) return { manifest: workingManifest, matches: [], hashedFiles: 0, hashedBytes: 0 };
+    if (remaining.length === 0) return { manifest: workingManifest, matches: [], hashedFiles: 0, hashedBytes: 0, verificationIncomplete: false };
   }
-
-  const missing = workingManifest.filter((file) => !/^[a-f0-9]{32}$/i.test(String(file?.md5 || '')));
-  missing.sort((left, right) => {
-    const distinctMd5Count = (file) => {
-      const relativePath = normalizePath(file.relativePath || file.name);
-      return new Set(remaining.map(({ files }) => files.get(relativePath)?.md5).filter(Boolean)).size;
-    };
-    return distinctMd5Count(right) - distinctMd5Count(left) ||
-      Number(left.size) - Number(right.size) ||
-      String(left.relativePath).localeCompare(String(right.relativePath), 'zh-CN');
-  });
 
   let hashedFiles = 0;
   let hashedBytes = 0;
+  let verificationIncomplete = false;
+  const missing = workingManifest.filter((file) => !validMd5(String(file?.md5 || '').toLowerCase()));
   const totalBytes = missing.reduce((sum, file) => sum + Number(file.size || 0), 0);
-  for (const file of missing) {
-    await pauseController?.waitIfPaused(signal);
-    if (signal?.aborted) throw new CancelledError();
-    const absolutePath = sourceType === 'video'
-      ? sourcePath
-      : path.join(sourcePath, ...String(file.relativePath || '').split('/'));
+  const budget = options.budget || {};
+  let remainingFiles = Number.isFinite(Number(budget.remainingFiles)) ? Number(budget.remainingFiles) : Infinity;
+  let remainingBytes = Number.isFinite(Number(budget.remainingBytes)) ? Number(budget.remainingBytes) : Infinity;
+  const hashCheckedFile = async (root, type, file, beforeHash = () => {}) => {
+    const absolutePath = type === 'video' ? root : path.join(root, ...String(file.relativePath || '').split('/'));
     const beforeStats = await fs.stat(absolutePath);
     const expectedModifiedAtMs = Number.isFinite(Number(file.modifiedAtMs))
       ? Number(file.modifiedAtMs)
@@ -522,6 +500,7 @@ async function verifyManifestMd5AgainstCompleteCandidates(sourcePath, sourceType
       changed.code = 'SOURCE_CHANGED';
       throw changed;
     }
+    beforeHash();
     const md5 = await hashFileMd5(absolutePath, signal, pauseController);
     const afterStats = await fs.stat(absolutePath);
     if (afterStats.size !== beforeStats.size || Math.abs(afterStats.mtimeMs - beforeStats.mtimeMs) >= 1) {
@@ -529,31 +508,92 @@ async function verifyManifestMd5AgainstCompleteCandidates(sourcePath, sourceType
       changed.code = 'SOURCE_CHANGED';
       throw changed;
     }
-    delete file.md5SkippedReason;
-    delete file.similarityEligible;
-    file.md5 = md5;
-    hashedFiles += 1;
-    hashedBytes += Number(file.size || 0);
+    return md5;
+  };
+  // Rank once; candidate filtering still happens after every individual hash.
+  const pending = workingManifest.map((file) => {
+    const key = normalizePath(file.relativePath || file.name);
+    const known = remaining.map(({ files }) => files.get(key)?.md5).filter(Boolean);
+    return { file, knownCount: known.length, distinctCount: new Set(known).size };
+  }).sort((left, right) =>
+    Number(validMd5(String(right.file.md5 || '').toLowerCase())) -
+      Number(validMd5(String(left.file.md5 || '').toLowerCase())) ||
+    right.knownCount - left.knownCount || right.distinctCount - left.distinctCount ||
+    Number(left.file.size) - Number(right.file.size) ||
+    String(left.file.relativePath).localeCompare(String(right.file.relativePath), 'zh-CN'));
+  const checkedFiles = [];
+  for (const { file } of pending) {
+    if (remaining.length === 0) break;
+    await pauseController?.waitIfPaused(signal);
+    if (signal?.aborted) throw new CancelledError();
+    let md5 = String(file.md5 || '').toLocaleLowerCase('en-US');
+    const needsCurrentHash = !validMd5(md5);
+    if (needsCurrentHash) {
+      md5 = await hashCheckedFile(sourcePath, sourceType, file);
+      delete file.md5SkippedReason;
+      delete file.similarityEligible;
+      file.md5 = md5;
+      hashedFiles += 1;
+      hashedBytes += Number(file.size || 0);
+    }
     const relativePath = normalizePath(file.relativePath || file.name);
-    remaining = remaining.filter(({ files }) => {
-      const candidate = files.get(relativePath);
-      return candidate && candidate.size === Number(file.size) && candidate.md5 === md5;
-    });
-    onProgress({
-      currentFile: file.relativePath,
-      processedFiles: hashedFiles,
-      totalFiles: missing.length,
-      processedBytes: hashedBytes,
-      totalBytes,
+    remaining = remaining.filter(({ files }) => !files.get(relativePath).md5 || files.get(relativePath).md5 === md5);
+    checkedFiles.push(file);
+    for (const candidate of [...remaining]) {
+      let verified = false;
+      while (!verified) {
+        try {
+          while (candidate.verifiedCount < checkedFiles.length) {
+            const checked = checkedFiles[candidate.verifiedCount];
+            const entry = candidate.files.get(normalizePath(checked.relativePath || checked.name));
+            if (!entry.md5) {
+              entry.md5 = await hashCheckedFile(candidate.sourcePath, candidate.record.sourceType || 'directory', entry, () => {
+                if (remainingFiles < 1 || remainingBytes < Number(entry.size || 0)) {
+                  const error = new Error('Historical candidate read budget reached');
+                  error.code = 'VERIFY_BUDGET_EXCEEDED';
+                  throw error;
+                }
+                remainingFiles -= 1;
+                remainingBytes -= Number(entry.size || 0);
+              });
+            }
+            if (entry.md5 !== String(checked.md5).toLocaleLowerCase('en-US')) {
+              const error = new Error('Historical candidate MD5 differs');
+              error.code = 'CANDIDATE_MISMATCH';
+              throw error;
+            }
+            candidate.verifiedCount += 1;
+          }
+          verified = true;
+        } catch (error) {
+          if (error instanceof CancelledError || error.code === 'TASK_CANCELLED') throw error;
+          if (error.code === 'VERIFY_BUDGET_EXCEEDED') {
+            verificationIncomplete = true;
+            break;
+          }
+          if (!candidate.sourcePaths || candidate.pathIndex + 1 >= candidate.sourcePaths.length) break;
+          candidate.pathIndex += 1;
+          candidate.sourcePath = candidate.sourcePaths[candidate.pathIndex];
+          candidate.files = new Map([...candidate.originalFiles].map(([key, entry]) => [key, { ...entry }]));
+          candidate.verifiedCount = 0;
+        }
+      }
+      if (!verified) remaining = remaining.filter((item) => item !== candidate);
+    }
+    if (needsCurrentHash) onProgress({
+      currentFile: file.relativePath, processedFiles: hashedFiles, totalFiles: missing.length,
+      processedBytes: hashedBytes, totalBytes,
       percent: totalBytes === 0 ? 100 : Math.round((hashedBytes / totalBytes) * 100)
     });
-    if (remaining.length === 0) break;
   }
   return {
     manifest: workingManifest,
-    matches: remaining.map(({ record }) => record),
+    matches: [...new Map(remaining.map(({ record }) => [record.id, record])).values()].map((record) =>
+      record.manifest.every((file) => validMd5(String(file.md5 || '').toLowerCase()))
+        ? record : { ...record, manifest: workingManifest }),
     hashedFiles,
-    hashedBytes
+    hashedBytes,
+    verificationIncomplete
   };
 }
 
@@ -691,7 +731,7 @@ async function validateManifestUnchanged(sourcePath, sourceType, manifest, signa
       }
       throw error;
     }
-    if (stats.size !== file.size || stats.mtimeMs !== file.modifiedAtMs) {
+    if (!sameSourceMetadata(file, { size: stats.size, modifiedAtMs: stats.mtimeMs })) {
       const changed = new Error(`压缩期间源文件发生变化：${file.relativePath}`);
       changed.code = 'SOURCE_CHANGED';
       throw changed;

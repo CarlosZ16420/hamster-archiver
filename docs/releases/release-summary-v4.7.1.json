@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "version": "4.7.1",
+  "notes": {
+    "zh-CN": [
+      "压缩归档保留空目录，并在发布前将包内文件和目录结构与完整源清单比对。",
+      "源扫描不完整或包内内容不一致时停止发布及源文件后处理，保留原件。"
+    ],
+    "en-US": [
+      "Archives retain empty folders and compare their file and folder structure with the complete source manifest before publication.",
+      "An incomplete source scan or archive mismatch stops publication and source handling, preserving the originals."
+    ]
+  }
+}

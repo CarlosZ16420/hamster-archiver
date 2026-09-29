@@ -4,16 +4,27 @@ const crypto = require('node:crypto');
 const path = require('node:path');
 const { ARCHIVE_PASSWORD, LARGE_TASK_BYTES, MIB } = require('./constants');
 
-const PORTABLE_SEVEN_ZIP_PATH = path.join('tools', '7zip', '7z.exe');
-const PORTABLE_FFMPEG_PATH = path.join('tools', 'ffmpeg', 'ffmpeg.exe');
+const PORTABLE_SEVEN_ZIP_PATH = path.join('tools', '7zip', process.platform === 'darwin' ? '7zz' : '7z.exe');
+const PORTABLE_FFMPEG_PATH = path.join('tools', 'ffmpeg', process.platform === 'darwin' ? 'ffmpeg' : 'ffmpeg.exe');
 
-function normalizeForComparison(input) {
-  return path.resolve(input).replace(/[\\/]+$/, '').toLowerCase();
+function normalizeForComparisonForPlatform(input, platform) {
+  const resolved = path.resolve(input).replace(/[\\/]+$/, '').normalize('NFC');
+  // APFS can be case-sensitive. Keep distinct Mac paths distinct in task IDs
+  // and receipts, while normalizing Unicode spelling of the same name.
+  return platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
-function isPathInside(parent, candidate) {
-  const parentPath = normalizeForComparison(parent);
-  const candidatePath = normalizeForComparison(candidate);
+function normalizeForComparison(input) {
+  return normalizeForComparisonForPlatform(input, process.platform);
+}
+
+function isPathInside(parent, candidate, platform = process.platform) {
+  // Layout validation rejects ambiguous case aliases on the usual
+  // case-insensitive Mac volumes. This may conservatively reject a separate
+  // path on a case-sensitive volume, rather than allow overlapping storage.
+  const comparePlatform = platform === 'darwin' ? 'win32' : platform;
+  const parentPath = normalizeForComparisonForPlatform(parent, comparePlatform);
+  const candidatePath = normalizeForComparisonForPlatform(candidate, comparePlatform);
   return candidatePath === parentPath || candidatePath.startsWith(`${parentPath}${path.sep}`);
 }
 
@@ -95,7 +106,7 @@ function rebasePortableUserDataPaths(config, layout) {
       'archiveStagingDirectory'
     ]) {
       const value = String(config[key] || '').trim();
-      if (!value || !isPathInside(previousRoot, value)) continue;
+      if (!value || !isPathInside(previousRoot, value, process.platform === 'darwin' ? 'linux' : process.platform)) continue;
       config[key] = path.join(currentRoot, path.relative(previousRoot, value));
       if (key === 'repositoryDirectory') config.migratedRepositoryFrom = value;
     }
@@ -122,7 +133,7 @@ function makeDefaultConfig(workspaceRoot, userDataLayout = {}) {
     archivePassword: ARCHIVE_PASSWORD,
     archiveNamingMode: 'timestamp_random',
     customArchiveName: '',
-    videoFrameBackup: true,
+    videoFrameBackup: process.platform !== 'darwin',
     videoFrameCount: 3,
     thumbnailLimit: 30,
     archiveFormat: '7z',
@@ -216,6 +227,7 @@ module.exports = {
   makeDefaultConfig,
   normalizePortableProgramPath,
   normalizeForComparison,
+  normalizeForComparisonForPlatform,
   PORTABLE_FFMPEG_PATH,
   PORTABLE_SEVEN_ZIP_PATH,
   rebasePortableUserDataPaths,

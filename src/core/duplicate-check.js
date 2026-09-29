@@ -185,7 +185,12 @@ function createProjectFingerprint(manifest) {
 function createManifestReviewFingerprint(manifest) {
   const entries = normalizedProjectManifestEntries(manifest);
   if (!entries) return '';
-  return hashManifestEntries(entries, true, true);
+  const filesHash = hashManifestEntries(entries, true, true);
+  if (!Array.isArray(manifest.directories)) return filesHash;
+  const directories = [...manifest.directories].map(normalizeEntryPath)
+    .map((entry) => entry.normalize('NFKC').toLocaleLowerCase('zh-CN'))
+    .sort((left, right) => left.localeCompare(right, 'zh-CN'));
+  return crypto.createHash('sha256').update(JSON.stringify({ filesHash, directories })).digest('hex');
 }
 
 function findExactFileMatches(manifest, catalog) {

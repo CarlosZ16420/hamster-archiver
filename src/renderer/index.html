@@ -13,7 +13,7 @@
     <div>
       <h1>请从桌面程序启动</h1>
       <p>这个页面需要本地文件与 7-Zip 权限，不能作为普通网页单独打开。</p>
-      <p>请关闭当前页面，然后运行项目根目录中的 HamsterArchiver.exe。</p>
+      <p>请关闭当前页面，然后启动 Hamster Archiver 桌面应用。</p>
     </div>
   </div>
 
@@ -259,8 +259,8 @@
                   <button id="scan-source" class="button secondary">扫描目录</button>
                 </div>
                 <div class="queue-action-row queue-run-actions">
-                  <button id="start-inventory-only" class="button ghost">不压缩直接入库</button>
-                  <button id="start-queue" class="button primary">开始压缩入库</button>
+                  <button id="start-inventory-only" class="button ghost">不压缩入库</button>
+                  <button id="start-queue" class="button primary">压缩入库</button>
                 </div>
               </div>
             </header>
@@ -273,6 +273,7 @@
               <div id="queue-selection-actions" class="context-actions" hidden><span id="selection-count" class="selection-count">未选择任务</span><button id="remove-selected" class="button ghost" disabled>移除所选</button></div>
               <div class="queue-maintenance">
                 <details class="action-menu queue-settings-menu"><summary class="button ghost">设置</summary><div class="action-menu-popover queue-settings-popover">
+                  <label class="queue-concurrency-setting"><span><strong>同时执行任务数</strong><small>当前批次最多并行处理 1—3 项</small></span><select id="queue-concurrency" aria-label="同时执行任务数"><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
                   <label class="queue-setting-toggle"><input id="similarity-report-enabled" type="checkbox" checked><span><strong>相似报告</strong><small>开启后，检测到相似项目时会给出详细报告</small></span></label>
                   <section class="queue-setting-section" aria-labelledby="performance-avoidance-title">
                     <h3 id="performance-avoidance-title">卡顿规避</h3>
