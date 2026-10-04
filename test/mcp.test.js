@@ -15,6 +15,7 @@ const { createArchivePublicationReceipt } = require('../src/core/archive-engine'
 const {
   MCP_CLIENT_RUNTIME_SWITCHES,
   EXPECTED_MCP_TOOLS,
+  coordinateLaunch,
   isUnexpectedLaunchExit,
   main: runMcpClient,
   parseCli,
@@ -65,6 +66,25 @@ function fakeManager() {
   };
 }
 
+test('MCP catalog deletion reports blocked records instead of an empty success', async () => {
+  const manager = fakeManager();
+  manager.deleteCatalogRecords = async () => ({ deletedIds: [], failures: [{
+    id: 'r1', code: 'CATALOG_RECORD_IN_USE', jobId: 'queued-job',
+    message: '该仓库记录已有未完成的关联任务。请先完成或取消该任务，再删除记录。',
+    messageEn: 'Complete or cancel the dependent task before deleting this item.'
+  }] });
+  const service = createMcpTools(manager);
+  const input = { recordIds: ['r1'] };
+  const preview = await service.call('hamster_call', { capability: 'catalog.delete', input });
+  const result = await service.call('hamster_call', {
+    capability: 'catalog.delete', input, confirmationToken: preview.confirmation.token
+  });
+  assert.deepEqual(result.deletedIds, []);
+  assert.equal(result.failures[0].code, 'CATALOG_RECORD_IN_USE');
+  assert.equal(result.failures[0].jobId, 'queued-job');
+  assert.equal(result.records[0].id, 'r1');
+});
+
 test('MCP launcher keeps the native graphics profile and launch failures do not wait for timeout', async () => {
   assert.deepEqual(MCP_CLIENT_RUNTIME_SWITCHES, ['--disable-crash-reporter', '--disable-breakpad']);
   assert.equal(parseCli(['describe', ...MCP_CLIENT_RUNTIME_SWITCHES]).command, 'describe');
@@ -88,14 +108,34 @@ test('desktop launch requests are bound to the intended executable and consumed 
   const executable = path.join(root, 'HamsterArchiver.exe');
   const readyFile = path.join(root, `hamster-mcp-ready-${process.pid}-${crypto.randomBytes(16).toString('hex')}.json`);
   const diagnosticFile = path.join(root, `hamster-mcp-diagnostic-${process.pid}-${crypto.randomBytes(16).toString('hex')}.json`);
-  await createDesktopLaunchRequest({ applicationExecutable: executable, readyFile, diagnosticFile, showUi: true, tempDirectory: root });
+  const launchAttemptId = crypto.randomUUID();
+  await createDesktopLaunchRequest({ applicationExecutable: executable, readyFile, diagnosticFile,
+    launchAttemptId, showUi: true, tempDirectory: root });
   assert.equal(takeDesktopLaunchRequest({ applicationExecutable: path.join(root, 'Other.exe'), tempDirectory: root }), null);
   assert.deepEqual(takeDesktopLaunchRequest({ applicationExecutable: executable, tempDirectory: root }), {
     readyFile,
     diagnosticFile,
-    showUi: true
+    showUi: true,
+    launchAttemptId
   });
   assert.equal(takeDesktopLaunchRequest({ applicationExecutable: executable, tempDirectory: root }), null);
+});
+
+test('concurrent CLI launches reuse one live MCP connection', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-mcp-coordinate-test-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const connectionFile = path.join(root, 'connection.json');
+  await fs.writeFile(connectionFile, JSON.stringify({ pid: process.pid }));
+  let launches = 0;
+  const start = async () => {
+    launches += 1;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return connectionFile;
+  };
+  const results = await Promise.all(Array.from({ length: 100 }, () =>
+    coordinateLaunch(path.join(root, 'launch'), start, 2_000)));
+  assert.ok(results.every((result) => result === connectionFile));
+  assert.equal(launches, 1);
 });
 
 test('MCP reads are paginated and do not expose passwords or thumbnail paths', async () => {
@@ -141,12 +181,19 @@ test('AI accepts beside unrelated queued work, serializes mutations and rejects 
   assert.deepEqual(manager.startedJobIds, [accepted.jobs[0].id]);
   manager.jobs = [];
   let release;
-  manager.addSingle = () => new Promise((resolve) => { release = resolve; });
+  let started;
+  const startedPromise = new Promise((resolve) => { started = resolve; });
+  manager.addSingle = () => new Promise((resolve) => { release = resolve; started(); });
   const concurrentArgs = { ...args, requestId: 'batch-concurrent' };
   const pending = service.call('hamster_batch_import', concurrentArgs);
-  await assert.rejects(service.call('hamster_batch_import', concurrentArgs), /BUSY/);
+  await startedPromise;
+  let queuedDone = false;
+  const queued = service.call('hamster_batch_import', concurrentArgs).then(() => { queuedDone = true; });
+  await Promise.resolve();
+  assert.equal(queuedDone, false);
   release();
-  await pending;
+  await Promise.all([pending, queued]);
+  assert.equal(queuedDone, true);
   const job = { id: 'ai', mcpRequestId: 'batch', status: 'awaiting_duplicate_confirmation', duplicateReviewFingerprint: 'old' };
   manager.jobs = [job];
   const token = jobSummary(job).decisionToken;
@@ -157,6 +204,23 @@ test('AI accepts beside unrelated queued work, serializes mutations and rejects 
   job.status = 'awaiting_anomaly_confirmation';
   assert.equal(jobSummary(job).needsDesktop, true);
   await assert.rejects(service.call('hamster_decide', { jobId: 'ai', action: 'continue', decisionToken: jobSummary(job).decisionToken }), /not valid/);
+});
+
+test('one hundred concurrent MCP submissions each receive a persisted receipt', async () => {
+  const manager = fakeManager();
+  const service = createMcpTools(manager);
+  const receipts = await Promise.all(Array.from({ length: 100 }, (_, index) => service.call('hamster_call', {
+    capability: 'intake.submit',
+    input: {
+      requestId: `concurrent-${index}`,
+      paths: [path.resolve(`source-${index}`)],
+      mode: 'inventory_only',
+      waitMilliseconds: 0
+    }
+  })));
+  assert.equal(manager.automationRequests.length, 100);
+  assert.equal(new Set(receipts.map((receipt) => receipt.task.id)).size, 100);
+  assert.ok(receipts.every((receipt) => receipt.task.jobIds.length === 1));
 });
 
 test('MCP protocol negotiates initialization and reports tool errors', async () => {
@@ -192,6 +256,7 @@ test('local MCP rejects unauthorized/browser access and works through the actual
   assert.match(connection.instanceId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.ok(Date.parse(connection.startedAt));
   assert.equal(connection.version, 'test');
+  assert.equal(JSON.parse(await fs.readFile(connection.diagnosticRef, 'utf8')).instanceId, connection.instanceId);
   assert.equal((await fetch(connection.url)).status, 403);
   assert.equal((await fetch(connection.url, { headers: { Authorization: `Bearer ${connection.token}`, Origin: 'https://example.com' } })).status, 403);
   const child = spawn(process.execPath, [path.resolve('src/core/mcp-client.js'), '--connection', server.connectionFile], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -222,6 +287,35 @@ test('local MCP rejects unauthorized/browser access and works through the actual
   assert.deepEqual(doctorResult.tools, EXPECTED_MCP_TOOLS);
   assert.equal(server.sessionCount, 0);
   assert.deepEqual(sessionCounts, [1, 0, 1, 0]);
+});
+
+test('client disconnect aborts a server-side task wait', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-mcp-abort-'));
+  let notifyStarted;
+  let notifyAborted;
+  const started = new Promise((resolve) => { notifyStarted = resolve; });
+  const aborted = new Promise((resolve) => { notifyAborted = resolve; });
+  const server = await startMcpServer(fakeManager(), root, 'test', { taskService: {
+    wait(_id, _timeout, _version, signal) {
+      notifyStarted();
+      return new Promise((resolve) => signal.addEventListener('abort', () => {
+        notifyAborted(); resolve({ schemaVersion: 2, ok: true });
+      }, { once: true }));
+    }
+  } });
+  t.after(async () => { await server.close(); await fs.rm(root, { recursive: true, force: true }); });
+  const connection = JSON.parse(await fs.readFile(server.connectionFile, 'utf8'));
+  const controller = new AbortController();
+  const sent = fetch(connection.url, { method: 'POST', signal: controller.signal,
+    headers: { Host: new URL(connection.url).host, Authorization: `Bearer ${connection.token}`,
+      'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call',
+      params: { name: 'hamster_call', arguments: { capability: 'task.wait',
+        input: { taskId: 'task-abort', responseVersion: 2, timeoutSeconds: 60 } } } }) });
+  await started;
+  controller.abort();
+  await assert.rejects(sent, { name: 'AbortError' });
+  await Promise.race([aborted, new Promise((_, reject) => setTimeout(() => reject(new Error('abort was not delivered')), 1500))]);
 });
 
 test('AI batch uses the real inventory queue, persists automation identity and keeps original files', async (t) => {
@@ -347,8 +441,10 @@ test('automation receipts refresh only inside the active warehouse', async () =>
     config: { repositoryDirectory: currentRepository },
     jobs: [{ id: 'current-job', mcpRequestId: 'shared-id', status: 'completed' }],
     automationRequests: [{ requestId: 'shared-id', repositoryDirectory: otherRepository, jobs: [] }],
+    automationLedgerTail: Promise.resolve(),
     store: { async saveAutomationRequests() { saves += 1; } },
-    automationJobSnapshot: QueueManager.prototype.automationJobSnapshot
+    automationJobSnapshot: QueueManager.prototype.automationJobSnapshot,
+    withAutomationLedger: QueueManager.prototype.withAutomationLedger
   };
   await QueueManager.prototype.refreshAutomationRequests.call(manager);
   assert.deepEqual(manager.automationRequests[0].jobs, []);
@@ -528,6 +624,8 @@ test('common settings schema is explicit, rejects repository bypass, and never r
   const service = createMcpTools(manager);
   const described = await service.call('hamster_describe', { capability: 'settings.patch' });
   const properties = described.inputSchema.properties.patch.properties;
+  assert.equal(properties.archiveVolumeBytes.maximum, 100 * 1024 ** 3);
+  assert.equal(properties.archiveVolumeConfirmation.type, 'boolean');
   for (const key of ['archivePassword', 'archiveNamingMode', 'archiveFormat', 'videoFrameBackup', 'videoFrameCount', 'thumbnailLimit', 'smallItemFilter', 'minimumTaskBytes', 'autoSkipExactDuplicates', 'autoSkipExactDuplicateAction']) {
     assert.ok(Object.hasOwn(properties, key), `missing settings field ${key}`);
   }
@@ -536,7 +634,8 @@ test('common settings schema is explicit, rejects repository bypass, and never r
     capability: 'settings.patch', input: { patch: { repositoryDirectory: path.resolve('bypass') } }
   }), /Unknown argument/);
 
-  const input = { patch: { archivePassword: 'private-test-password', recordArchivePassword: false, archiveNamingMode: 'original', videoFrameCount: 5 } };
+  const input = { patch: { archivePassword: 'private-test-password', recordArchivePassword: false, archiveNamingMode: 'original', videoFrameCount: 5,
+    archiveVolumeBytes: 100 * 1024 ** 3, archiveVolumeConfirmation: false } };
   const preview = await service.call('hamster_call', { capability: 'settings.patch', input });
   assert.equal(preview.requiresConfirmation, true);
   const applied = await service.call('hamster_call', {
@@ -546,6 +645,8 @@ test('common settings schema is explicit, rejects repository bypass, and never r
   assert.equal(applied.settings.recordArchivePassword, false);
   assert.equal(applied.settings.archiveNamingMode, 'original');
   assert.equal(applied.settings.videoFrameCount, 5);
+  assert.equal(applied.settings.archiveVolumeBytes, 100 * 1024 ** 3);
+  assert.equal(applied.settings.archiveVolumeConfirmation, false);
   assert.equal(JSON.stringify(applied).includes('private-test-password'), false);
 });
 

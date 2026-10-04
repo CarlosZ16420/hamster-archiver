@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.8.0-beta.mac.2",
+  "notes": {
+    "zh-CN": [
+      "首次提供 macOS Apple Silicon 与 Intel 通用架构 Beta，包含桌面整理、归档及可选 CLI/MCP。",
+      "内置已校验的 7-Zip；视频抽帧需自行配置 FFmpeg，Mac 更新需要手动下载新版 DMG。",
+      "本 Beta 未经 Apple 公证；Mac 版禁用回收站相关源文件操作。"
+    ],
+    "en-US": [
+      "First universal macOS beta for Apple Silicon and Intel, with desktop organization, archiving, and optional CLI/MCP.",
+      "Includes verified 7-Zip; video frame extraction requires a separately configured FFmpeg, and Mac updates require a new DMG download.",
+      "This beta is not Apple-notarized; Trash-related source operations are disabled on Mac."
+    ]
+  }
+}

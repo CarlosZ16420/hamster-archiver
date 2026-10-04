@@ -103,12 +103,13 @@ test('new installs keep source/output user-selected and default processed inside
   assert.equal(config.archiveFormat, '7z');
   assert.equal(config.compressionLevel, 1);
   assert.equal(config.archiveVolumeEnabled, true);
+  assert.equal(config.archiveVolumeConfirmation, true);
   assert.equal(config.archiveVolumeBytes, LARGE_TASK_BYTES);
   assert.equal(config.largeFolderMd5SampleLimit, 200);
   assert.equal(config.largeFolderFileThreshold, 500);
   assert.equal(config.tinyFileMd5ThresholdBytes, 1024);
   assert.equal(config.largeFolderSimplification, true);
-  assert.equal(config.skipTinyMd5Files, true);
+  assert.equal(config.skipTinyMd5Files, false);
   assert.equal(config.autoSkipExactDuplicates, true);
 });
 

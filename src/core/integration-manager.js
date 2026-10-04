@@ -42,6 +42,16 @@ function tomlString(value) {
 }
 
 function managedCodexBlock(commandPath) {
+  if (process.platform === 'darwin') return [
+    OWNED_BEGIN,
+    '[mcp_servers.hamster_archiver]',
+    'command = "/bin/sh"',
+    `args = [${tomlString(commandPath)}]`,
+    'startup_timeout_sec = 45',
+    'tool_timeout_sec = 60',
+    'enabled = true',
+    OWNED_END
+  ].join('\n');
   const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
   const cmd = path.join(systemRoot, 'System32', 'cmd.exe');
   return [
@@ -111,7 +121,8 @@ class IntegrationManager {
   }
 
   launcher(name) {
-    return path.join(this.applicationRoot, name);
+    const platformName = process.platform === 'darwin' ? name.replace(/\.cmd$/i, '') : name;
+    return path.join(this.applicationRoot, platformName);
   }
 
   async renderTemplate(relativePath, replacements = {}) {
@@ -158,7 +169,10 @@ class IntegrationManager {
     const root = path.join(this.homeDirectory, '.agents', 'skills', 'hamster-archiver');
     const cli = this.launcher('hamster.cmd');
     const files = [
-      ['SKILL.md', await this.renderTemplate(path.join('codex', 'hamster-archiver', 'SKILL.md'), { HAMSTER_CLI: cli })],
+      ['SKILL.md', await this.renderTemplate(path.join('codex', 'hamster-archiver', 'SKILL.md'), {
+        HAMSTER_CLI: cli.replaceAll("'", "''"),
+        HAMSTER_CLI_POSIX: cli.replace(/[\\$`"]/g, (character) => `\\${character}`)
+      })],
       [path.join('agents', 'openai.yaml'), await this.renderTemplate(path.join('codex', 'hamster-archiver', 'agents', 'openai.yaml'), { ALLOW_IMPLICIT: explicitOnly ? 'false' : 'true' })]
     ].map(([relative, content]) => ({ path: path.join(root, relative), content }));
     const installed = await this.writeOwnedFiles('codex-skill', files);
@@ -256,6 +270,7 @@ class IntegrationManager {
   }
 
   async installWindowsOdr() {
+    if (process.platform !== 'win32') throw codedError('ODR_UNAVAILABLE', 'Windows ODR is available only on Windows.', 'integration');
     const odr = await this.odrExecutable();
     if (!odr) throw codedError('ODR_UNAVAILABLE', 'Windows ODR is not available on this system.', 'integration');
     if (!this.packagedWithIdentity) {
@@ -358,7 +373,7 @@ class IntegrationManager {
         if (!entry) missing = true;
         else if (digest(JSON.stringify(entry)) !== owned.entryDigest) modified = true;
       }
-      const odrAvailable = id === 'windows-odr' ? Boolean(await this.odrExecutable()) : undefined;
+      const odrAvailable = id === 'windows-odr' ? process.platform === 'win32' && Boolean(await this.odrExecutable()) : undefined;
       results.push({
         id,
         enabled: Boolean(owned?.enabled),

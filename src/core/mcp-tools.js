@@ -31,7 +31,8 @@ function validate(value, spec, label = 'arguments') {
   } else if (spec.type === 'string') {
     if (typeof value !== 'string' || value.length < (spec.minLength || 0) || value.length > (spec.maxLength || Infinity) || (spec.enum && !spec.enum.includes(value))) throw new Error(`Invalid ${label}`);
   } else if (spec.type === 'integer') {
-    if (!Number.isSafeInteger(value) || value < (spec.minimum ?? Number.MIN_SAFE_INTEGER) || value > (spec.maximum ?? Number.MAX_SAFE_INTEGER)) throw new Error(`Invalid ${label}`);
+    if (!Number.isSafeInteger(value) || value < (spec.minimum ?? Number.MIN_SAFE_INTEGER) ||
+        value > (spec.maximum ?? Number.MAX_SAFE_INTEGER) || (spec.enum && !spec.enum.includes(value))) throw new Error(`Invalid ${label}`);
   } else if (spec.type === 'number') {
     if (typeof value !== 'number' || !Number.isFinite(value) || value < (spec.minimum ?? -Infinity) || value > (spec.maximum ?? Infinity)) throw new Error(`Invalid ${label}`);
   } else if (spec.type === 'boolean') {
@@ -52,14 +53,14 @@ function projectSummary(record) {
 }
 
 function createMcpTools(manager, services = {}) {
-  let mutating = false;
+  let mutationTail = Promise.resolve();
   const capabilityService = createCapabilityService(manager, {
     ...services,
     tasks: services.tasks || getApplicationTaskService(manager)
   });
   return {
     definitions,
-    async call(name, args = {}) {
+    async call(name, args = {}, context = {}) {
       const definition = definitions.find((tool) => tool.name === name) || legacyDefinitions.find((tool) => tool.name === name);
       if (!definition) throw new Error('Unknown tool');
       validate(args, definition.inputSchema);
@@ -69,13 +70,17 @@ function createMcpTools(manager, services = {}) {
         validate(args.input || {}, described.inputSchema, 'input');
       }
       const readOnly = ['hamster_discover', 'hamster_describe', 'hamster_search', 'hamster_project', 'hamster_jobs'].includes(name) || described?.readOnly === true;
-      if (!readOnly && mutating) throw new Error('BUSY: another AI operation is running. Poll state before retrying.');
-      if (!readOnly) mutating = true;
+      let releaseMutation;
+      if (!readOnly) {
+        const previous = mutationTail;
+        mutationTail = new Promise((resolve) => { releaseMutation = resolve; });
+        await previous;
+      }
       try {
         if (name === 'hamster_discover') return capabilityService.discover(args);
         if (name === 'hamster_describe') return capabilityService.describe(args.capability);
         if (name === 'hamster_call') {
-          return await capabilityService.call(args.capability, args.input || {}, args.confirmationToken || '');
+          return await capabilityService.call(args.capability, args.input || {}, args.confirmationToken || '', context);
         }
         if (name === 'hamster_search') return page(manager.searchCatalog({ query: args.query || '', tag: args.tag || '' }).map(projectSummary), args);
         if (name === 'hamster_project') {
@@ -86,7 +91,7 @@ function createMcpTools(manager, services = {}) {
         if (name === 'hamster_jobs') return { running: manager.running, paused: manager.paused, scheduleWaiting: manager.scheduleWaiting, safetyHalt: Boolean(manager.safetyHalt), ...page(manager.jobs.filter((job) => !args.requestId || job.mcpRequestId === args.requestId).map(jobSummary), args) };
         if (name === 'hamster_batch_import') {
           const preferences = intakePreferences(manager);
-          if (!preferences.configured && !(args.archiveOutputDirectory && args.sourceDisposition)) return preferences;
+          if (args.mode === 'archive' && !preferences.configured && !(args.archiveOutputDirectory && args.sourceDisposition)) return preferences;
           return await capabilityService.call('intake.add_batch', { ...args, start: true });
         }
         const job = manager.findJob(args.jobId);
@@ -103,10 +108,10 @@ function createMcpTools(manager, services = {}) {
         }
         return jobSummary(job);
       } finally {
-        if (!readOnly) mutating = false;
+        releaseMutation?.();
       }
     }
   };
 }
 
-module.exports = { createMcpTools, definitions, jobSummary, legacyDefinitions };
+module.exports = { createMcpTools, definitions, jobSummary, legacyDefinitions, validate };

@@ -3,7 +3,9 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { DatabaseSync } = require('node:sqlite');
-const { findExactFileMatches } = require('../src/core/sqlite-repository');
+const { QueueManager } = require('../src/core/queue-manager');
+const { createMcpTools } = require('../src/core/mcp-tools');
+const { findCatalogIdsByMd5, findCatalogIdsBySearchTerms, findExactFileMatches } = require('../src/core/sqlite-repository');
 
 test('exact file lookup excludes self before ranking and reads each project JSON once', () => {
   const db = new DatabaseSync(':memory:');
@@ -28,5 +30,41 @@ test('exact file lookup excludes self before ranking and reads each project JSON
     assert.equal(matches[0].previous.every((item) => item.archiveId === 'b-other'), true);
     assert.equal(matches[0].previous[0].archiveName, 'b-other.7z');
     assert.equal(findExactFileMatches(db, [{ relativePath: 'bad', md5: '', size: 8 }]).length, 0);
+  } finally { db.close(); }
+});
+
+test('Warehouse and MCP search include all matches beyond the first 2000 indexed records', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('CREATE TABLE catalog_search_terms(record_id TEXT, term TEXT); CREATE TABLE catalog_files(record_id TEXT, md5 TEXT)');
+    const insertTerm = db.prepare('INSERT INTO catalog_search_terms VALUES(?, ?)');
+    const insertFile = db.prepare('INSERT INTO catalog_files VALUES(?, ?)');
+    const md5 = 'a'.repeat(32);
+    const catalog = [];
+    db.exec('BEGIN');
+    for (let index = 0; index < 2001; index += 1) {
+      const id = String(index);
+      insertTerm.run(id, 'char:c');
+      insertFile.run(id, md5);
+      catalog.push({ id, title: `common ${index}`, manifest: [{ relativePath: 'shared.bin', md5, size: 1 }] });
+    }
+    db.exec('COMMIT');
+    const manager = new QueueManager({
+      findCatalogIdsBySearchTerms: (_directory, terms, limit) => findCatalogIdsBySearchTerms(db, terms, limit),
+      findCatalogIdsByMd5: (_directory, value, limit) => findCatalogIdsByMd5(db, value, limit)
+    }, { repositoryDirectory: 'E:\\warehouse' });
+    manager.catalog = catalog;
+
+    assert.equal(manager.searchCatalog('common').length, 2001);
+    assert.equal(manager.searchCatalog(md5).length, 2001);
+    assert.equal(findCatalogIdsBySearchTerms(db, ['char:c'], 200).length, 200);
+    const tools = createMcpTools(manager);
+    const ids = [];
+    for (let offset = 0; offset < 2001; offset += 100) {
+      const page = await tools.call('hamster_call', { capability: 'catalog.search', input: { query: 'common', offset, limit: 100 } });
+      assert.equal(page.total, 2001);
+      ids.push(...page.items.map((item) => item.id));
+    }
+    assert.equal(ids.length, 2001); assert.equal(new Set(ids).size, 2001);
   } finally { db.close(); }
 });

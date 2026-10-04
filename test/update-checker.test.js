@@ -4,6 +4,17 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { checkForUpdates, compareVersions, isStableRelease, resolveCnbConfig, UPDATE_PROVIDER_CONFIG } = require('../src/core/update-checker');
 
+test('Mac beta points to manual GitHub downloads without presenting Windows stable as a Mac update', async () => {
+  const result = await checkForUpdates({
+    currentVersion: '4.8.0-beta.mac.2', distributionMode: 'mac',
+    fetchImpl: () => { throw new Error('Mac manual guidance must not fetch Windows latest'); }
+  });
+  assert.equal(result.distributionMode, 'mac');
+  assert.equal(result.latestVersion, null);
+  assert.equal(result.installable, false);
+  assert.match(result.releaseUrl, /\/releases$/);
+});
+
 test('history paginates, sorts numerically, filters releases and selects the requested language', async () => {
   const release = { tag_name: 'v4.5.18', body: '## 中文\n- 修复归档。\n## English\n- Fix archives.' };
   const calls = [];

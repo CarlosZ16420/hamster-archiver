@@ -8,7 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
 const { spawn } = require('node:child_process');
-const { createDesktopLaunchRequest } = require('./mcp-launch');
+const { createDesktopLaunchRequest, mcpTempDirectory } = require('./mcp-launch');
 
 const MAX_MESSAGE_BYTES = 1024 * 1024;
 const MCP_CLIENT_RUNTIME_SWITCHES = [
@@ -16,12 +16,21 @@ const MCP_CLIENT_RUNTIME_SWITCHES = [
   '--disable-breakpad'
 ];
 const MAX_DIAGNOSTIC_BYTES = 16 * 1024;
+const recentLaunches = new Map();
 const EXPECTED_MCP_TOOLS = ['hamster_discover', 'hamster_describe', 'hamster_call'];
 const WINDOWS_DESKTOP_BROKER_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
   '$shell = New-Object -ComObject Shell.Application',
-  "$shell.ShellExecute($env:HAMSTER_MCP_APPLICATION, '', $env:HAMSTER_MCP_WORKING_DIRECTORY, 'open', 0)"
+  "$shell.ShellExecute($env:HAMSTER_MCP_APPLICATION, ('--mcp-temp-dir=\"' + $env:HAMSTER_MCP_TEMP_DIRECTORY + '\"'), $env:HAMSTER_MCP_WORKING_DIRECTORY, 'open', 0)"
 ].join('; ');
+
+function remainingBudget(deadline, maximumMs = 120_000) {
+  const left = Number.isFinite(deadline) ? Math.ceil(deadline - performance.now()) : maximumMs;
+  if (left <= 0) throw Object.assign(new Error('The total MCP request deadline expired.'), {
+    code: 'DEADLINE_EXCEEDED', stage: 'deadline'
+  });
+  return Math.max(1, Math.min(maximumMs, left));
+}
 
 function parseCli(argv) {
   const args = [...argv];
@@ -58,7 +67,7 @@ function parseCli(argv) {
 
 function resolveApplicationLaunch(appExecutable) {
   if (appExecutable) return { executable: path.resolve(appExecutable), prefixArgs: [] };
-  if (path.basename(process.execPath).toLowerCase() !== 'node.exe') {
+  if (!['node', 'node.exe'].includes(path.basename(process.execPath).toLowerCase())) {
     return { executable: process.execPath, prefixArgs: [] };
   }
   // Source-tree convenience. Packaged use never needs an external Node.js runtime.
@@ -73,6 +82,23 @@ async function readDiagnosticFailure(diagnosticFile) {
     if (!value?.message) return null;
     return Object.assign(new Error(value.message), { code: value.code || 'STARTUP_FAILED', stage: value.stage || 'startup' });
   } catch { return null; }
+}
+
+async function writeLaunchDiagnostic(file, value) {
+  try {
+    await fs.writeFile(file, `${JSON.stringify(value)}\n`, { encoding: 'utf8', flag: 'wx' });
+    return file;
+  } catch (error) {
+    if (error.code !== 'EEXIST') return null;
+    // The application can publish its startup diagnostic before the client does.
+    // Preserve that evidence only after reading a complete diagnostic for this attempt.
+    try {
+      const existing = JSON.parse(await fs.readFile(file, 'utf8'));
+      return existing?.schemaVersion === 1 &&
+        (existing.launchAttemptId == null || existing.launchAttemptId === value.launchAttemptId)
+        ? file : null;
+    } catch { return null; }
+  }
 }
 
 async function waitForReady(readyFile, timeoutMs = 45_000, getLaunchFailure = () => null, diagnosticFile = '') {
@@ -96,10 +122,9 @@ async function waitForReady(readyFile, timeoutMs = 45_000, getLaunchFailure = ()
 
 function launchExitError(code, signal, stderrTail = '') {
   const outcome = signal ? `signal ${signal}` : `exit code ${code}`;
-  const signedCode = Number(code) | 0;
   const gpuEvidence = /gpu process isn't usable|gpu_data_manager/i.test(stderrTail);
   const errorCode = gpuEvidence ? 'GRAPHICS_INITIALIZATION_FAILED' : 'APPLICATION_EXITED';
-  const hint = gpuEvidence || signedCode === -2147483645
+  const hint = gpuEvidence
     ? ' Electron graphics initialization failed while using the system default graphics profile.'
     : '';
   return Object.assign(new Error(
@@ -108,22 +133,37 @@ function launchExitError(code, signal, stderrTail = '') {
   ), { code: errorCode, stage: 'application-start' });
 }
 
+async function readConnectionDiagnostic(connectionFile, connection) {
+  const file = String(connection?.diagnosticRef || '');
+  const expectedDirectory = path.join(path.dirname(connectionFile), 'diagnostics');
+  if (!file || path.dirname(path.resolve(file)).toLowerCase() !== expectedDirectory.toLowerCase() ||
+      !/^instance-[a-f0-9-]{36}\.json$/i.test(path.basename(file))) return null;
+  try {
+    const value = JSON.parse(await fs.readFile(file, 'utf8'));
+    if (value.instanceId !== connection.instanceId || value.pid !== connection.pid) return null;
+    return { file, value };
+  } catch { return null; }
+}
+
 function isUnexpectedLaunchExit(code) {
   // A zero exit commonly means Electron handed the arguments to the already-running
   // single instance. That instance will produce the ready file.
   return code !== 0;
 }
 
-async function startOrConnect(options) {
-  const launch = resolveApplicationLaunch(options.appExecutable);
+async function launchApplication(launch, options) {
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
+  const tempDirectory = mcpTempDirectory([], env);
+  await fs.mkdir(tempDirectory, { recursive: true });
+  const launchAttemptId = crypto.randomUUID();
   let requestFile = '';
+  let failed = false;
   const temporaryFiles = new Set();
   const attemptFiles = () => {
     const nonce = crypto.randomBytes(16).toString('hex');
-    const readyFile = path.join(os.tmpdir(), `hamster-mcp-ready-${process.pid}-${nonce}.json`);
-    const diagnosticFile = path.join(os.tmpdir(), `hamster-mcp-diagnostic-${process.pid}-${nonce}.json`);
+    const readyFile = path.join(tempDirectory, `hamster-mcp-ready-${process.pid}-${nonce}.json`);
+    const diagnosticFile = path.join(tempDirectory, `hamster-mcp-diagnostic-${process.pid}-${nonce}.json`);
     temporaryFiles.add(readyFile);
     temporaryFiles.add(diagnosticFile);
     return { readyFile, diagnosticFile };
@@ -135,6 +175,8 @@ async function startOrConnect(options) {
       ...MCP_CLIENT_RUNTIME_SWITCHES,
       '--enable-mcp',
       '--background',
+      `--mcp-temp-dir=${tempDirectory}`,
+      `--mcp-launch-attempt-id=${launchAttemptId}`,
       `--mcp-ready-file=${readyFile}`,
       `--mcp-diagnostic-file=${diagnosticFile}`
     ];
@@ -142,6 +184,9 @@ async function startOrConnect(options) {
     const child = spawn(launch.executable, args, { cwd: path.dirname(launch.executable), detached: true, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: !options.showUi, env });
     let launchFailure = null;
     let stderrTail = '';
+    let readyConnectionFile = '';
+    let resolveCloseEvidence;
+    const closeEvidence = new Promise((resolve) => { resolveCloseEvidence = resolve; });
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (chunk) => { stderrTail = `${stderrTail}${chunk}`.slice(-MAX_DIAGNOSTIC_BYTES); });
     child.once('error', (error) => {
@@ -150,9 +195,31 @@ async function startOrConnect(options) {
     child.once('exit', (code, signal) => {
       if (isUnexpectedLaunchExit(code)) launchFailure = launchExitError(code, signal, stderrTail);
     });
+    child.once('close', (code, signal) => {
+      const knownCause = /gpu process isn't usable|gpu_data_manager/i.test(stderrTail)
+        ? 'graphics_initialization' : code === 0 ? 'normal_exit' : 'unknown';
+      const exit = { code, signal, stderrTail, knownCause, at: new Date().toISOString() };
+      const previous = recentLaunches.get(readyConnectionFile) || {};
+      if (readyConnectionFile) recentLaunches.set(readyConnectionFile, { ...previous, exit });
+      const writeDiagnostic = code === 0 ? Promise.resolve(null) : writeLaunchDiagnostic(diagnosticFile,
+        { schemaVersion: 1, launchAttemptId,
+          instanceId: previous.instanceId || null, code: 'APPLICATION_EXITED', knownCause,
+          exitCode: code, signal, stderrTail: stderrTail.slice(-MAX_DIAGNOSTIC_BYTES),
+          at: exit.at });
+      void writeDiagnostic.then((diagnosticRef) => resolveCloseEvidence({ exit, diagnosticRef }));
+    });
     child.unref();
-    try { return await waitForReady(readyFile, 45_000, () => launchFailure, diagnosticFile); }
-    finally { child.stderr?.destroy(); }
+    child.stderr?.unref?.();
+    try {
+      readyConnectionFile = await waitForReady(readyFile, remainingBudget(options.deadline, 45_000), () => launchFailure, diagnosticFile);
+      const ready = JSON.parse(await fs.readFile(readyFile, 'utf8'));
+      recentLaunches.set(readyConnectionFile, { ...(recentLaunches.get(readyConnectionFile) || {}),
+        launchAttemptId, instanceId: ready.instanceId || null, closeEvidence });
+      // The child may exit immediately after ready. Keep its diagnostic file for
+      // the later request even if launchApplication has already returned.
+      temporaryFiles.delete(diagnosticFile);
+      return readyConnectionFile;
+    } catch (error) { child.stderr?.destroy(); throw error; }
   }
   try {
     if (process.platform === 'win32' && launch.prefixArgs.length === 0) {
@@ -161,7 +228,9 @@ async function startOrConnect(options) {
         applicationExecutable: launch.executable,
         readyFile,
         diagnosticFile,
-        showUi: options.showUi
+        launchAttemptId,
+        showUi: options.showUi,
+        tempDirectory
       });
       const windowsRoot = env.SystemRoot || env.WINDIR || 'C:\\Windows';
       const powerShell = path.join(windowsRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
@@ -176,7 +245,8 @@ async function startOrConnect(options) {
         env: {
           ...env,
           HAMSTER_MCP_APPLICATION: launch.executable,
-          HAMSTER_MCP_WORKING_DIRECTORY: path.dirname(launch.executable)
+          HAMSTER_MCP_WORKING_DIRECTORY: path.dirname(launch.executable),
+          HAMSTER_MCP_TEMP_DIRECTORY: tempDirectory
         }
       });
       let brokerFailure = null;
@@ -190,7 +260,10 @@ async function startOrConnect(options) {
       });
       broker.unref();
       try {
-        return await waitForReady(readyFile, 45_000, () => brokerFailure, diagnosticFile);
+        const connectionFile = await waitForReady(readyFile, remainingBudget(options.deadline, 45_000), () => brokerFailure, diagnosticFile);
+        const ready = JSON.parse(await fs.readFile(readyFile, 'utf8'));
+        recentLaunches.set(connectionFile, { launchAttemptId, instanceId: ready.instanceId || null });
+        return connectionFile;
       } catch (brokerError) {
         await fs.rm(requestFile, { force: true }).catch(() => {});
         requestFile = '';
@@ -203,15 +276,124 @@ async function startOrConnect(options) {
       }
     }
     return await startDirectly();
+  } catch (error) {
+    failed = true;
+    error.launchAttemptId = launchAttemptId;
+    error.knownCause = error.code === 'GRAPHICS_INITIALIZATION_FAILED'
+      ? 'graphics_initialization' : 'unknown';
+    const diagnosticFile = [...temporaryFiles].find((file) => path.basename(file).startsWith('hamster-mcp-diagnostic-'));
+    if (diagnosticFile) {
+      const diagnosticRef = await writeLaunchDiagnostic(diagnosticFile, { schemaVersion: 1, launchAttemptId,
+        code: error.code || 'STARTUP_FAILED', stage: error.stage || 'application-start',
+        knownCause: error.knownCause, message: String(error.message).slice(-MAX_DIAGNOSTIC_BYTES),
+        at: new Date().toISOString() });
+      if (diagnosticRef) error.diagnosticRef = diagnosticRef;
+    }
+    throw error;
   } finally {
     await Promise.all([
-      ...[...temporaryFiles].map((file) => fs.rm(file, { force: true }).catch(() => {})),
+      ...[...temporaryFiles].filter((file) => !failed || !path.basename(file).startsWith('hamster-mcp-diagnostic-'))
+        .map((file) => fs.rm(file, { force: true }).catch(() => {})),
       requestFile ? fs.rm(requestFile, { force: true }).catch(() => {}) : Promise.resolve()
     ]);
   }
 }
 
-async function request(connectionFile, message) {
+async function connectionIsLive(connectionFile) {
+  try {
+    const connection = JSON.parse(await fs.readFile(connectionFile, 'utf8'));
+    if (!Number.isInteger(connection.pid) || connection.pid < 1) return false;
+    process.kill(connection.pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+async function coordinateLaunch(directory, start, timeoutMs = 105_000) {
+  const ownerFile = path.join(directory, 'owner.json');
+  const resultFile = path.join(directory, 'result.json');
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await fs.mkdir(directory, { mode: 0o700 });
+      await fs.writeFile(ownerFile, JSON.stringify({ pid: process.pid, startedAt: Date.now() }), { flag: 'wx' });
+      try {
+        const connectionFile = await start();
+        const pendingResult = path.join(directory, `result-${process.pid}.json`);
+        await fs.writeFile(pendingResult, JSON.stringify({ connectionFile }), { flag: 'wx' });
+        await fs.rename(pendingResult, resultFile);
+        return connectionFile;
+      } catch (error) {
+        await fs.unlink(ownerFile).catch(() => {});
+        await fs.rmdir(directory).catch(() => {});
+        throw error;
+      }
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+    }
+    let stale = false;
+    try {
+      const result = JSON.parse(await fs.readFile(resultFile, 'utf8'));
+      if (typeof result.connectionFile === 'string' && path.isAbsolute(result.connectionFile) &&
+          await connectionIsLive(result.connectionFile)) return result.connectionFile;
+      stale = true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') stale = true;
+      else {
+        try {
+          const owner = JSON.parse(await fs.readFile(ownerFile, 'utf8'));
+          if (!Number.isInteger(owner.pid) || owner.pid < 1) stale = true;
+          else process.kill(owner.pid, 0);
+        } catch (ownerError) {
+          if (ownerError?.code !== 'ENOENT' && ownerError?.code !== 'EPERM') stale = true;
+        }
+        const age = Date.now() - (await fs.stat(directory).catch(() => ({ mtimeMs: Date.now() }))).mtimeMs;
+        if (age > 120_000) stale = true;
+      }
+    }
+    if (stale) {
+      const abandoned = `${directory}-${crypto.randomBytes(6).toString('hex')}`;
+      try {
+        await fs.rename(directory, abandoned);
+        const names = await fs.readdir(abandoned);
+        await Promise.all(names.filter((name) => name === 'owner.json' || name === 'result.json' ||
+          /^result-\d+\.json$/.test(name)).map((name) => fs.unlink(path.join(abandoned, name)).catch(() => {})));
+        await fs.rmdir(abandoned).catch(() => {});
+      } catch { /* Another process already replaced the rendezvous. */ }
+      continue;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw Object.assign(new Error(`Hamster Archiver MCP launch did not become ready within ${Math.ceil(timeoutMs / 1000)} seconds.`), {
+    code: 'STARTUP_TIMEOUT', stage: 'ready'
+  });
+}
+
+async function startOrConnect(options) {
+  const launch = resolveApplicationLaunch(options.appExecutable);
+  if (process.platform !== 'win32' || launch.prefixArgs.length > 0 || options.showUi) {
+    return launchApplication(launch, options);
+  }
+
+  // A burst of CLI processes must share one desktop launch. Each process still
+  // reads the application's own connection file; this rendezvous stores no token.
+  const key = crypto.createHash('sha256').update(JSON.stringify([
+    launch.executable.toLowerCase(),
+    process.env.HAMSTER_DEV_USER_DATA_DIR || '',
+    process.env.HAMSTER_LOCAL_ROOT || '',
+    process.env.HAMSTER_SMOKE_USER_DATA_DIR || '',
+    mcpTempDirectory([], process.env)
+  ])).digest('hex').slice(0, 24);
+  return coordinateLaunch(
+    path.join(mcpTempDirectory([], process.env), `hamster-mcp-start-${key}`),
+    () => launchApplication(launch, options),
+    remainingBudget(options.deadline, 105_000)
+  );
+}
+
+async function request(connectionFile, message, options = {}) {
+  const timeoutMs = remainingBudget(options.deadline, options.timeoutMs || 120_000);
   const connection = JSON.parse(await fs.readFile(connectionFile, 'utf8'));
   if (typeof connection.token !== 'string' || !/^[0-9a-f]{64}$/i.test(connection.token)) {
     throw Object.assign(new Error('Invalid local MCP connection token'), { code: 'CONNECTION_INVALID', stage: 'request' });
@@ -223,7 +405,7 @@ async function request(connectionFile, message) {
   let response;
   try {
     response = await fetch(url, {
-      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(120_000),
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
       headers: { 'Content-Type': 'application/json', Accept: 'application/json', Authorization: `Bearer ${connection.token}` },
       body: JSON.stringify(message)
     });
@@ -234,18 +416,50 @@ async function request(connectionFile, message) {
       catch (failure) { processAlive = failure.code === 'EPERM'; }
     }
     const stale = processAlive === false;
+    const recentLaunch = recentLaunches.get(connectionFile) || {};
+    let closeEvidence = null;
+    if (stale && recentLaunch.closeEvidence) {
+      const waitMs = Math.min(500, Number.isFinite(options.deadline)
+        ? Math.max(0, options.deadline - performance.now()) : 500);
+      if (waitMs > 0) {
+        let timer;
+        try {
+          closeEvidence = await Promise.race([recentLaunch.closeEvidence,
+            new Promise((resolve) => { timer = setTimeout(() => resolve(null), waitMs); })]);
+        } finally { clearTimeout(timer); }
+      }
+    }
+    const launch = { ...(recentLaunches.get(connectionFile) || recentLaunch), ...(closeEvidence || {}) };
+    const persisted = stale ? await readConnectionDiagnostic(connectionFile, connection) : null;
+    const gpuEventAge = Date.now() - Date.parse(persisted?.value?.childProcess?.at || '');
+    const persistedCause = persisted?.value?.knownCause === 'gpu_process_failure' &&
+      (!Number.isFinite(gpuEventAge) || gpuEventAge > 60_000)
+      ? 'unknown' : persisted?.value?.knownCause;
+    const knownCause = stale ? launch.exit?.knownCause || persistedCause || 'unknown' : 'unknown';
+    const deadlineExpired = Number.isFinite(options.deadline) && performance.now() >= options.deadline;
+    const timedOut = ['AbortError', 'TimeoutError'].includes(error?.name);
     throw Object.assign(new Error(stale
       ? `The MCP connection is stale: Hamster Archiver process ${connection.pid} is no longer running.`
-      : `Could not reach the local Hamster Archiver MCP endpoint: ${error.message}`), {
-      code: stale ? 'CONNECTION_STALE' : 'CONNECTION_FAILED', stage: 'request'
+      : deadlineExpired ? 'The total MCP request deadline expired before a response was received.'
+        : timedOut ? 'The local MCP endpoint did not respond in time.'
+          : `Could not reach the local Hamster Archiver MCP endpoint: ${error.message}`), {
+      code: stale && knownCause === 'graphics_initialization' ? 'GRAPHICS_INITIALIZATION_FAILED'
+        : stale ? 'CONNECTION_STALE' : deadlineExpired ? 'DEADLINE_EXCEEDED'
+          : timedOut ? 'CONNECTION_TIMEOUT' : 'CONNECTION_FAILED',
+      stage: deadlineExpired ? 'deadline' : 'request', knownCause,
+      launchAttemptId: launch.launchAttemptId || persisted?.value?.launchAttemptId || null,
+      instanceId: connection.instanceId || launch.instanceId || null,
+      requestId: message?.params?.arguments?.input?.requestId || null,
+      taskId: message?.params?.arguments?.input?.taskId || null,
+      diagnosticRef: launch.diagnosticRef || persisted?.file || null
     });
   }
   if (!response.ok) throw new Error(`Local MCP request failed (${response.status})`);
   return response.status === 202 || response.status === 204 ? null : response.json();
 }
 
-async function withSession(connectionFile, action) {
-  const acquired = await request(connectionFile, { jsonrpc: '2.0', id: 'session-acquire', method: 'hamster/session/acquire' });
+async function withSession(connectionFile, action, options = {}) {
+  const acquired = await request(connectionFile, { jsonrpc: '2.0', id: 'session-acquire', method: 'hamster/session/acquire' }, options);
   if (acquired?.error || typeof acquired?.result?.sessionId !== 'string') {
     throw Object.assign(new Error(acquired?.error?.message || 'The local MCP session could not be acquired.'), {
       code: 'SESSION_ACQUIRE_FAILED', stage: 'session'
@@ -253,17 +467,24 @@ async function withSession(connectionFile, action) {
   }
   const sessionId = acquired.result.sessionId;
   let heartbeatFailureReported = false;
+  let heartbeatInFlight = false;
   const heartbeat = sessionId && setInterval(() => {
-    void request(connectionFile, { jsonrpc: '2.0', id: 'session-touch', method: 'hamster/session/touch', params: { sessionId } }).catch((error) => {
+    if (heartbeatInFlight) return;
+    heartbeatInFlight = true;
+    void request(connectionFile, { jsonrpc: '2.0', id: 'session-touch', method: 'hamster/session/touch', params: { sessionId } }, {
+      deadline: options.deadline, timeoutMs: 1_000
+    }).catch((error) => {
       if (!heartbeatFailureReported) process.stderr.write(`MCP heartbeat failed: ${error.message}\n`);
       heartbeatFailureReported = true;
-    });
+    }).finally(() => { heartbeatInFlight = false; });
   }, 15_000);
   heartbeat?.unref?.();
   try { return await action(); }
   finally {
     if (heartbeat) clearInterval(heartbeat);
-    if (sessionId) await request(connectionFile, { jsonrpc: '2.0', id: 'session-release', method: 'hamster/session/release', params: { sessionId } }).catch(() => {});
+    if (sessionId) await request(connectionFile, { jsonrpc: '2.0', id: 'session-release', method: 'hamster/session/release', params: { sessionId } }, {
+      timeoutMs: 750
+    }).catch(() => {});
   }
 }
 
@@ -387,7 +608,7 @@ async function runOneShot(connectionFile, options) {
     if (!argumentsValue || Array.isArray(argumentsValue) || typeof argumentsValue !== 'object') throw Object.assign(new Error('JSON input must contain one JSON object.'), { code: 'INVALID_JSON' });
     rpc = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: argumentsValue } };
   }
-  const response = await withSession(connectionFile, () => request(connectionFile, rpc));
+  const response = await withSession(connectionFile, () => request(connectionFile, rpc, options), options);
   if (response?.error) throw new Error(response.error.message);
   const result = response?.result;
   const output = result?.structuredContent ?? result;
@@ -397,12 +618,12 @@ async function runOneShot(connectionFile, options) {
 
 async function runDoctor(connectionFile, options) {
   const result = await withSession(connectionFile, async () => {
-    const initializedResponse = await request(connectionFile, { jsonrpc: '2.0', id: 'doctor-init', method: 'initialize', params: { protocolVersion: '2025-11-25', clientInfo: { name: 'hamster-doctor', version: '1' }, capabilities: {} } });
+    const initializedResponse = await request(connectionFile, { jsonrpc: '2.0', id: 'doctor-init', method: 'initialize', params: { protocolVersion: '2025-11-25', clientInfo: { name: 'hamster-doctor', version: '1' }, capabilities: {} } }, options);
     rpcResult(initializedResponse, 'initialize');
-    await request(connectionFile, { jsonrpc: '2.0', method: 'notifications/initialized' });
+    await request(connectionFile, { jsonrpc: '2.0', method: 'notifications/initialized' }, options);
     const [runtimeResponse, toolsResponse] = await Promise.all([
-      request(connectionFile, { jsonrpc: '2.0', id: 'doctor-runtime', method: 'hamster/runtime/status' }),
-      request(connectionFile, { jsonrpc: '2.0', id: 'doctor-tools', method: 'tools/list' })
+      request(connectionFile, { jsonrpc: '2.0', id: 'doctor-runtime', method: 'hamster/runtime/status' }, options),
+      request(connectionFile, { jsonrpc: '2.0', id: 'doctor-tools', method: 'tools/list' }, options)
     ]);
     const connection = JSON.parse(await fs.readFile(connectionFile, 'utf8'));
     const { initialized, runtime, names } = validateDoctorResults(initializedResponse, runtimeResponse, toolsResponse, connection);
@@ -413,12 +634,13 @@ async function runDoctor(connectionFile, options) {
       runtime,
       tools: names
     };
-  });
+  }, options);
   await writeOutput(result, options.outputFile, options.outputReserved === true);
 }
 
 async function main(argv = process.argv.slice(2)) {
   const options = parseCli(argv);
+  if (options.command !== 'stdio') options.deadline = performance.now() + 120_000;
   const outputReserved = await reserveOutputFile(options.outputFile);
   options.outputReserved = outputReserved;
   try {
@@ -444,10 +666,13 @@ if (require.main === module) main().catch((error) => {
 module.exports = {
   MCP_CLIENT_RUNTIME_SWITCHES,
   EXPECTED_MCP_TOOLS,
+  coordinateLaunch,
   isUnexpectedLaunchExit,
+  launchApplication,
   main,
   parseCli,
   readJsonArguments,
+  remainingBudget,
   reserveOutputFile,
   request,
   resolveApplicationLaunch,

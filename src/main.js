@@ -4,8 +4,7 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const crypto = require('node:crypto');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, shell, Tray } = require('electron');
-const { AppStore, writeJsonAtomic } = require('./core/store');
-const { QueueManager } = require('./core/queue-manager');
+const { performanceTrace } = require('./core/performance-trace');
 const {
   makeArchiveStagingDirectory,
   makeDefaultConfig,
@@ -22,33 +21,39 @@ const {
   resolveUserDataRootFromLocationFile,
   userDataLocationPath
 } = require('./core/storage-paths');
-const { prepareUserDataTarget } = require('./core/storage-migration');
+const { inspectUserDataStartup } = require('./core/storage-migration');
 const { IMAGE_EXTENSIONS, LARGE_TASK_BYTES, isVideoFile } = require('./core/constants');
-const { createThumbnails: generateThumbnails } = require('./core/thumbnail-service');
-const { checkForUpdates } = require('./core/update-checker');
-const {
-  prepareUpdate,
-  prepareLocalUpdate,
-  prepareInstalledUpdate,
-  prepareLocalInstalledUpdate,
-  launchUpdate,
-  launchInstalledUpdate,
-  cleanupSuccessfulUpdateRuns,
-  consumeUpdateFailure,
-  readUpdateSuccessNotice,
-  manualUpdateInstructions
-} = require('./core/update-manager');
 const { formatReleaseNotes } = require('./core/release-notes');
 const { findTrashItems, isTrashItemPresent, restoreTrashItem } = require('./core/recycle-bin');
 const { verifyReleaseManifestAtStartup } = require('./core/startup-integrity');
 const { resolveDevelopmentUserDataRoot } = require('./core/development-paths');
-const { isValidMcpDiagnosticFile, isValidMcpReadyFile, takeDesktopLaunchRequest } = require('./core/mcp-launch');
-const rendererI18n = require('./renderer/i18n');
+const { isValidMcpDiagnosticFile, isValidMcpReadyFile, mcpTempDirectory, takeDesktopLaunchRequest } = require('./core/mcp-launch');
+
+// Keep the initial process light enough to create the startup window before
+// parsing the archive, database, media and update implementation.
+let AppStore, QueueManager, generateThumbnails, checkForUpdates, rendererI18n;
+let prepareUpdate, prepareLocalUpdate, prepareInstalledUpdate, prepareLocalInstalledUpdate;
+let launchUpdate, launchInstalledUpdate, cleanupSuccessfulUpdateRuns;
+let consumeUpdateFailure, readUpdateSuccessNotice, manualUpdateInstructions;
+
+function loadRuntimeModules() {
+  ({ AppStore } = require('./core/store'));
+  ({ QueueManager } = require('./core/queue-manager'));
+  ({ createThumbnails: generateThumbnails } = require('./core/thumbnail-service'));
+  ({ checkForUpdates } = require('./core/update-checker'));
+  ({ prepareUpdate, prepareLocalUpdate, prepareInstalledUpdate, prepareLocalInstalledUpdate,
+    launchUpdate, launchInstalledUpdate, cleanupSuccessfulUpdateRuns,
+    consumeUpdateFailure, readUpdateSuccessNotice, manualUpdateInstructions } = require('./core/update-manager'));
+}
+
+function writeJsonAtomic(filePath, value) {
+  return require('./core/store').writeJsonAtomic(filePath, value);
+}
 
 // Let Windows choose the nearest native-size frame from the multi-resolution
 // ICO. Passing the 1024px PNG here makes the title-bar icon downsample at
 // runtime and produces a visibly soft 16px glyph.
-const appIconPath = path.join(__dirname, '..', 'assets', 'app-icon.ico');
+const appIconPath = path.join(__dirname, '..', 'assets', process.platform === 'darwin' ? 'app-icon.png' : 'app-icon.ico');
 const releasesUrl = 'https://github.com/CarlosZ16420/hamster-archiver/releases';
 const packageMetadata = require('../package.json');
 const distributionMode = packageMetadata.distributionMode === 'installed' ? 'installed' : 'portable';
@@ -65,6 +70,7 @@ let shutdownLogInProgress = false;
 let shutdownLogComplete = false;
 let scheduleTimer = null;
 let mcpServer = null;
+let recentGpuFailure = null;
 let mcpServerStarting = null;
 let mcpApplicationServices = null;
 let integrationManager = null;
@@ -87,6 +93,7 @@ const applicationInitialized = new Promise((resolve) => { resolveApplicationInit
 let lastCatalogPushSignature = '';
 const isSmokeTest = process.env.HAMSTER_SMOKE_TEST === '1';
 const isStartupIntegrityTest = process.env.HAMSTER_STARTUP_INTEGRITY_TEST === '1';
+if (isSmokeTest && process.platform === 'darwin') console.log('HAMSTER_MAC_SMOKE_BOOT');
 if (isSmokeTest) {
   // Electron may outlive the test runner's captured output pipe for a few milliseconds.
   // A closed diagnostic pipe must not surface as a main-process JavaScript error dialog.
@@ -100,7 +107,7 @@ const projectRoot = path.resolve(__dirname, '..');
 const defaultElectronUserDataRoot = app.getPath('userData');
 const applicationRoot = isSmokeTest && process.env.HAMSTER_SMOKE_USER_DATA_DIR
   ? path.join(path.resolve(process.env.HAMSTER_SMOKE_USER_DATA_DIR), 'portable-root')
-  : app.isPackaged ? path.dirname(app.getPath('exe')) : projectRoot;
+  : app.isPackaged ? (process.platform === 'darwin' ? process.resourcesPath : path.dirname(app.getPath('exe'))) : projectRoot;
 const activeUserDataLocationPath = isSmokeTest || !isInstalledDistribution
   ? userDataLocationPath(applicationRoot)
   : userDataLocationPath(defaultElectronUserDataRoot);
@@ -119,15 +126,16 @@ const electronRuntimeDirectory = (isSmokeTest || isStartupIntegrityTest) && proc
 app.setPath('userData', electronRuntimeDirectory);
 const hasSingleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
 const startupDesktopMcpRequest = hasSingleInstanceLock && !isSmokeTest
-  ? takeDesktopLaunchRequest({ applicationExecutable: process.execPath })
+  ? takeDesktopLaunchRequest({ applicationExecutable: process.execPath,
+      tempDirectory: mcpTempDirectory(process.argv) })
   : null;
 const startupRequestsMcp = Boolean(startupDesktopMcpRequest) || process.argv.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1';
-if (isSmokeTest) {
+if (isSmokeTest && process.platform !== 'darwin') {
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('disable-gpu');
   app.commandLine.appendSwitch('disable-gpu-compositing');
 }
-app.setAppUserModelId('com.carlosz.hamsterarchiver');
+if (process.platform === 'win32') app.setAppUserModelId('com.carlosz.hamsterarchiver');
 
 function usesEnglishUi() {
   if (queueManager?.config?.language) return queueManager.config.language === 'en-US';
@@ -140,6 +148,7 @@ function defaultInterfaceLanguage() {
 
 function nativeText(value, english = usesEnglishUi()) {
   if (!english || typeof value !== 'string') return value;
+  rendererI18n ||= require('./renderer/i18n');
   const previousLocale = rendererI18n.getLocale();
   rendererI18n.setLocale('en-US');
   try {
@@ -156,7 +165,7 @@ async function appendRuntimeLog(level, message, jobId = null) {
     await queueManager.log(level, message, jobId);
     return;
   }
-  const store = appStore || new AppStore(makeUserDataLayout(applicationRoot, null, configuredUserDataRoot));
+  const store = appStore || new (require('./core/store').AppStore)(makeUserDataLayout(applicationRoot, null, configuredUserDataRoot));
   await store.appendLog('', {
     at: new Date().toISOString(),
     level,
@@ -176,11 +185,8 @@ async function runLoggedAction(label, operation) {
 }
 
 function logStartupTiming(stage, details = {}) {
-  console.log(`HAMSTER_STARTUP_TIMING ${JSON.stringify({
-    stage,
-    elapsedMs: Math.round(Date.now() - startupStartedAt),
-    ...details
-  })}`);
+  performanceTrace.record({ stage, elapsedMs: Date.now() - startupStartedAt,
+    candidateCount: details.records, mode: details.cacheHit ? 'cache_hit' : undefined });
 }
 
 function catalogPushSignature(catalog) {
@@ -195,10 +201,23 @@ if (!hasSingleInstanceLock) {
   app.quit();
 }
 
+app.on('child-process-gone', (_event, details) => {
+  if (details?.type !== 'GPU' || details.reason === 'clean-exit') return;
+  recentGpuFailure = { type: 'GPU', reason: String(details.reason || 'unknown').slice(0, 64),
+    exitCode: Number.isInteger(details.exitCode) ? details.exitCode : null,
+    at: new Date().toISOString() };
+  if (mcpServer) void mcpServer.updateDiagnostic({ stage: 'child-process-gone',
+    knownCause: 'gpu_process_failure', childProcess: recentGpuFailure }).catch(() => {});
+});
+
 app.on('second-instance', (_event, argv) => {
-  const desktopRequest = takeDesktopLaunchRequest({ applicationExecutable: process.execPath });
+  const desktopRequest = takeDesktopLaunchRequest({ applicationExecutable: process.execPath,
+    tempDirectory: mcpTempDirectory(argv) });
   const effectiveArgs = desktopRequest
-    ? ['--enable-mcp', '--background', `--mcp-ready-file=${desktopRequest.readyFile}`, `--mcp-diagnostic-file=${desktopRequest.diagnosticFile}`, ...(desktopRequest.showUi ? ['--show-ui'] : [])]
+    ? ['--enable-mcp', '--background', `--mcp-temp-dir=${mcpTempDirectory(argv)}`,
+        `--mcp-ready-file=${desktopRequest.readyFile}`, `--mcp-diagnostic-file=${desktopRequest.diagnosticFile}`,
+        ...(desktopRequest.launchAttemptId ? [`--mcp-launch-attempt-id=${desktopRequest.launchAttemptId}`] : []),
+        ...(desktopRequest.showUi ? ['--show-ui'] : [])]
     : argv;
   if (effectiveArgs.includes('--enable-mcp')) {
     void enableMcpForArguments(effectiveArgs).catch(async (error) => {
@@ -217,12 +236,12 @@ function argumentValue(argv, name) {
 
 function validatedMcpReadyFile(argv) {
   const value = argumentValue(argv, '--mcp-ready-file');
-  return isValidMcpReadyFile(value) ? path.resolve(value) : null;
+  return isValidMcpReadyFile(value, mcpTempDirectory(argv)) ? path.resolve(value) : null;
 }
 
 function validatedMcpDiagnosticFile(argv) {
   const value = argumentValue(argv, '--mcp-diagnostic-file');
-  return isValidMcpDiagnosticFile(value) ? path.resolve(value) : null;
+  return isValidMcpDiagnosticFile(value, mcpTempDirectory(argv)) ? path.resolve(value) : null;
 }
 
 async function writeMcpReadyFile(argv) {
@@ -232,6 +251,7 @@ async function writeMcpReadyFile(argv) {
     schemaVersion: 2,
     connectionFile: mcpServer.connectionFile,
     instanceId: mcpServer.instanceId,
+    launchAttemptId: argumentValue(argv, '--mcp-launch-attempt-id') || null,
     startedAt: mcpServer.startedAt
   });
 }
@@ -243,6 +263,7 @@ async function writeMcpStartupDiagnostic(argv, error, stage = 'startup') {
     schemaVersion: 1,
     code: error?.code || 'STARTUP_FAILED',
     stage,
+    launchAttemptId: argumentValue(argv, '--mcp-launch-attempt-id') || null,
     message: String(error?.message || error || 'Hamster Archiver failed to start.'),
     at: new Date().toISOString()
   }).catch(() => {});
@@ -282,8 +303,8 @@ async function readStartupPreferences() {
 }
 
 async function createStartupWindow() {
-  const preferences = await readStartupPreferences();
-  startupUsesEnglish = preferences.language === 'en-US';
+  const preferencesPromise = readStartupPreferences();
+  const language = defaultInterfaceLanguage();
   startupWindow = new BrowserWindow({
     show: !isStartupIntegrityTest,
     width: 460,
@@ -291,22 +312,28 @@ async function createStartupWindow() {
     resizable: false,
     maximizable: false,
     minimizable: true,
-    title: preferences.language === 'en-US' ? 'Starting Hamster Archiver' : '正在启动 Hamster Archiver',
+    title: language === 'en-US' ? 'Starting Hamster Archiver' : '正在启动 Hamster Archiver',
     icon: appIconPath,
-    backgroundColor: ['night', 'twilight'].includes(preferences.theme) ? '#17191f' : '#f7f7f8',
+    backgroundColor: '#f7f7f8',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
     }
   });
-  startupWindow.removeMenu();
+  if (process.platform !== 'darwin') startupWindow.removeMenu();
   logStartupTiming('startup-window-created');
-  startupWindow.once('ready-to-show', () => {
-    if (!isStartupIntegrityTest) startupWindow?.show();
+  const browserWindow = startupWindow;
+  browserWindow.once('ready-to-show', () => {
+    if (!isStartupIntegrityTest && !browserWindow.isDestroyed()) browserWindow.show();
     logStartupTiming('startup-window-ready');
   });
-  await startupWindow.loadFile(path.join(__dirname, 'renderer', 'startup.html'), {
+  // Show the native window immediately; reading preferences must not hold it up.
+  const preferences = await preferencesPromise;
+  if (browserWindow.isDestroyed()) throw new Error('界面在加载完成前已关闭。');
+  startupUsesEnglish = preferences.language === 'en-US';
+  browserWindow.setTitle(startupUsesEnglish ? 'Starting Hamster Archiver' : '正在启动 Hamster Archiver');
+  await browserWindow.loadFile(path.join(__dirname, 'renderer', 'startup.html'), {
     query: { language: preferences.language, theme: preferences.theme }
   });
 }
@@ -335,7 +362,8 @@ function clearMcpIdleTimer() {
 }
 
 function hasActiveMcpWork() {
-  return (queueManager?.jobs || []).some((job) => job.mcpRequestId && ![
+  return (queueManager?.jobs || []).some((job) => job.mcpRequestId &&
+    job.automationStartAuthorized !== false && ![
     'failed', 'cancelled', 'skipped_duplicate'
   ].includes(job.status) && !String(job.status || '').startsWith('completed'));
 }
@@ -410,8 +438,7 @@ function createMcpTray() {
   }
 }
 
-async function enableMcpForArguments(argv) {
-  await applicationInitialized;
+function getApplicationServices() {
   if (!mcpApplicationServices) {
     const { createMcpApplicationServices } = require('./core/mcp-application-services');
     mcpApplicationServices = createMcpApplicationServices({
@@ -436,22 +463,42 @@ async function enableMcpForArguments(argv) {
       }
     });
   }
+  return mcpApplicationServices;
+}
+
+async function enableMcpForArguments(argv) {
+  await applicationInitialized;
+  getApplicationServices();
   if (!mcpServerStarting) {
     mcpServerStarting = require('./core/mcp-server')
       .startMcpServer(queueManager, queueManager.config.userDataDirectory, app.getVersion(), {
+        launchAttemptId: argumentValue(argv, '--mcp-launch-attempt-id') || null,
         services: mcpApplicationServices,
         onSessionCountChanged: handleMcpSessionCountChanged,
         getRuntimeStatus: () => ({
           pid: process.pid,
+          applicationRoot,
+          userDataRoot: configuredUserDataRoot,
+          repositoryDirectory: queueManager.config.repositoryDirectory,
           background: startedAsMcpBackground,
           windowCount: BrowserWindow.getAllWindows().length,
           hasVisibleWindow: BrowserWindow.getAllWindows().some((window) => window.isVisible())
         })
       })
-      .then((server) => { mcpServer = server; return server; })
+      .then((server) => {
+        mcpServer = server;
+        if (recentGpuFailure && Date.now() - Date.parse(recentGpuFailure.at) < 60_000) {
+          void server.updateDiagnostic({ stage: 'child-process-gone',
+          knownCause: 'gpu_process_failure', childProcess: recentGpuFailure }).catch(() => {});
+        }
+        if (queueManager?.runtimeIdentity) queueManager.runtimeIdentity.instanceId = server.instanceId;
+        return server;
+      })
       .catch((error) => { mcpServerStarting = null; throw error; });
   }
   await mcpServerStarting;
+  const launchAttemptId = argumentValue(argv, '--mcp-launch-attempt-id');
+  if (launchAttemptId) await mcpServer.updateDiagnostic({ launchAttemptId, stage: 'ready' });
   createMcpTray();
   await writeMcpReadyFile(argv);
   handleMcpSessionCountChanged(mcpServer.sessionCount);
@@ -598,18 +645,19 @@ async function showUpdateFailureDialog({ error, releaseUrl = releasesUrl, runRoo
 
 async function ensureArchiveOutputDirectoryBeforeStart() {
   const configuredPath = String(queueManager?.config?.archiveOutputDirectory || '').trim();
-  if (!configuredPath) return true;
-  const resolvedPath = path.resolve(configuredPath);
-  try {
-    const stats = await fs.stat(resolvedPath);
-    if (!stats.isDirectory()) throw new Error('压缩包存储位置不是文件夹。');
-    return true;
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+  const english = usesEnglishUi();
+  const resolvedPath = configuredPath ? path.resolve(configuredPath) : '';
+  if (configuredPath) {
+    try {
+      const stats = await fs.stat(resolvedPath);
+      if (!stats.isDirectory()) throw new Error('压缩包存储位置不是文件夹。');
+      return true;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
   }
 
-  const english = usesEnglishUi();
-  const response = await dialog.showMessageBox(mainWindow, {
+  const response = await dialog.showMessageBox(mainWindow, configuredPath ? {
     type: 'warning',
     title: english ? 'Archive folder is missing' : '压缩包存储位置不存在',
     message: english
@@ -624,16 +672,21 @@ async function ensureArchiveOutputDirectoryBeforeStart() {
     defaultId: 1,
     cancelId: 2,
     noLink: true
+  } : {
+    type: 'info', title: english ? 'Choose an archive folder' : '选择压缩包存储位置',
+    message: english ? 'Choose an archive folder before archiving.' : '请先选择压缩包存储位置，才能执行压缩入库。',
+    buttons: english ? ['Choose folder', 'Cancel'] : ['选择位置', '取消'],
+    defaultId: 0, cancelId: 1, noLink: true
   });
-  if (response.response === 2) return false;
-  if (response.response === 0) {
+  if (response.response === (configuredPath ? 2 : 1)) return false;
+  if (configuredPath && response.response === 0) {
     await fs.mkdir(resolvedPath, { recursive: true });
     return true;
   }
 
   const selected = await dialog.showOpenDialog(mainWindow, {
-    title: english ? 'Choose an archive folder' : '重新选择压缩包存储位置',
-    defaultPath: path.dirname(resolvedPath),
+    title: english ? 'Choose an archive folder' : configuredPath ? '重新选择压缩包存储位置' : '选择压缩包存储位置',
+    ...(resolvedPath ? { defaultPath: path.dirname(resolvedPath) } : {}),
     properties: ['openDirectory', 'createDirectory']
   });
   if (selected.canceled || !selected.filePaths[0]) return false;
@@ -641,7 +694,7 @@ async function ensureArchiveOutputDirectoryBeforeStart() {
   const previousDerivedStaging = makeArchiveStagingDirectory(configuredPath);
   const currentStaging = String(queueManager.config.archiveStagingDirectory || '').trim();
   const nextStaging = !currentStaging ||
-      normalizeForComparison(currentStaging) === normalizeForComparison(previousDerivedStaging)
+      (previousDerivedStaging && normalizeForComparison(currentStaging) === normalizeForComparison(previousDerivedStaging))
     ? makeArchiveStagingDirectory(nextOutputDirectory)
     : currentStaging;
   await queueManager.updateConfig({
@@ -751,6 +804,7 @@ async function promptAndLaunchPreparedInstaller({ prepared, version, releaseUrl 
 }
 
 async function runLocalPackageUpdate(release = null) {
+  if (process.platform === 'darwin') throw new Error('Mac 版请从 GitHub 发布页手动下载新版应用。');
   const english = queueManager?.config?.language === 'en-US';
   if (!app.isPackaged || isSmokeTest) {
     throw new Error(english
@@ -976,7 +1030,7 @@ function createWindow() {
     }
   });
 
-  mainWindow.removeMenu();
+  if (process.platform !== 'darwin') mainWindow.removeMenu();
   mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
     console.error(`PRELOAD_ERROR ${preloadPath}: ${error.stack || error.message}`);
     void appendRuntimeLog('error', `界面预加载失败：${error.message}`).catch(() => {});
@@ -1366,7 +1420,9 @@ function createWindow() {
           overviewMatchesPrototype: document.querySelector('.warehouse-overview-head')?.parentElement?.classList.contains('warehouse-summary') &&
             !document.querySelector('.warehouse-overview')?.innerText.includes('仓库活跃度') &&
             document.querySelectorAll('.warehouse-metrics > .warehouse-metric').length === 4,
-          hasInventoryDate: document.querySelector('#catalog-detail')?.innerText.includes('入库时间'),
+          hasInventoryDate: document.querySelector('#catalog-detail')?.innerText.includes(
+            ${JSON.stringify(usesEnglishUi() ? 'Inventory time' : '入库时间')}
+          ),
           hasBackupFilter: document.querySelectorAll('#catalog-backup-filter option').length >=
             (${process.env.HAMSTER_SMOKE_REAL_CATALOG === '1' || Boolean(process.env.HAMSTER_SMOKE_IMPORT_DIRECTORY) ? 1 : 2}),
           hasBackupSetting: Boolean(document.querySelector('#record-backup-location') && document.querySelector('#backup-location')),
@@ -1486,13 +1542,21 @@ function createWindow() {
 }
 
 function registerIpc() {
+  const migrationReadChannels = new Set(['state:get', 'integrations:status', 'catalog:search', 'catalog:suggestions',
+    'catalog:insights', 'catalog:random', 'catalog:details', 'catalog:thumbnail', 'task:similarity-report', 'task:source-change-report']);
+  const handleIpc = (channel, handler) => ipcMain.handle(channel, (event, ...args) => {
+    if (queueManager?.userDataSwitchPending && !migrationReadChannels.has(channel)) {
+      throw new Error(nativeText('用户数据切换验证期间不能写入。'));
+    }
+    return handler(event, ...args);
+  });
   const waitForCatalog = () => queueManager.waitForCatalogReady();
-  ipcMain.handle('state:get', (event) => {
+  handleIpc('state:get', (event) => {
     assertTrustedSender(event);
     return queueManager.getState();
   });
 
-  ipcMain.handle('dialog:choose-directory', async (event, initialPath) => {
+  handleIpc('dialog:choose-directory', async (event, initialPath) => {
     assertTrustedSender(event);
     const english = usesEnglishUi();
     const configuredPath = String(initialPath || '').trim();
@@ -1504,7 +1568,7 @@ function registerIpc() {
     return result.canceled ? null : result.filePaths[0];
   });
 
-  ipcMain.handle('dialog:choose-program', async (event, initialPath) => {
+  handleIpc('dialog:choose-program', async (event, initialPath) => {
     assertTrustedSender(event);
     const english = queueManager?.config?.language === 'en-US';
     const configuredPath = String(initialPath || '').trim();
@@ -1521,7 +1585,7 @@ function registerIpc() {
     return result.canceled ? null : result.filePaths[0];
   });
 
-  ipcMain.handle('warehouse:change-location', async (event) => {
+  handleIpc('warehouse:change-location', async (event) => {
     assertTrustedSender(event);
     await waitForCatalog();
     const english = queueManager?.config?.language === 'en-US';
@@ -1534,7 +1598,7 @@ function registerIpc() {
     return runLoggedAction('切换仓库位置', () => queueManager.changeWarehouseDirectory(result.filePaths[0]));
   });
 
-  ipcMain.handle('warehouse:open', async (event) => {
+  handleIpc('warehouse:open', async (event) => {
     assertTrustedSender(event);
     await fs.mkdir(queueManager.config.repositoryDirectory, { recursive: true });
     const message = await shell.openPath(queueManager.config.repositoryDirectory);
@@ -1542,7 +1606,7 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle('warehouse:export', async (event) => {
+  handleIpc('warehouse:export', async (event) => {
     assertTrustedSender(event);
     await waitForCatalog();
     const english = queueManager?.config?.language === 'en-US';
@@ -1560,7 +1624,7 @@ function registerIpc() {
     return runLoggedAction('导出仓库', () => queueManager.exportWarehouseToFile(result.filePath));
   });
 
-  ipcMain.handle('warehouse:import', async (event) => {
+  handleIpc('warehouse:import', async (event) => {
     assertTrustedSender(event);
     await waitForCatalog();
     const english = queueManager?.config?.language === 'en-US';
@@ -1576,18 +1640,18 @@ function registerIpc() {
 
   let checkedUpdate = null;
   let updateInstallInFlight = false;
-  ipcMain.handle('app:log-toast', async (event, message, level = 'info') => {
+  handleIpc('app:log-toast', async (event, message, level = 'info') => {
     assertTrustedSender(event);
     const normalizedMessage = String(message || '').trim().slice(0, 2_000);
     if (!normalizedMessage) return false;
     await queueManager.log(level === 'error' ? 'error' : 'info', `界面提示：${normalizedMessage}`);
     return true;
   });
-  ipcMain.handle('app:check-for-updates', async (event, options = {}) => {
+  handleIpc('app:check-for-updates', async (event, options = {}) => {
     assertTrustedSender(event);
     const check = () => checkForUpdates({
       currentVersion: app.getVersion(),
-      distributionMode: isInstalledDistribution ? 'installed' : 'portable',
+      distributionMode: process.platform === 'darwin' ? 'mac' : isInstalledDistribution ? 'installed' : 'portable',
       includeHistory: options?.silent !== true,
       stableBranch: 'main',
       fetchImpl: net.fetch,
@@ -1605,8 +1669,9 @@ function registerIpc() {
     return result;
   });
 
-  ipcMain.handle('app:install-checked-update', async (event, version) => {
+  handleIpc('app:install-checked-update', async (event, version) => {
     assertTrustedSender(event);
+    if (process.platform === 'darwin') throw new Error('Mac 版请从 GitHub 发布页手动下载新版应用。');
     const english = queueManager?.config?.language === 'en-US';
     const result = checkedUpdate;
     if (updateInstallInFlight || !result?.updateAvailable || !result.installable || result.latestVersion !== version) {
@@ -1642,8 +1707,9 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('app:update-from-package', async (event) => {
+  handleIpc('app:update-from-package', async (event) => {
     assertTrustedSender(event);
+    if (process.platform === 'darwin') throw new Error('Mac 版请从 GitHub 发布页手动下载新版应用。');
     if (updateInstallInFlight) throw new Error(queueManager?.config?.language === 'en-US' ? 'Please check for updates again.' : '请重新检查更新。');
     updateInstallInFlight = true;
     try {
@@ -1656,7 +1722,7 @@ function registerIpc() {
     }
   });
 
-  ipcMain.handle('user-data:change-location', async (event) => {
+  handleIpc('user-data:change-location', async (event) => {
     assertTrustedSender(event);
     await waitForCatalog();
     const english = queueManager?.config?.language === 'en-US';
@@ -1704,49 +1770,16 @@ function registerIpc() {
       noLink: true
     });
     if (confirmation.response !== 0) return null;
-    await queueManager.log('warning', `开始切换用户数据区：${currentRoot} → ${targetRoot}。`);
-    try {
-      await appStore.saveSettings(queueManager.config);
-      await appStore.checkpoint(queueManager.config.repositoryDirectory);
-      appStore.closeAll();
-      const prepared = await prepareUserDataTarget(currentRoot, targetRoot);
-      await fs.mkdir(path.dirname(activeUserDataLocationPath), { recursive: true });
-      await writeJsonAtomic(activeUserDataLocationPath, {
-        version: 1,
-        userDataDirectory: prepared.target,
-        savedAt: new Date().toISOString()
-      });
-      const migrationMode = prepared.mode === 'copied'
-        ? '复制当前数据'
-        : prepared.mode === 'existing'
-          ? '切换到已有数据'
-          : '保持当前位置';
-      const targetStore = new AppStore(makeUserDataLayout(applicationRoot, null, prepared.target));
-      await targetStore.appendLog('', {
-        at: new Date().toISOString(),
-        level: 'warning',
-        message: `用户数据区切换完成：${currentRoot} → ${prepared.target}；方式：${migrationMode}。`,
-        jobId: null
-      }).catch(async (error) => {
-        await queueManager.log('error', `用户数据区已切换，但新位置的运行日志写入失败：${error.message}`);
-      });
-      await targetStore.flushLogs();
-      app.relaunch();
-      allowWindowClose = true;
-      app.quit();
-      return { path: prepared.target, mode: prepared.mode, restarting: true };
-    } catch (error) {
-      await queueManager.log('error', `切换用户数据区失败：${error.message}`).catch(() => {});
-      throw error;
-    }
+    const result = await getApplicationServices().userData.switchLocation({ targetDirectory: targetRoot });
+    return { ...result, path: targetRoot, mode: 'pending_validation' };
   });
 
-  ipcMain.handle('integrations:status', async (event) => {
+  handleIpc('integrations:status', async (event) => {
     assertTrustedSender(event);
     return integrationManager.status();
   });
 
-  ipcMain.handle('integrations:install', async (event, adapterId, options = {}) => {
+  handleIpc('integrations:install', async (event, adapterId, options = {}) => {
     assertTrustedSender(event);
     return runLoggedAction('启用 AI 助手接入', async () => {
       const result = await integrationManager.install(String(adapterId || ''), options || {});
@@ -1755,7 +1788,7 @@ function registerIpc() {
     });
   });
 
-  ipcMain.handle('integrations:uninstall', async (event, adapterId) => {
+  handleIpc('integrations:uninstall', async (event, adapterId) => {
     assertTrustedSender(event);
     return runLoggedAction('关闭 AI 助手接入', async () => {
       const result = await integrationManager.uninstall(String(adapterId || ''));
@@ -1764,7 +1797,7 @@ function registerIpc() {
     });
   });
 
-  ipcMain.handle('integrations:repair', async (event, adapterId, options = {}) => {
+  handleIpc('integrations:repair', async (event, adapterId, options = {}) => {
     assertTrustedSender(event);
     return runLoggedAction('修复 AI 助手接入', async () => {
       const result = await integrationManager.repair(String(adapterId || ''), options || {});
@@ -1773,7 +1806,7 @@ function registerIpc() {
     });
   });
 
-  ipcMain.handle('similarity:open-ignore-terms', async (event) => {
+  handleIpc('similarity:open-ignore-terms', async (event) => {
     assertTrustedSender(event);
     const filePath = await queueManager.ensureSimilarityIgnoreTermsFile();
     const message = await shell.openPath(filePath);
@@ -1781,25 +1814,25 @@ function registerIpc() {
     return { path: filePath, count: queueManager.similarityIgnoreTerms.length };
   });
 
-  ipcMain.handle('similarity:reload-ignore-terms', async (event) => {
+  handleIpc('similarity:reload-ignore-terms', async (event) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return runLoggedAction('重新载入相似度排除词', () => queueManager.reloadSimilarityIgnoreTerms());
   });
 
-  ipcMain.handle('similarity:add-ignore-term', async (event, term) => {
+  handleIpc('similarity:add-ignore-term', async (event, term) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return runLoggedAction('新增相似度排除词', () => queueManager.addSimilarityIgnoreTerm(term));
   });
 
-  ipcMain.handle('similarity:rebuild-all', async (event) => {
+  handleIpc('similarity:rebuild-all', async (event) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return runLoggedAction('全局重算相似关系', () => queueManager.recalculateAllSimilarity());
   });
 
-  ipcMain.handle('system:open-external', async (event, value) => {
+  handleIpc('system:open-external', async (event, value) => {
     assertTrustedSender(event);
     const url = new URL(String(value || ''));
     if (!['http:', 'https:'].includes(url.protocol)) throw new Error('只允许打开 HTTP 或 HTTPS 链接。');
@@ -1807,7 +1840,7 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle('system:copy-text', (event, value) => {
+  handleIpc('system:copy-text', (event, value) => {
     assertTrustedSender(event);
     const content = String(value || '');
     if (content.length > 10_000) throw new Error('复制内容过长。');
@@ -1815,7 +1848,7 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle('dialog:choose-single', async (event, kind) => {
+  handleIpc('dialog:choose-single', async (event, kind) => {
     assertTrustedSender(event);
     const english = queueManager?.config?.language === 'en-US';
     const options = kind === 'video'
@@ -1835,25 +1868,25 @@ function registerIpc() {
     return result.canceled ? null : result.filePaths[0];
   });
 
-  ipcMain.handle('config:save', async (event, config) => {
+  handleIpc('config:save', async (event, config) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return runLoggedAction('保存设置', () => queueManager.updateConfig(config));
   });
 
-  ipcMain.handle('source:scan', async (event, intakeDirectory, scanToken) => {
+  handleIpc('source:scan', async (event, intakeDirectory, scanToken) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return runLoggedAction('扫描待处理目录', () => queueManager.scanSource(intakeDirectory, scanToken));
   });
 
-  ipcMain.handle('task:add-single', async (event, sourcePath) => {
+  handleIpc('task:add-single', async (event, sourcePath) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.addSingle(sourcePath);
   });
 
-  ipcMain.handle('task:open-source', async (event, jobId) => {
+  handleIpc('task:open-source', async (event, jobId) => {
     assertTrustedSender(event);
     const job = queueManager.jobs.find((candidate) => candidate.id === jobId);
     if (!job?.sourcePath) throw new Error('这个任务没有可打开的原文件位置。');
@@ -1861,148 +1894,161 @@ function registerIpc() {
     return true;
   });
 
-  ipcMain.handle('task:similarity-report', async (event, jobId) => {
+  handleIpc('task:similarity-report', async (event, jobId, options) => {
     assertTrustedSender(event);
     await waitForCatalog();
-    return queueManager.getQueueSimilarityReport(jobId);
+    return queueManager.getQueueSimilarityReport(jobId, { summaryOnly: options?.summaryOnly === true });
   });
 
-  ipcMain.handle('task:source-change-report', async (event, jobId) => {
+  handleIpc('task:source-change-report', async (event, jobId) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.getSourceChangeReport(jobId);
   });
 
-  ipcMain.handle('task:resolve-source-change', async (event, jobId, action) => {
+  handleIpc('task:resolve-source-change', async (event, jobId, action) => {
     assertTrustedSender(event);
     await waitForCatalog();
+    const job = queueManager.findJob(jobId);
+    if (action !== 'skip' && job.processingMode !== 'inventory_only' &&
+        !await ensureArchiveOutputDirectoryBeforeStart()) return queueManager.getState();
     return queueManager.resolveSourceChange(jobId, action);
   });
 
-  ipcMain.handle('task:confirm', async (event, jobId, options) => {
+  handleIpc('task:confirm', async (event, jobId, options) => {
     assertTrustedSender(event);
     await waitForCatalog();
+    const job = queueManager.findJob(jobId);
+    if (job.intakeModeSelected !== false && job.processingMode !== 'inventory_only' &&
+        !await ensureArchiveOutputDirectoryBeforeStart()) return queueManager.getState();
     return queueManager.confirmJob(jobId, { updateBackupLocation: options?.updateBackupLocation });
   });
 
-  ipcMain.handle('task:confirm-anomaly', async (event, jobId) => {
+  handleIpc('task:confirm-anomaly', async (event, jobId) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.confirmAnomaly(jobId);
   });
-  ipcMain.handle('task:discard-anomaly', async (event, jobId) => {
+  handleIpc('task:discard-anomaly', async (event, jobId) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.discardAnomalousArchive(jobId);
   });
 
-  ipcMain.handle('task:acknowledge-trash-safety', async (event, jobId) => {
+  handleIpc('task:acknowledge-trash-safety', async (event, jobId) => {
     assertTrustedSender(event);
     return queueManager.acknowledgeTrashSafetyHalt(jobId);
   });
 
-  ipcMain.handle('task:cancel', async (event, jobId) => {
+  handleIpc('task:cancel', async (event, jobId) => {
     assertTrustedSender(event);
     return queueManager.cancelJob(jobId);
   });
 
-  ipcMain.handle('task:retry', async (event, jobId) => {
+  handleIpc('task:retry', async (event, jobId) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.retryJob(jobId);
   });
 
-  ipcMain.handle('queue:start', async (event) => {
+  handleIpc('queue:start', async (event, jobIds = []) => {
     assertTrustedSender(event);
     await waitForCatalog();
+    const requestedIds = Array.isArray(jobIds) ? [...jobIds] : [];
+    const fixedIds = requestedIds.length ? requestedIds : queueManager.pendingStartCandidates([], (job) => job.taskKind !== 'catalog_refresh').jobs.map((job) => job.id);
+    if (fixedIds.length === 0) return queueManager.startArchiveQueue(requestedIds);
     if (!await ensureArchiveOutputDirectoryBeforeStart()) return queueManager.getState();
-    return queueManager.startArchiveQueue();
+    return queueManager.startArchiveQueue(fixedIds);
   });
 
-  ipcMain.handle('queue:start-inventory-only', async (event) => {
+  handleIpc('queue:start-inventory-only', async (event, jobIds = []) => {
     assertTrustedSender(event);
     await waitForCatalog();
-    return queueManager.startInventoryOnlyQueue();
+    return queueManager.startInventoryOnlyQueue(Array.isArray(jobIds) ? jobIds : []);
   });
 
-  ipcMain.handle('queue:pause', async (event) => {
+  handleIpc('queue:pause', async (event) => {
     assertTrustedSender(event);
     return queueManager.pauseCurrent();
   });
 
-  ipcMain.handle('queue:resume', async (event) => {
+  handleIpc('queue:resume', async (event) => {
     assertTrustedSender(event);
     return queueManager.resumeCurrent();
   });
 
-  ipcMain.handle('queue:remove-jobs', async (event, jobIds) => {
+  handleIpc('queue:remove-jobs', async (event, jobIds) => {
     assertTrustedSender(event);
     return queueManager.removeJobs(jobIds);
   });
 
-  ipcMain.handle('queue:clear', async (event) => {
+  handleIpc('queue:clear', async (event) => {
     assertTrustedSender(event);
     return queueManager.clearQueue();
   });
 
-  ipcMain.handle('queue:clear-completed', async (event) => {
+  handleIpc('queue:clear-completed', async (event) => {
     assertTrustedSender(event);
     return queueManager.clearCompletedJobs();
   });
-  ipcMain.handle('queue:clear-cancelled', async (event) => {
+  handleIpc('queue:clear-cancelled', async (event) => {
     assertTrustedSender(event);
     return queueManager.clearCancelledJobs();
   });
 
-  ipcMain.handle('queue:clear-duplicates', async (event) => {
+  handleIpc('queue:clear-duplicates', async (event) => {
     assertTrustedSender(event);
     return queueManager.removePotentialDuplicateJobs();
   });
-  ipcMain.handle('queue:clear-exact-duplicates', async (event) => {
+  handleIpc('queue:clear-exact-duplicates', async (event) => {
     assertTrustedSender(event);
     return queueManager.removeExactDuplicateJobs();
   });
-  ipcMain.handle('queue:confirm-all-duplicates', async (event) => {
+  handleIpc('queue:confirm-all-duplicates', async (event) => {
     assertTrustedSender(event);
-    return queueManager.confirmAllDuplicateJobs();
+    const fixedIds = queueManager.jobs.map((job) => job.id);
+    if (queueManager.jobs.some((job) => job.status === 'awaiting_duplicate_confirmation' &&
+        job.intakeModeSelected !== false && job.processingMode !== 'inventory_only') &&
+        !await ensureArchiveOutputDirectoryBeforeStart()) return queueManager.getState();
+    return queueManager.confirmAllDuplicateJobs(fixedIds);
   });
 
-  ipcMain.handle('queue:finish-next', (event) => {
+  handleIpc('queue:finish-next', (event) => {
     assertTrustedSender(event);
     void queueManager.finishNextAndPause();
     return queueManager.getState();
   });
 
-  ipcMain.handle('catalog:search', async (event, query) => {
+  handleIpc('catalog:search', async (event, query) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.searchCatalog(query);
   });
-  ipcMain.handle('catalog:suggestions', async (event, query) => {
+  handleIpc('catalog:suggestions', async (event, query) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.getCatalogSuggestions(query);
   });
 
-  ipcMain.handle('catalog:insights', async (event) => {
+  handleIpc('catalog:insights', async (event) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.getWarehouseInsights();
   });
 
-  ipcMain.handle('catalog:random', async (event, excludeId) => {
+  handleIpc('catalog:random', async (event, excludeId) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.getRandomCatalogRecord(excludeId);
   });
 
-  ipcMain.handle('catalog:details', async (event, recordId) => {
+  handleIpc('catalog:details', async (event, recordId) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.getCatalogDetails(recordId);
   });
 
-  ipcMain.handle('catalog:open-source', async (event, recordId) => {
+  handleIpc('catalog:open-source', async (event, recordId) => {
     assertTrustedSender(event);
     await waitForCatalog();
     const record = queueManager.catalog.find((candidate) => candidate.id === recordId);
@@ -2020,7 +2066,7 @@ function registerIpc() {
     return { status: 'opened', path: openedPath };
   });
 
-  ipcMain.handle('catalog:restore-source', async (event, recordId) => {
+  handleIpc('catalog:restore-source', async (event, recordId) => {
     assertTrustedSender(event);
     await waitForCatalog();
     const result = await runLoggedAction('复原原文件', () => queueManager.restoreCatalogSource(recordId));
@@ -2028,92 +2074,92 @@ function registerIpc() {
     return result;
   });
 
-  ipcMain.handle('catalog:update-metadata', async (event, recordId, metadata) => {
+  handleIpc('catalog:update-metadata', async (event, recordId, metadata) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.updateCatalogMetadata(recordId, metadata);
   });
 
-  ipcMain.handle('catalog:update-source-path', async (event, recordId, sourcePath, sourceType) => {
+  handleIpc('catalog:update-source-path', async (event, recordId, sourcePath, sourceType) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.updateCatalogSourcePath(recordId, sourcePath, sourceType);
   });
 
-  ipcMain.handle('catalog:recalculate-similarity', async (event, recordId) => {
+  handleIpc('catalog:recalculate-similarity', async (event, recordId) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.recalculateCatalogSimilarity(recordId);
   });
 
-  ipcMain.handle('catalog:remove-similarity', async (event, recordId, similarId) => {
+  handleIpc('catalog:remove-similarity', async (event, recordId, similarId) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.removeCatalogSimilarity(recordId, similarId);
   });
 
-  ipcMain.handle('catalog:set-cover', async (event, recordId, relativePath) => {
+  handleIpc('catalog:set-cover', async (event, recordId, relativePath) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.setCatalogCover(recordId, relativePath);
   });
 
-  ipcMain.handle('catalog:delete-thumbnail', async (event, recordId, thumbnailRef) => {
+  handleIpc('catalog:delete-thumbnail', async (event, recordId, thumbnailRef) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.deleteCatalogThumbnail(recordId, thumbnailRef);
   });
 
-  ipcMain.handle('catalog:add-manual', async (event, input) => {
+  handleIpc('catalog:add-manual', async (event, input) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.addManualCatalogRecord(input);
   });
 
-  ipcMain.handle('catalog:add-image', async (event, recordId, input) => {
+  handleIpc('catalog:add-image', async (event, recordId, input) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.addCatalogImage(recordId, input);
   });
 
-  ipcMain.handle('catalog:add-tags', async (event, recordIds, tags) => {
+  handleIpc('catalog:add-tags', async (event, recordIds, tags) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.addTagsToCatalogRecords(recordIds, tags);
   });
 
-  ipcMain.handle('catalog:update-backup-location', async (event, recordIds, location) => {
+  handleIpc('catalog:update-backup-location', async (event, recordIds, location) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.updateBackupLocationForCatalogRecords(recordIds, location);
   });
 
-  ipcMain.handle('catalog:queue-compression', async (event, recordIds, options) => {
+  handleIpc('catalog:queue-compression', async (event, recordIds, options) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.queueCatalogRecordsForCompression(recordIds, options);
   });
 
-  ipcMain.handle('catalog:queue-refresh', async (event, recordIds) => {
+  handleIpc('catalog:queue-refresh', async (event, recordIds) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.queueCatalogRecordsForRefresh(recordIds);
   });
 
 
-  ipcMain.handle('catalog:undo', async (event) => {
+  handleIpc('catalog:undo', async (event) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return runLoggedAction('撤回仓库操作', () => queueManager.undoCatalogAction());
   });
 
-  ipcMain.handle('catalog:delete', async (event, recordIds, options) => {
+  handleIpc('catalog:delete', async (event, recordIds, options) => {
     assertTrustedSender(event);
     await waitForCatalog();
     return queueManager.deleteCatalogRecords(recordIds, options);
   });
 
-  ipcMain.handle('catalog:thumbnail', async (event, recordId, relativePath) => {
+  handleIpc('catalog:thumbnail', async (event, recordId, relativePath) => {
     assertTrustedSender(event);
     await waitForCatalog();
     const thumbnailPath = queueManager.getThumbnailPath(recordId, relativePath);
@@ -2128,11 +2174,52 @@ function registerIpc() {
 
 if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const workspaceRoot = applicationRoot;
+  const migrationRequest = process.env.HAMSTER_USER_DATA_VALIDATION_REQUEST
+    ? JSON.parse(await fs.readFile(process.env.HAMSTER_USER_DATA_VALIDATION_REQUEST, 'utf8')) : null;
+  let migrationValidationTimer;
+  if (migrationRequest) {
+    migrationValidationTimer = setInterval(() => {
+      void (async () => {
+        if (await pathExists(migrationRequest.shutdownFile)) {
+          const request = JSON.parse(await fs.readFile(migrationRequest.shutdownFile, 'utf8'));
+          if (request.migrationId === migrationRequest.migrationId) {
+            clearInterval(migrationValidationTimer);
+            app.quit();
+          }
+        } else if (await pathExists(migrationRequest.releaseFile)) {
+          const release = JSON.parse(await fs.readFile(migrationRequest.releaseFile, 'utf8'));
+          if (release.migrationId === migrationRequest.migrationId && queueManager) {
+            clearInterval(migrationValidationTimer);
+            queueManager.userDataSwitchPending = false;
+            await queueManager.log('warning', `用户数据区切换启动验证通过：${configuredUserDataRoot}。旧位置保留。`);
+          }
+        }
+      })().catch((error) => console.error(`USER_DATA_VALIDATION_CONTROL_FAILED ${error.message}`));
+    }, 100);
+    migrationValidationTimer.unref();
+    const actual = await inspectUserDataStartup(configuredUserDataRoot, applicationRoot);
+    if (String(migrationRequest.version) !== app.getVersion() ||
+        normalizeForComparison(actual.root) !== normalizeForComparison(migrationRequest.root) ||
+        normalizeForComparison(actual.repositoryDirectory) !== normalizeForComparison(migrationRequest.repositoryDirectory) ||
+        (migrationRequest.settingsPresent && !actual.settingsPresent) ||
+        (migrationRequest.databasePresent && !actual.databasePresent)) {
+      throw new Error('用户数据切换启动验证的目标或必要文件不一致。');
+    }
+  }
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { role: 'appMenu' }, { role: 'fileMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }
+    ]));
+  }
   logStartupTiming('electron-ready');
   const startupMcpArgs = startupDesktopMcpRequest
-    ? ['--enable-mcp', '--background', `--mcp-ready-file=${startupDesktopMcpRequest.readyFile}`, `--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`, ...(startupDesktopMcpRequest.showUi ? ['--show-ui'] : [])]
+    ? ['--enable-mcp', '--background', `--mcp-temp-dir=${mcpTempDirectory(process.argv)}`,
+        `--mcp-ready-file=${startupDesktopMcpRequest.readyFile}`, `--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`,
+        ...(startupDesktopMcpRequest.launchAttemptId
+          ? [`--mcp-launch-attempt-id=${startupDesktopMcpRequest.launchAttemptId}`] : []),
+        ...(startupDesktopMcpRequest.showUi ? ['--show-ui'] : [])]
     : process.argv;
-  const mcpRequested = !isSmokeTest && (startupMcpArgs.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1');
+  const mcpRequested = !migrationRequest && !isSmokeTest && (startupMcpArgs.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1');
   startedAsMcpBackground = mcpRequested && startupMcpArgs.includes('--background') && !startupMcpArgs.includes('--show-ui');
   if (app.isPackaged && !isSmokeTest) {
     if (!startedAsMcpBackground) await createStartupWindow();
@@ -2152,6 +2239,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     }
     updateStartupWindow('load-data');
   }
+  loadRuntimeModules();
+  logStartupTiming('runtime-modules-ready');
   const userDataLayout = makeUserDataLayout(workspaceRoot, null, configuredUserDataRoot);
   const store = new AppStore(userDataLayout);
   appStore = store;
@@ -2161,6 +2250,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     await store.loadSettings(defaultConfig),
     userDataLayout
   );
+  if (process.platform === 'darwin') config.autoTrashCompleted = false;
   delete config.ffprobePath;
   config.sevenZipPath = normalizePortableProgramPath(config.sevenZipPath, workspaceRoot, PORTABLE_SEVEN_ZIP_PATH);
   config.ffmpegPath = normalizePortableProgramPath(config.ffmpegPath, workspaceRoot, PORTABLE_FFMPEG_PATH);
@@ -2169,6 +2259,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   }
   if (!(await pathExists(resolveApplicationPath(workspaceRoot, config.ffmpegPath)))) {
     config.ffmpegPath = PORTABLE_FFMPEG_PATH;
+    if (process.platform === 'darwin') config.videoFrameBackup = false;
   }
   if (process.env.HAMSTER_SMOKE_LIBRARY_DIR) {
     config.archiveOutputDirectory = process.env.HAMSTER_SMOKE_LIBRARY_DIR;
@@ -2188,14 +2279,17 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   queueManager = new QueueManager(store, config, {
     createThumbnails,
     storeCatalogImage,
-    trashItem: (targetPath) => shell.trashItem(targetPath),
+    trashItem: process.platform === 'darwin' ? undefined : (targetPath) => shell.trashItem(targetPath),
     findTrashItems,
     isTrashItemPresent,
     restoreTrashItem,
     resolveProgramPath: (configuredPath) => resolveApplicationPath(workspaceRoot, configuredPath)
   });
-  const deferCatalog = !isSmokeTest && !isStartupIntegrityTest && !startedAsMcpBackground;
+  queueManager.runtimeIdentity = { applicationRoot, userDataRoot: configuredUserDataRoot,
+    instanceId: null };
+  const deferCatalog = !migrationRequest && !isSmokeTest && !isStartupIntegrityTest && !startedAsMcpBackground;
   await queueManager.initialize({ deferCatalog });
+  if (migrationRequest) queueManager.userDataSwitchPending = true;
   await queueManager.log('info', `应用已启动：版本 ${app.getVersion()}。`, null, false);
   logStartupTiming(deferCatalog ? 'startup-data-ready' : 'warehouse-ready');
   const pendingUpdateSuccess = await readUpdateSuccessNotice({
@@ -2211,6 +2305,8 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     return null;
   });
   if (isSmokeTest && process.env.HAMSTER_SMOKE_IMPORT_DIRECTORY) {
+    if (process.platform === 'darwin') console.log('HAMSTER_MAC_SMOKE_PREPARE_ARCHIVE');
+    if (process.platform === 'darwin') console.log(`HAMSTER_MAC_SMOKE_FREE_MEMORY_MIB ${Math.round(queueManager.availableMemoryBytes() / (1024 * 1024))}`);
     const importDirectory = path.resolve(process.env.HAMSTER_SMOKE_IMPORT_DIRECTORY);
     const smokeToolRoot = process.env.HAMSTER_SMOKE_TOOL_ROOT
       ? path.resolve(process.env.HAMSTER_SMOKE_TOOL_ROOT)
@@ -2239,10 +2335,19 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
       backupLocation: ''
     });
     await queueManager.scanSource(importDirectory);
+    if (process.platform === 'darwin') console.log('HAMSTER_MAC_SMOKE_SCANNED');
     for (let cycle = 0; cycle < 4; cycle += 1) {
       await queueManager.confirmAllDuplicateJobs();
-      await queueManager.startArchiveQueue();
+      // Duplicate confirmation may start its own batch. Wait for that batch
+      // before deciding whether the remaining jobs need an explicit start.
+      await new Promise((resolve) => setImmediate(resolve));
       if (queueManager.running) await new Promise((resolve) => queueManager.once('idle', resolve));
+      const remainingQueueIds = queueManager.pendingStartCandidates([], (job) =>
+        job.status === 'queued' && job.taskKind !== 'catalog_refresh').jobs.map((job) => job.id);
+      if (remainingQueueIds.length > 0) {
+        await queueManager.startArchiveQueue(remainingQueueIds);
+        if (queueManager.running) await new Promise((resolve) => queueManager.once('idle', resolve));
+      }
       const pendingDuplicate = queueManager.jobs.some((job) => [
         'awaiting_confirmation', 'awaiting_duplicate_confirmation'
       ].includes(job.status));
@@ -2475,6 +2580,19 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   resolveApplicationInitialized();
   if (mcpRequested) await enableMcpForArguments(startupMcpArgs);
 
+  if (migrationRequest) {
+    await queueManager.waitForCatalogReady();
+    await waitForWindowReady(mainWindow);
+    const count = Number(store.getRepository(config.repositoryDirectory).database.prepare('SELECT COUNT(*) AS total FROM catalog_records').get().total);
+    if (count !== queueManager.catalog.length) throw new Error('用户数据切换仓库就绪计数不一致。');
+    await writeJsonAtomic(process.env.HAMSTER_USER_DATA_VALIDATION_FILE, {
+      migrationId: migrationRequest.migrationId, version: app.getVersion(),
+      userDataRoot: configuredUserDataRoot, repositoryDirectory: config.repositoryDirectory,
+      recordCount: count, settingsRead: true, databaseReady: true, windowReady: true,
+      validatedAt: new Date().toISOString()
+    });
+  }
+
   if (process.env.HAMSTER_UPDATE_VALIDATION_FILE) {
     await fs.writeFile(process.env.HAMSTER_UPDATE_VALIDATION_FILE, JSON.stringify({
       version: app.getVersion(),
@@ -2495,10 +2613,19 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   });
 }).catch(async (error) => {
   const failedArgs = startupDesktopMcpRequest
-    ? [`--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`]
+    ? [`--mcp-temp-dir=${mcpTempDirectory(process.argv)}`,
+        `--mcp-diagnostic-file=${startupDesktopMcpRequest.diagnosticFile}`]
     : process.argv;
   await writeMcpStartupDiagnostic(failedArgs, error);
   await appendRuntimeLog('error', `应用启动失败：${error.message}`).catch(() => {});
+  if (process.env.HAMSTER_USER_DATA_VALIDATION_REQUEST) {
+    // The migration worker owns recovery. A synchronous error dialog would
+    // prevent this controlled instance from acknowledging a normal shutdown.
+    console.error(`USER_DATA_STARTUP_VALIDATION_FAILED ${error.stack || error.message}`);
+    allowWindowClose = true;
+    app.quit();
+    return;
+  }
   if (process.env.HAMSTER_SMOKE_TEST === '1' || startupRequestsMcp) console.error(`HAMSTER_STARTUP_FAILED ${error.stack || error.message}`);
   else if (!showStartupError(error)) {
     const english = usesEnglishUi();

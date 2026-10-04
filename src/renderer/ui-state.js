@@ -5,6 +5,50 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.hamsterUiState = api;
 }(typeof globalThis === 'object' ? globalThis : this, () => ({
+  isCompletedQueueJob(job = {}) {
+    return String(job.status || '').startsWith('completed') || job.status === 'skipped_duplicate';
+  },
+  canClearCompletedQueueJob(job = {}) {
+    return (String(job.status || '').startsWith('completed') || job.status === 'skipped_duplicate') &&
+      job.errorCode !== 'SOURCE_DISPOSITION_COMMIT_FAILED';
+  },
+  directoryRefreshNotices(previousJobs, jobs) {
+    const previousById = new Map(previousJobs.map((job) => [job.id, job]));
+    return jobs.flatMap((job) => {
+      if (job.taskKind !== 'catalog_refresh' || previousById.get(job.id)?.status === job.status) return [];
+      const title = String(job.unchangedDirectoryTitle || job.displayName || '');
+      const name = Array.from(title).slice(0, 30).join('') + (Array.from(title).length > 30 ? '…' : '');
+      if (job.status === 'completed') return [{ message: job.unchangedDirectoryTitle
+        ? `“${name}”校对完成：目录未发现变化。`
+        : `“${name}”校对完成：仓库已更新。`, isError: false }];
+      if (job.status.startsWith('awaiting_')) return [{
+        message: `“${name}”校对需要手动处理；请到归档工作台查看并确认。`, isError: true
+      }];
+      if (job.status === 'failed' || job.status === 'completed_cleanup_failed') return [{
+        message: `“${name}”校对未能正常完成；请到归档工作台查看原因并处理。`, isError: true
+      }];
+      if (job.status === 'cancelled') return [{ message: `“${name}”校对已取消。`, isError: false }];
+      return [];
+    });
+  },
+  sourceLocationUrl(value, allowBareHost = false) {
+    const location = String(value || '').trim();
+    try {
+      const url = new URL(location);
+      if (['http:', 'https:'].includes(url.protocol) && url.hostname) return url.href;
+    } catch {}
+    if (!allowBareHost || !location || /[\s\\]/u.test(location) || location.startsWith('/')) return '';
+    try {
+      const url = new URL(`https://${location}`);
+      const labels = url.hostname.split('.');
+      if (url.username || url.password || labels.length < 2 ||
+          !labels.every((label) => /^[a-z\d](?:[a-z\d-]*[a-z\d])?$/i.test(label)) ||
+          !/^(?:[a-z]{2,}|xn--[a-z\d-]+)$/i.test(labels.at(-1))) return '';
+      return url.href;
+    } catch {
+      return '';
+    }
+  },
   catalogRangeSelection(pageIds, anchorId, targetId, selection, additive = false) {
     const result = new Set(additive ? selection : []);
     const targetIndex = pageIds.indexOf(targetId);
@@ -75,6 +119,13 @@
         (job.confirmationReasons || []).includes('large_task')) return false;
     return (job.confirmationReasons || []).some((reason) =>
       ['name_match', 'similar_title', 'same_video_size'].includes(reason));
+  },
+  shouldShowQueueSimilarityReport(job = {}, config = {}) {
+    if (job.sourceCatalogRecordId || config.similarityReportEnabled === false) return false;
+    return (job.nameDuplicateMatches || []).some((match) => match.archiveId || match.jobId) ||
+      (job.similarMatches || []).some((match) => match.id) ||
+      (job.exactProjectMatches || []).some((match) => match.id) ||
+      (job.exactDuplicateMatches || []).some((match) => (match.previous || []).some((previous) => previous.archiveId));
   },
   shouldApplyTaskProgress(job = {}, progress = {}) {
     const runningStages = new Set(['inventorying', 'compressing', 'verifying', 'moving']);

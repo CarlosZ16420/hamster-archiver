@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.8.3",
+  "notes": {
+    "zh-CN": [
+      "改进队列启动反馈、目录校对结果和完成任务清理，保留回执与待处理事项。",
+      "分卷支持 64 MiB—100 GiB，按设置阈值拆分，可选择是否需要手动确认。",
+      "简化首次使用引导，统一仓库筛选；累积包含归档安全与 CLI/MCP 恢复改进。"
+    ],
+    "en-US": [
+      "Improve blocked-start feedback, folder-review results and completed-task cleanup while retaining receipts and pending issues.",
+      "Split volumes support 64 MiB–100 GiB, follow the configured threshold and offer optional manual confirmation.",
+      "Simplify onboarding and align Warehouse filters, including accumulated archive-safety and CLI/MCP recovery improvements."
+    ]
+  }
+}

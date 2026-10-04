@@ -3,6 +3,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('archiveApp', {
+  platform: process.platform,
   getState: () => ipcRenderer.invoke('state:get'),
   getIntegrationStatus: () => ipcRenderer.invoke('integrations:status'),
   installIntegration: (adapterId, options = {}) => ipcRenderer.invoke('integrations:install', adapterId, options),
@@ -30,7 +31,7 @@ contextBridge.exposeInMainWorld('archiveApp', {
   scanSource: (intakeDirectory, scanToken) => ipcRenderer.invoke('source:scan', intakeDirectory, scanToken),
   addSingle: (sourcePath) => ipcRenderer.invoke('task:add-single', sourcePath),
   openTaskSource: (jobId) => ipcRenderer.invoke('task:open-source', jobId),
-  getQueueSimilarityReport: (jobId) => ipcRenderer.invoke('task:similarity-report', jobId),
+  getQueueSimilarityReport: (jobId, options) => ipcRenderer.invoke('task:similarity-report', jobId, options),
   getSourceChangeReport: (jobId) => ipcRenderer.invoke('task:source-change-report', jobId),
   resolveSourceChange: (jobId, action) => ipcRenderer.invoke('task:resolve-source-change', jobId, action),
   getDroppedPath: (file) => webUtils.getPathForFile(file),
@@ -40,8 +41,8 @@ contextBridge.exposeInMainWorld('archiveApp', {
   acknowledgeTrashSafety: (jobId) => ipcRenderer.invoke('task:acknowledge-trash-safety', jobId),
   cancelTask: (jobId) => ipcRenderer.invoke('task:cancel', jobId),
   retryTask: (jobId) => ipcRenderer.invoke('task:retry', jobId),
-  startQueue: () => ipcRenderer.invoke('queue:start'),
-  startInventoryOnlyQueue: () => ipcRenderer.invoke('queue:start-inventory-only'),
+  startQueue: (jobIds = []) => ipcRenderer.invoke('queue:start', jobIds),
+  startInventoryOnlyQueue: (jobIds = []) => ipcRenderer.invoke('queue:start-inventory-only', jobIds),
   pauseQueue: () => ipcRenderer.invoke('queue:pause'),
   resumeQueue: () => ipcRenderer.invoke('queue:resume'),
   removeJobs: (jobIds) => ipcRenderer.invoke('queue:remove-jobs', jobIds),

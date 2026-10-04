@@ -18,7 +18,7 @@ const FETCH_FORBIDDEN_PORTS = new Set([
 ]);
 
 function createRpcHandler(toolService, version, lifecycle = {}) {
-  return async (message) => {
+  return async (message, context = {}) => {
     const hasId = message && Object.hasOwn(message, 'id');
     const error = (code, text) => ({ jsonrpc: '2.0', id: message?.id ?? null, error: { code, message: text } });
     if (!message || message.jsonrpc !== '2.0' || typeof message.method !== 'string' ||
@@ -45,7 +45,7 @@ function createRpcHandler(toolService, version, lifecycle = {}) {
     else if (message.method === 'tools/list') result = { tools: toolService.definitions };
     else if (message.method === 'tools/call') {
       try {
-        const data = await toolService.call(message.params?.name, message.params?.arguments ?? {});
+        const data = await toolService.call(message.params?.name, message.params?.arguments ?? {}, context);
         result = { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data, isError: false };
       } catch (failure) {
         const structured = errorEnvelope(failure, 'capability');
@@ -60,6 +60,22 @@ async function startMcpServer(manager, userDataRoot, version, options = {}) {
   const token = crypto.randomBytes(32).toString('hex');
   const instanceId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
+  const diagnosticsDirectory = path.join(userDataRoot, 'mcp', 'diagnostics');
+  const diagnosticRef = path.join(diagnosticsDirectory, `instance-${instanceId}.json`);
+  let diagnosticTail = Promise.resolve();
+  let diagnostic = { schemaVersion: 1, instanceId, launchAttemptId: options.launchAttemptId || null,
+    pid: process.pid, startedAt, at: startedAt, stage: 'ready', knownCause: 'unknown' };
+  const updateDiagnostic = (patch) => {
+    diagnosticTail = diagnosticTail.catch(() => {}).then(async () => {
+      diagnostic = { ...diagnostic, ...patch, at: new Date().toISOString() };
+      const temporary = `${diagnosticRef}.${process.pid}.${crypto.randomUUID()}.tmp`;
+      try {
+        await fs.writeFile(temporary, `${JSON.stringify(diagnostic).slice(0, 16 * 1024)}\n`, { encoding: 'utf8', flag: 'wx' });
+        await fs.rename(temporary, diagnosticRef);
+      } finally { await fs.rm(temporary, { force: true }).catch(() => {}); }
+    });
+    return diagnosticTail;
+  };
   const authorization = Buffer.from(`Bearer ${token}`);
   const sessions = new Map();
   const expireSession = (sessionId) => {
@@ -93,6 +109,8 @@ async function startMcpServer(manager, userDataRoot, version, options = {}) {
   const taskService = options.taskService || getApplicationTaskService(manager);
   const dispatch = createRpcHandler(createMcpTools(manager, { ...(options.services || {}), tasks: taskService }), version, lifecycle);
   const server = http.createServer(async (request, response) => {
+    const controller = new AbortController();
+    response.once('close', () => { if (!response.writableEnded) controller.abort(); });
     const reply = (status, value) => {
       response.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       response.end(value === undefined ? undefined : JSON.stringify(value));
@@ -114,8 +132,8 @@ async function startMcpServer(manager, userDataRoot, version, options = {}) {
       let message;
       try { message = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
       catch { return reply(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }); }
-      const result = await dispatch(message);
-      reply(result ? 200 : 202, result || undefined);
+      const result = await dispatch(message, { signal: controller.signal });
+      if (!controller.signal.aborted) reply(result ? 200 : 202, result || undefined);
     } catch (error) {
       if (!response.headersSent) reply(500, { error: 'Request failed' });
     }
@@ -138,6 +156,17 @@ async function startMcpServer(manager, userDataRoot, version, options = {}) {
   const connectionFile = path.join(directory, 'connection.json');
   try {
     await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    await fs.mkdir(diagnosticsDirectory, { recursive: true, mode: 0o700 });
+    await updateDiagnostic({});
+    const oldDiagnostics = (await fs.readdir(diagnosticsDirectory))
+      .filter((name) => /^instance-[a-f0-9-]{36}\.json$/i.test(name) && name !== path.basename(diagnosticRef));
+    if (oldDiagnostics.length > 16) {
+      const withTime = await Promise.all(oldDiagnostics.map(async (name) => ({ name,
+        modified: (await fs.stat(path.join(diagnosticsDirectory, name)).catch(() => ({ mtimeMs: Date.now() }))).mtimeMs })));
+      for (const { name } of withTime.sort((left, right) => right.modified - left.modified).slice(16)) {
+        await fs.unlink(path.join(diagnosticsDirectory, name)).catch(() => {});
+      }
+    }
     await fs.writeFile(connectionFile, JSON.stringify({
       schemaVersion: 2,
       url: `http://127.0.0.1:${server.address().port}/mcp`,
@@ -145,19 +174,23 @@ async function startMcpServer(manager, userDataRoot, version, options = {}) {
       pid: process.pid,
       instanceId,
       startedAt,
-      version
+      version,
+      diagnosticRef
     }), { mode: 0o600 });
   } catch (error) { server.close(); throw error; }
   return {
     connectionFile,
     instanceId,
     startedAt,
+    diagnosticRef,
+    updateDiagnostic,
     get sessionCount() { return sessions.size; },
     async close() {
       for (const timer of sessions.values()) clearTimeout(timer);
       sessions.clear();
       server.closeIdleConnections();
       await new Promise((resolve) => server.close(resolve));
+      await updateDiagnostic({ stage: 'exit', knownCause: 'normal_exit', exitedAt: new Date().toISOString() }).catch(() => {});
       try {
         const saved = JSON.parse(await fs.readFile(connectionFile, 'utf8'));
         if (saved.token === token) await fs.unlink(connectionFile);

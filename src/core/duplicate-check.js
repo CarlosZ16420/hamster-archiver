@@ -182,10 +182,26 @@ function createProjectFingerprint(manifest) {
   };
 }
 
+function describeProjectMatchEvidence(manifest) {
+  const fingerprint = createProjectFingerprint(manifest);
+  const entries = normalizedProjectManifestEntries(manifest);
+  return {
+    completeContentFingerprint: Boolean(fingerprint.contentHash),
+    missingMd5Files: entries ? entries.filter((entry) => !entry.md5).length : null,
+    md5SkippedReasons: [...new Set((Array.isArray(manifest) ? manifest : [])
+      .map((file) => file?.md5SkippedReason).filter(Boolean))]
+  };
+}
+
 function createManifestReviewFingerprint(manifest) {
   const entries = normalizedProjectManifestEntries(manifest);
   if (!entries) return '';
-  return hashManifestEntries(entries, true, true);
+  const filesHash = hashManifestEntries(entries, true, true);
+  if (!Array.isArray(manifest.directories)) return filesHash;
+  const directories = [...manifest.directories].map(normalizeEntryPath)
+    .map((entry) => entry.normalize('NFKC').toLocaleLowerCase('zh-CN'))
+    .sort((left, right) => left.localeCompare(right, 'zh-CN'));
+  return crypto.createHash('sha256').update(JSON.stringify({ filesHash, directories })).digest('hex');
 }
 
 function findExactFileMatches(manifest, catalog) {
@@ -273,7 +289,8 @@ function findExactProjectMatches(manifest, catalog, excludedRecordId = '') {
     id: record.id,
     title: record.title || record.displayName || '',
     displayName: record.displayName || record.title || '',
-    fileCount: record.manifest.length
+    fileCount: record.manifest.length,
+    verification: 'complete_content_fingerprint'
   })).slice(0, 20);
 }
 
@@ -905,6 +922,7 @@ module.exports = {
   createManifestReviewFingerprint,
   createProjectFingerprint,
   createSimilarityScorer,
+  describeProjectMatchEvidence,
   documentTerms,
   findExactFileMatches,
   findExactProjectMatches,

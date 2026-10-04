@@ -20,6 +20,30 @@ if (!rendererDir) {
   const html = fs.readFileSync(path.join(rendererDir, 'index.html'), 'utf8');
   const CJK = /[\u3400-\u9fff\uf900-\ufaff]/;
 
+  test('queue blockers and directory review outcomes translate while keeping user titles', () => {
+    i18n.setLocale('en-US');
+    for (const message of [
+      '本次有 2 个项目待手动处理。\n请先确认、继续或取消。',
+      '本次有 2 个项目待手动处理。\n请先确认、继续或取消；新项目需勾选后启动。',
+      '当前批次有 3 个项目待手动处理：\n请到归档工作台确认、继续或取消。',
+      '本次范围内有 2 个项目待手动处理，暂时无法执行；请在队列中确认、继续或取消这些任务。',
+      '本次范围内有 2 个项目待手动处理，暂时无法执行；请在队列中确认、继续或取消这些任务。本次仅执行已选任务；新导入项目如未勾选，请调整选择后再启动。',
+      '当前批次有 3 个项目待手动处理；请在归档工作台确认、继续或取消。',
+      '当前有 1 个任务正在处理，暂时无法启动后续任务；请在归档工作台查看进度。',
+      '已提交目录校对，请到归档工作台查看进度和待确认事项。',
+      '已提交 2 个目录校对，请到归档工作台查看进度和待确认事项。',
+      '“Example”校对完成：目录未发现变化。',
+      '“Example”校对完成：仓库已更新。',
+      '“Example”校对需要手动处理；请到归档工作台查看并确认。',
+      '“Example”校对未能正常完成；请到归档工作台查看原因并处理。',
+      '“Example”校对已取消。'
+    ]) assert.ok(!CJK.test(i18n.translate(message)), message);
+    assert.equal(i18n.translate('当前批次有 3 个项目待手动处理：\n请到归档工作台确认、继续或取消。').split('\n').length, 2);
+    assert.equal(i18n.translate('“仓库”校对完成：仓库已更新。'), 'Review complete for “仓库”: the Warehouse has been updated.');
+    i18n.setLocale('zh-CN');
+    assert.equal(i18n.translate('“Example”校对已取消。'), '“Example”校对已取消。');
+  });
+
   test('dictionary builds without duplicate entries or broken patterns', () => {
     // buildExact/buildPatterns throw at require time; reaching here means the
     // tables are consistent. Sanity-check the exported shape as well.
@@ -71,6 +95,22 @@ if (!rendererDir) {
       'Identical to a Warehouse item; auto-skipped'
     );
     assert.equal(i18n.translate('等待下次入库'), 'Next Run');
+    assert.equal(i18n.translate('归档完成/状态保存失败'), 'Archived / Status Save Failed');
+    assert.equal(i18n.translate('已移入 Windows 回收站'), 'Moved to the Windows Recycle Bin');
+    assert.equal(i18n.translate('已移动到：'), 'Moved to: ');
+    assert.equal(i18n.translate('原位置副本保留；已复制到：'), 'Original retained; copied to: ');
+    assert.equal(
+      i18n.translate('源文件恢复线索：原位置 E:\\source；已移动到 E:\\finished。'),
+      'Source recovery details: original location E:\\source; moved to E:\\finished.'
+    );
+    assert.equal(
+      i18n.translate('源文件恢复线索：原位置 E:\\source；已复制到 E:\\finished，原位置副本保留。'),
+      'Source recovery details: original location E:\\source; copied to E:\\finished; original retained.'
+    );
+    assert.equal(
+      i18n.translate('源文件恢复线索：原位置 E:\\source；已移入 Windows 回收站。'),
+      'Source recovery details: original location E:\\source; moved to the Windows Recycle Bin.'
+    );
     assert.equal(i18n.translate('2 个低于 100 MB 的小项目'), '2 small items below 100 MB');
     assert.equal(
       i18n.translate('有多个项目低于当前 50 MB 的入库阈值。'),
@@ -105,6 +145,18 @@ if (!rendererDir) {
     assert.equal(
       i18n.translate('已验证成品发布完成：跨盘复制 2 个文件，用时 125.5 毫秒。'),
       'Archive published: copied 2 files across drives in 125.5 ms.'
+    );
+    assert.equal(
+      i18n.translate('已验证成品发布完成：同盘链接 1 个文件。'),
+      'Archive published: linked 1 file on the same drive.'
+    );
+    assert.equal(
+      i18n.translate('已验证成品发布完成：同盘复制 2 个文件。'),
+      'Archive published: copied 2 files on the same drive.'
+    );
+    assert.equal(
+      i18n.translate('已验证成品发布完成：跨盘复制 2 个文件。'),
+      'Archive published: copied 2 files across drives.'
     );
     assert.equal(i18n.translate('已选择 1 项'), 'Selected 1 item');
     assert.equal(i18n.translate('1 个文件 · 1 卷'), '1 file · 1 volume');
@@ -173,6 +225,9 @@ if (!rendererDir) {
       '入库阶段耗时：相似关系 12 ms · 仓库写入 20 ms · 更新记录 2',
       '视频抽帧达到处理时限，保留已生成的预览：sample.mp4',
       '缩略图尝试达到上限，保留已生成的预览：90/100',
+      '已验证成品发布完成：同盘链接 1 个文件。',
+      '已验证成品发布完成：同盘复制 2 个文件。',
+      '已验证成品发布完成：跨盘复制 2 个文件。',
       '已跳过无法生成的视频帧：sample.mp4 · 2/3 · 媒体处理超时：ffmpeg.exe',
       '已跳过无法生成预览的媒体：sample.png · ENOENT',
       'FFmpeg 视频抽帧失败，改用系统缩略图：sample.mp4 · ENOENT',
@@ -377,10 +432,17 @@ if (!rendererDir) {
       '用户已确认回收站安全警告；队列仍保持停止，后续任务需手动重新开始。',
       '卡顿规避：已跳过 17 个小于 128 KB 的极小文件，不计算 MD5。',
       '内容完全一致候选核验达到读取预算，未完成的候选已转为人工复核；不会自动跳过。',
+      '部分内容一致候选的来源路径暂不可核验，已转为人工复核；不会自动跳过。',
       '内容完全一致候选已提前排除；读取 3 个文件后停止完整核验。',
       '用户已确认相似报告，任务复用已生成清单并重新进入队列。',
       '用户已确认内容完全一致提示，任务复用已生成清单并重新进入队列。',
       '发现 内容完全一致候选待人工核对，已延后等待确认',
+      '已按本次选择跳过，源文件和仓库未修改',
+      '已复用核验一致的已有记录，未新建项目',
+      '按本次选择跳过任务“Collection”；源文件和仓库均未修改，队列项已删除。',
+      '按本次选择跳过任务“Collection”：Existing；源文件和仓库均未修改，队列项已保留。',
+      '复用核验一致的已有记录“Collection”：Existing；源文件和仓库均未修改，队列项已删除。',
+      '复用核验一致的已有记录“Collection”：Existing；源文件和仓库均未修改，队列项已保留。',
       '已选择压缩入库，共 3 个任务。',
       '当前不在定时运行时段；已记录入库方式，队列将在计划开始时间自动运行。',
       '队列已进入定时等待。',

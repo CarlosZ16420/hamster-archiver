@@ -2,7 +2,7 @@
 
 if (!window.archiveApp) {
   document.querySelector('#desktop-required').hidden = false;
-  throw new Error('桌面桥接未加载：请运行 HamsterArchiver.exe，不要直接打开网页文件。');
+  throw new Error('桌面桥接未加载：请启动 Hamster Archiver 桌面应用，不要直接打开网页文件。');
 }
 
 // 界面翻译：中文为源语言，英文环境在运行时替换词条；用户数据永不翻译。
@@ -10,6 +10,7 @@ const i18n = window.hamsterI18n;
 const uiState = window.hamsterUiState;
 const tagAutocomplete = window.hamsterTagAutocomplete;
 const t = (value) => i18n?.translate(value) ?? value;
+const isMac = window.archiveApp.platform === 'darwin';
 i18n?.setLocale(String(navigator.language || 'zh-CN').toLowerCase().startsWith('en') ? 'en-US' : 'zh-CN');
 
 const SIMILARITY_STRENGTH_ORDER = ['loose', 'standard', 'strict'];
@@ -26,6 +27,7 @@ const elements = {
   archiveFormat: document.querySelector('#archive-format'),
   compressionLevel: document.querySelector('#compression-level'),
   splitVolume: document.querySelector('#split-volume'),
+  archiveVolumeConfirmation: document.querySelector('#archive-volume-confirmation'),
   volumeSize: document.querySelector('#volume-size'),
   volumeUnit: document.querySelector('#volume-unit'),
   volumeSetting: document.querySelector('#volume-setting'),
@@ -47,6 +49,7 @@ const elements = {
   largeFolderMd5SampleLimit: document.querySelector('#large-folder-md5-sample-limit'),
   skipTinyMd5Files: document.querySelector('#skip-tiny-md5-files'),
   tinyFileMd5ThresholdKb: document.querySelector('#tiny-file-md5-threshold-kb'),
+  queueConcurrency: document.querySelector('#queue-concurrency'),
   autoSkipExactDuplicates: document.querySelector('#auto-skip-exact-duplicates'),
   autoSkipExactDuplicateAction: document.querySelector('#auto-skip-exact-duplicate-action'),
   scheduleEnabled: document.querySelector('#schedule-enabled'),
@@ -197,6 +200,14 @@ const elements = {
   codexSkillMode: document.querySelector('#codex-skill-mode'),
   toast: document.querySelector('#toast')
 };
+if (isMac) {
+  document.querySelector('.brand-icon')?.setAttribute('src', '../../assets/app-icon.png');
+  elements.autoTrash.checked = false;
+  elements.autoTrash.disabled = true;
+  elements.autoTrash.closest('label').hidden = true;
+  elements.integrationList?.querySelector('[data-integration="windows-odr"]')?.setAttribute('hidden', '');
+  elements.manualImagePaste.textContent = '也可以在这里按 ⌘V 粘贴图片';
+}
 
 const statusLabels = {
   awaiting_confirmation: '等待确认',
@@ -208,7 +219,7 @@ const statusLabels = {
   inventorying: '生成清单与 MD5',
   compressing: '压缩中',
   verifying: '完整性验证',
-  moving: '移入库目录',
+  moving: '处理源文件',
   completed: '已完成',
   completed_cleanup_failed: '归档完成/源文件处理失败',
   skipped_duplicate: '已自动跳过',
@@ -221,7 +232,9 @@ function statusLabel(status) {
 }
 
 function jobStatusLabel(job) {
-  return job?.status === 'queued' && job?.deferredUntilNextRun === true
+  return job?.status === 'completed_cleanup_failed' && job?.errorCode === 'SOURCE_DISPOSITION_COMMIT_FAILED'
+    ? '归档完成/状态保存失败'
+    : job?.status === 'queued' && job?.deferredUntilNextRun === true
     ? '等待下次入库'
     : job?.status === 'queued' && job?.intakeModeSelected === false
     ? '待选入库方式'
@@ -272,6 +285,10 @@ let catalogSuggestionSequence = 0;
 let catalogStateSignature = '';
 let suppressSelectionClickUntil = 0;
 let toastTimer;
+let lastQueueNoticeId = null;
+let queueAttentionTimer;
+let queueAttentionJobIds = new Set();
+let queueAttentionStartedAt = 0;
 let updateCheckInFlight = false;
 let pendingManualImages = [];
 let similarityManageRecordId = null;
@@ -298,6 +315,7 @@ let libraryToolbarFrame = 0;
 let onboardingOffered = false;
 let onboardingActive = false;
 let onboardingStep = 0;
+let onboardingPreviousFocus = null;
 
 const themeMode = document.querySelector('#theme-mode');
 const THEME_VALUES = ['classic', 'day', 'night', 'forest', 'twilight'];
@@ -440,12 +458,12 @@ function videoInfoText(file) {
   ].filter(Boolean).join(' · ');
 }
 
-function showToast(message, isError = false) {
+function showToast(message, isError = false, duration = 4500) {
   clearTimeout(toastTimer);
   elements.toast.textContent = t(message);
   elements.toast.classList.toggle('error', isError);
   elements.toast.hidden = false;
-  toastTimer = setTimeout(() => { elements.toast.hidden = true; }, 4500);
+  toastTimer = setTimeout(() => { elements.toast.hidden = true; }, duration);
   void window.archiveApp.logToast(String(message || ''), isError ? 'error' : 'info').catch(() => {});
 }
 
@@ -489,7 +507,7 @@ async function confirmDirectoryRefresh(message, title = '校对更新') {
 const onboardingSteps = [
   {
     target: '.nav-button[data-page="workbench-page"]',
-    progress: '新手引导 · 1/6',
+    progress: '新手引导 · 1/5',
     title: '仓库还是空的',
     copy: '先到归档工作台选择文件夹或视频，完成第一次入库后，这里就会显示可以搜索和整理的内容。',
     nextLabel: '进入归档工作台'
@@ -497,37 +515,30 @@ const onboardingSteps = [
   {
     target: '.location-panel',
     placement: 'right',
-    progress: '新手引导 · 2/6',
+    progress: '新手引导 · 2/5',
     title: '首先进行收纳设置',
     copy: '',
     nextLabel: '下一步'
   },
   {
-    target: '#archive-output-directory-field',
-    progress: '新手引导 · 3/6',
-    title: '必须填写的只有压缩包存放位置',
-    copy: '',
-    nextLabel: '下一步'
-  },
-  {
     target: ['#source-disposition-options', '#source-safety-chip'],
-    progress: '新手引导 · 4/6',
+    progress: '新手引导 · 3/5',
     title: '可以设置收纳后，自动改动原文件的位置，不勾选任何选项，就不会移动',
     copy: '',
     nextLabel: '下一步'
   },
   {
     target: '.queue-actions',
-    progress: '新手引导 · 5/6',
+    progress: '新手引导 · 4/5',
     title: '把内容加入队列并开始',
     copy: '',
     nextLabel: '下一步'
   },
   {
     target: '#drop-zone',
-    progress: '新手引导 · 6/6',
+    progress: '新手引导 · 5/5',
     title: '也可以直接把要收纳的内容拖拽到这里，快速开始',
-    copy: '',
+    copy: '默认会过滤小于 100 MB 的项目；如需收纳更小的项目，请在现有设置中调整小项目过滤阈值。',
     nextLabel: '完成'
   }
 ];
@@ -535,6 +546,11 @@ const onboardingSteps = [
 function closeOnboarding() {
   onboardingActive = false;
   elements.onboardingTour.hidden = true;
+  const visible = (element) => element?.isConnected && !element.disabled && element.getClientRects().length > 0;
+  const fallback = document.querySelector('.nav-button.active') || document.querySelector('.nav-button');
+  const restore = visible(onboardingPreviousFocus) ? onboardingPreviousFocus : fallback;
+  if (visible(restore)) restore.focus({ preventScroll: true });
+  onboardingPreviousFocus = null;
 }
 
 function positionOnboarding() {
@@ -628,7 +644,9 @@ function renderOnboardingStep() {
   if (suppressLabel) suppressLabel.textContent = t('不再提示此引导');
   const firstSelector = Array.isArray(step.target) ? step.target[0] : step.target;
   const target = document.querySelector(firstSelector);
-  if (onboardingStep > 0) target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (onboardingStep > 0) target?.scrollIntoView({
+    behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'center'
+  });
   requestAnimationFrame(positionOnboarding);
 }
 
@@ -636,11 +654,13 @@ function maybeStartOnboarding(state) {
   if (onboardingOffered || state?.catalogLoading || state?.catalogLoadError ||
       state?.config?.suppressOnboarding || Number(state?.catalogCount) > 0 || (state?.catalog || []).length > 0) return;
   onboardingOffered = true;
+  onboardingPreviousFocus = document.activeElement;
   onboardingActive = true;
   onboardingStep = 0;
   elements.suppressOnboarding.checked = false;
   elements.onboardingTour.hidden = false;
   renderOnboardingStep();
+  elements.nextOnboarding.focus({ preventScroll: true });
 }
 
 function celebrateOnboardingCompletion() {
@@ -682,13 +702,19 @@ async function finishOnboarding({ celebrate = false } = {}) {
   if (celebrate) celebrateOnboardingCompletion();
   if (!suppressFuturePrompts) return;
   const state = await safely(() => window.archiveApp.saveConfig({
-    ...readConfig(),
+    ...currentState.config,
     suppressOnboarding: true
   }));
-  if (state) render(state, true);
+  if (state) render(state);
 }
 
 elements.skipOnboarding?.addEventListener('click', () => { void finishOnboarding(); });
+document.addEventListener('keydown', (event) => {
+  if (!onboardingActive || event.defaultPrevented || event.key !== 'Escape' || document.querySelector('dialog[open]')) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void finishOnboarding();
+}, true);
 document.querySelector('#close-onboarding')?.addEventListener('click', () => { void finishOnboarding(); });
 elements.nextOnboarding?.addEventListener('click', () => {
   if (onboardingStep === 0) activatePage('workbench-page');
@@ -853,6 +879,8 @@ function updateLocaleSensitiveWarehouseText() {
   if (currentWarehouseInsights) renderWarehouseInsights(currentWarehouseInsights);
   if (elements.warehouseStatisticsDialog?.open) renderWarehouseStatistics();
   updateTagFilterOptions(currentState?.catalog || []);
+  updateCatalogFilterMenu('backup');
+  updateCatalogFilterMenu('rating');
   if (elements.warehouseTagsDialog?.open) renderWarehouseTags();
 }
 
@@ -1318,6 +1346,7 @@ function readConfig() {
     archiveFormat: elements.archiveFormat.value,
     compressionLevel: Number(elements.compressionLevel.value),
     archiveVolumeEnabled: elements.splitVolume.checked,
+    archiveVolumeConfirmation: elements.archiveVolumeConfirmation.checked,
     archiveVolumeBytes: Math.round(Number(elements.volumeSize.value) * archiveVolumeMultiplier),
     archivePassword: elements.password.value,
     recordArchivePassword: elements.recordArchivePassword.checked,
@@ -1337,9 +1366,10 @@ function readConfig() {
     scheduleEnabled: elements.scheduleEnabled.checked,
     scheduleStart: elements.scheduleStart.value,
     scheduleEnd: elements.scheduleEnd.value,
+    queueConcurrency: Number(elements.queueConcurrency.value),
     similarityEnabled: elements.similarityEnabled.checked,
     similarityStrength: SIMILARITY_STRENGTH_ORDER[Number(elements.similarityStrength.value) - 1] || 'standard',
-    autoTrashCompleted: elements.autoTrash.checked,
+    autoTrashCompleted: !isMac && elements.autoTrash.checked,
     recordBackupLocation: elements.recordBackupLocation.checked,
     backupLocation: elements.backupLocation.value.trim(),
     suppressOnboarding: Boolean(currentState?.config?.suppressOnboarding)
@@ -1480,14 +1510,14 @@ function updateVolumeControls({ unitChanged = false, normalize = true } = {}) {
   }
   if (nextUnit === 'gb') {
     elements.volumeSize.min = '1';
-    elements.volumeSize.max = '10';
+    elements.volumeSize.max = '100';
     elements.volumeSize.step = '0.25';
-    if (normalize) size = Math.min(10, Math.max(1, size));
+    if (normalize) size = Math.min(100, Math.max(1, size));
   } else {
     elements.volumeSize.min = '64';
-    elements.volumeSize.max = '10240';
+    elements.volumeSize.max = '102400';
     elements.volumeSize.step = '1';
-    if (normalize) size = Math.min(10240, Math.max(64, Math.round(size)));
+    if (normalize) size = Math.min(102400, Math.max(64, Math.round(size)));
   }
   if (normalize) elements.volumeSize.value = String(size);
   elements.volumeUnit.dataset.previousUnit = nextUnit;
@@ -1495,8 +1525,7 @@ function updateVolumeControls({ unitChanged = false, normalize = true } = {}) {
   elements.volumeUnit.disabled = !enabled;
   elements.volumeSetting.classList.toggle('enabled', enabled);
 
-  // The safety note below the controls carries the invariant 10 GiB rule;
-  // keep the optional example out of the compact prototype card.
+  // The note below the controls explains the shared volume confirmation setting.
   if (elements.volumeHint) elements.volumeHint.textContent = '';
   updateSettingsDigests();
 }
@@ -1521,6 +1550,7 @@ function renderConfig(config) {
   elements.archiveFormat.value = config.archiveFormat || '7z';
   elements.compressionLevel.value = String(config.compressionLevel ?? 1);
   elements.splitVolume.checked = config.archiveVolumeEnabled !== false;
+  elements.archiveVolumeConfirmation.checked = config.archiveVolumeConfirmation !== false;
   const archiveVolumeBytes = Number(config.archiveVolumeBytes) || (10 * 1024 ** 3);
   const volumeUsesGb = archiveVolumeBytes % (1024 ** 3) === 0;
   elements.volumeUnit.value = volumeUsesGb ? 'gb' : 'mb';
@@ -1548,10 +1578,11 @@ function renderConfig(config) {
   elements.scheduleEnabled.checked = Boolean(config.scheduleEnabled);
   elements.scheduleStart.value = config.scheduleStart || '';
   elements.scheduleEnd.value = config.scheduleEnd || '';
+  elements.queueConcurrency.value = String(config.queueConcurrency || 1);
   elements.similarityEnabled.checked = config.similarityEnabled !== false;
   const strengthIndex = SIMILARITY_STRENGTH_ORDER.indexOf(config.similarityStrength || 'standard');
   elements.similarityStrength.value = String(strengthIndex >= 0 ? strengthIndex + 1 : 2);
-  elements.autoTrash.checked = Boolean(config.autoTrashCompleted);
+  elements.autoTrash.checked = !isMac && Boolean(config.autoTrashCompleted);
   elements.recordBackupLocation.checked = Boolean(config.recordBackupLocation);
   elements.backupLocation.value = config.backupLocation || '';
   updateBackupLocationControl();
@@ -1587,7 +1618,7 @@ function updateSelectionControls(jobs) {
   elements.selectionCount.textContent = t(selectedJobIds.size > 0
     ? `已选择 ${selectedJobIds.size} 项`
     : '未选择任务');
-  elements.removeSelected.disabled = selectedJobIds.size === 0;
+  elements.removeSelected.disabled = selectedJobIds.size === 0 || Boolean(currentState?.running);
   elements.queueSelectionActions.hidden = selectedJobIds.size === 0;
   elements.selectAllTasks.checked = jobs.length > 0 && selectedJobIds.size === jobs.length;
   elements.selectAllTasks.indeterminate = selectedJobIds.size > 0 && selectedJobIds.size < jobs.length;
@@ -1598,9 +1629,33 @@ function renderJobs(jobs) {
   elements.emptyTasks.hidden = jobs.length > 0;
   updateSelectionControls(jobs);
 
-  for (const job of jobs) {
+  const currentBatchJobs = currentState?.activeBatchId
+    ? jobs.filter((job) => job.runBatchId === currentState.activeBatchId)
+    : [];
+  const pendingJobs = currentState?.activeBatchId
+    ? jobs.filter((job) => !job.runBatchId && [
+        'queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation', 'awaiting_source_change_confirmation'
+      ].includes(job.status))
+    : [];
+  const groupedIds = new Set([...currentBatchJobs, ...pendingJobs].map((job) => job.id));
+  const orderedJobs = currentState?.activeBatchId
+    ? [...currentBatchJobs, ...pendingJobs, ...jobs.filter((job) => !groupedIds.has(job.id))]
+    : jobs;
+
+  for (const job of orderedJobs) {
+    if (pendingJobs.length > 0 && currentBatchJobs.length > 0 && job === pendingJobs[0]) {
+      const divider = document.createElement('tr');
+      divider.className = 'queue-batch-divider';
+      const dividerCell = document.createElement('td');
+      dividerCell.colSpan = 7;
+      dividerCell.textContent = `待启动 · ${pendingJobs.length} 项`;
+      divider.append(dividerCell);
+      elements.taskList.append(divider);
+    }
     const row = document.createElement('tr');
     row.dataset.jobId = job.id;
+    row.classList.toggle('queue-attention', queueAttentionJobIds.has(job.id));
+    if (queueAttentionJobIds.has(job.id)) row.style.animationDelay = `-${Date.now() - queueAttentionStartedAt}ms`;
     row.classList.toggle('selected', selectedJobIds.has(job.id));
 
     const selectCell = make('td', 'select-cell');
@@ -1634,6 +1689,20 @@ function renderJobs(jobs) {
     else if (job.processingMode === 'inventory_only') nameLine.append(make('span', 'queue-origin-badge uncompressed', '未压缩入库'));
     nameLine.append(copyName, openName);
     nameCell.append(nameLine, makeUserText('small', '', job.sourcePath));
+    if (job.errorCode === 'SOURCE_DISPOSITION_COMMIT_FAILED' && job.sourceDispositionRecovery) {
+      const recovery = job.sourceDispositionRecovery;
+      const detail = make('small', 'source-recovery-location');
+      if (recovery.sourceDisposition === 'trashed') {
+        detail.append(make('span', '', '已移入 Windows 回收站'));
+      } else {
+        detail.append(
+          make('span', '', recovery.sourceDisposition === 'moved_source_retained'
+            ? '原位置副本保留；已复制到：' : '已移动到：'),
+          makeUserText('span', '', recovery.movedTo)
+        );
+      }
+      nameCell.append(detail);
+    }
     row.append(nameCell);
     row.append(make('td', '', String(job.fileCount)));
     row.append(make('td', '', formatBytes(job.totalBytes)));
@@ -1651,15 +1720,7 @@ function renderJobs(jobs) {
     row.append(progressCell);
 
     const actionCell = make('td', 'row-actions');
-    const catalogIds = new Set((currentState?.catalog || []).map((record) => record.id));
-    const hasCatalogSimilarity = [
-      ...(job.nameDuplicateMatches || []).map((match) => match.archiveId),
-      ...(job.similarMatches || []).map((match) => match.id),
-      ...(job.exactProjectMatches || []).map((match) => match.id),
-      ...(job.exactDuplicateMatches || []).flatMap((match) =>
-        (match.previous || []).map((previous) => previous.archiveId))
-    ].some((id) => id && catalogIds.has(id));
-    if (!job.sourceCatalogRecordId && currentState?.config?.similarityReportEnabled !== false && hasCatalogSimilarity) {
+    if (uiState.shouldShowQueueSimilarityReport(job, currentState?.config)) {
       actionCell.append(actionButton('相似报告', 'similarity-report', job.id, 'ghost'));
     }
     if (job.status === 'awaiting_confirmation' && job.backupLocationConfirmation) {
@@ -1669,7 +1730,7 @@ function renderJobs(jobs) {
       const requestedVolumeBytes = Number(job.archiveVolumeBytes);
       const configuredVolumeBytes = job.archiveVolumeEnabled === true &&
         Number.isInteger(requestedVolumeBytes) &&
-        requestedVolumeBytes >= 64 * 1024 ** 2 && requestedVolumeBytes <= 10 * 1024 ** 3
+        requestedVolumeBytes >= 64 * 1024 ** 2 && requestedVolumeBytes <= 100 * 1024 ** 3
         ? requestedVolumeBytes
         : 10 * 1024 ** 3;
       actionCell.append(actionButton(`确认并按 ${formatBytes(configuredVolumeBytes)} 分卷`, 'confirm', job.id, 'confirm'));
@@ -1704,7 +1765,7 @@ function renderJobs(jobs) {
     elements.taskList.append(row);
   }
   requestAnimationFrame(() => {
-    const rows = [...elements.taskList.rows];
+    const rows = [...elements.taskList.querySelectorAll('tr[data-job-id]')];
     elements.taskListContainer.classList.toggle('queue-scrollable', rows.length > 10);
     if (rows.length <= 10) {
       elements.taskListContainer.style.removeProperty('--queue-visible-height');
@@ -1917,7 +1978,7 @@ function renderCatalog(catalog) {
       const archiveSummary = record.recordType === 'manual'
         ? '仅记录'
         : record.archiveState === 'uncompressed'
-          ? '未压缩'
+          ? formatBytes(record.originalBytes)
           : `${formatBytes(record.archiveTotalBytes)}${volumeCount > 1 ? ` · ${volumeCount} 卷` : ''}`;
       const backupCell = document.createElement('span');
       backupCell.className = 'catalog-text-backup';
@@ -2135,6 +2196,32 @@ function updateBackupLocationFilterOptions(catalog) {
   elements.catalogBackupFilter.replaceChildren(new Option('全部备份位置', ''));
   for (const location of locations) elements.catalogBackupFilter.append(makeUserOption(location, location));
   elements.catalogBackupFilter.value = locations.includes(selected) ? selected : '';
+  updateCatalogFilterMenu('backup');
+}
+
+function updateCatalogFilterMenu(kind) {
+  const select = kind === 'backup' ? elements.catalogBackupFilter : elements.catalogRatingFilter;
+  const label = document.querySelector(`#catalog-${kind}-filter-label`);
+  const options = document.querySelector(`#catalog-${kind}-filter-options`);
+  options.replaceChildren();
+  for (const option of select.options) {
+    const button = make('button', 'catalog-tag-filter-option');
+    button.type = 'button';
+    button.dataset.catalogFilter = kind;
+    button.dataset.filterValue = option.value;
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(option.value === select.value));
+    if (kind === 'backup' && option.value) {
+      button.setAttribute('data-i18n-user-text', 'true');
+      button.textContent = option.textContent;
+      button.title = option.textContent;
+    } else button.textContent = t(option.textContent);
+    options.append(button);
+  }
+  const selected = select.selectedOptions[0];
+  label.toggleAttribute('data-i18n-user-text', kind === 'backup' && Boolean(select.value));
+  label.textContent = kind === 'backup' && select.value ? selected.textContent : t(selected?.textContent || '');
+  label.title = label.textContent;
 }
 
 async function refreshCatalog() {
@@ -2708,41 +2795,73 @@ function renderQueueSimilarityReport(report) {
   location.append(open);
   overview.append(location);
 
-  const legend = make('div', 'similarity-report-legend');
-  legend.append(
-    make('span', 'similarity-report-legend-item similar', '红色 · 名称或相似证据'),
-    make('span', 'similarity-report-legend-item exact', '金色 · 内容或名称完全一致')
-  );
-  overview.append(legend);
-  if (report.fingerprintPending) {
-    overview.append(make('p', 'similarity-report-pending muted', report.reusedFingerprintCount > 0
-      ? '其余内容完全一致的文件会在队列生成 MD5 后显示；当前已复用仓库中同一源项目未变化文件的已有 MD5。'
-      : '内容完全一致的文件会在队列生成 MD5 后显示；当前报告只显示名称和大小证据。'));
-  } else if (report.reusedFingerprintCount > 0) {
-    overview.append(make('p', 'similarity-report-pending muted', '已复用仓库中同一源项目的已有 MD5；未重新读取文件内容。'));
+  let queueSection = null;
+  if ((report.queueProjects || []).length > 0) {
+    queueSection = make('section', 'queue-similarity-projects');
+    queueSection.append(make('h3', '', '队列中的相似项目'));
+    const list = make('div', 'queue-similarity-project-list');
+    for (const project of report.queueProjects) {
+      const item = make('article', 'queue-similarity-project');
+      const copy = make('div', 'queue-similarity-project-copy');
+      copy.append(makeUserText('strong', '', project.title),
+        makeStage('small', 'muted', (project.reasons || []).join(' · ')));
+      const projectLocation = make('div', 'queue-similarity-location');
+      projectLocation.append(make('span', '', '位置'), makeUserText('code', '', project.sourcePath || ''));
+      const openProject = make('button', 'button ghost', '打开');
+      openProject.type = 'button';
+      openProject.dataset.reportOpenSource = project.jobId;
+      projectLocation.append(openProject);
+      copy.append(projectLocation);
+      item.append(copy);
+      list.append(item);
+    }
+    queueSection.append(list);
+  }
+
+  if (report.detailsLoaded) {
+    const legend = make('div', 'similarity-report-legend');
+    legend.append(
+      make('span', 'similarity-report-legend-item similar', '红色 · 名称或相似证据'),
+      make('span', 'similarity-report-legend-item exact', '金色 · 内容或名称完全一致')
+    );
+    overview.append(legend);
+    if (report.fingerprintPending) {
+      overview.append(make('p', 'similarity-report-pending muted', report.reusedFingerprintCount > 0
+        ? '其余内容完全一致的文件会在队列生成 MD5 后显示；当前已复用仓库中同一源项目未变化文件的已有 MD5。'
+        : '内容完全一致的文件会在队列生成 MD5 后显示；当前报告只显示名称和大小证据。'));
+    } else if (report.reusedFingerprintCount > 0) {
+      overview.append(make('p', 'similarity-report-pending muted', '已复用仓库中同一源项目的已有 MD5；未重新读取文件内容。'));
+    }
   }
   elements.queueSimilarityReportContent.append(overview);
+  if (queueSection) elements.queueSimilarityReportContent.append(queueSection);
 
-  const directorySection = make('section', 'queue-similarity-directory');
-  directorySection.append(make('h3', '', '当前项目目录'));
-  const root = createTree(
-    report.directories || [],
-    report.manifest || [],
-    report.sourceType === 'directory' ? report.displayName : ''
-  );
-  directorySection.append(renderVirtualDirectoryTree(root, report.similarEntryMatches || []));
-  elements.queueSimilarityReportContent.append(directorySection);
+  if (report.detailsLoaded) {
+    const directorySection = make('section', 'queue-similarity-directory');
+    directorySection.append(make('h3', '', '当前项目目录'));
+    const root = createTree(
+      report.directories || [],
+      report.manifest || [],
+      report.sourceType === 'directory' ? report.displayName : ''
+    );
+    directorySection.append(renderVirtualDirectoryTree(root, report.similarEntryMatches || []));
+    elements.queueSimilarityReportContent.append(directorySection);
+  } else if (report.detailsAvailable) {
+    elements.queueSimilarityReportContent.append(make('p', 'muted', '正在加载仓库项目的详细报告…'));
+  }
 
   const projects = make('section', 'queue-similarity-projects');
-  projects.append(make('h3', '', '相似项目'));
+  projects.append(make('h3', '', '仓库中的相似项目'));
   if ((report.similarProjects || []).length === 0) {
+    if ((report.queueProjects || []).length > 0) return;
     projects.append(make('p', 'muted', '当前没有可跳转的仓库项目。'));
   } else {
     const list = make('div', 'queue-similarity-project-list');
     for (const project of report.similarProjects) {
       const item = make('article', 'queue-similarity-project');
       const copy = make('div', 'queue-similarity-project-copy');
-      copy.append(makeUserText('strong', '', project.title), makeStage('small', '', queueSimilarityEvidenceText(project)));
+      copy.append(makeUserText('strong', '', project.title), makeStage('small', '', report.detailsLoaded
+        ? queueSimilarityEvidenceText(project) : (project.reasons || []).join(' · ')));
       const jump = make('button', 'button ghost', '跳转到项目');
       jump.type = 'button';
       jump.dataset.reportCatalogRecord = project.id;
@@ -2759,7 +2878,7 @@ async function loadQueueSimilarityReport(jobId, { keepOpen = false } = {}) {
   activeQueueSimilarityReportJobId = jobId;
   elements.queueSimilarityReportContent.replaceChildren(make('p', 'muted', '正在生成相似报告…'));
   if (!elements.queueSimilarityReportDialog.open) elements.queueSimilarityReportDialog.showModal();
-  const report = await safely(() => window.archiveApp.getQueueSimilarityReport(jobId));
+  const report = await safely(() => window.archiveApp.getQueueSimilarityReport(jobId, { summaryOnly: true }));
   if (requestId !== queueSimilarityReportRequest || activeQueueSimilarityReportJobId !== jobId) return;
   if (!report) {
     elements.queueSimilarityReportContent.replaceChildren(make('p', 'muted', '相似报告生成失败，请检查项目位置后重试。'));
@@ -2767,6 +2886,14 @@ async function loadQueueSimilarityReport(jobId, { keepOpen = false } = {}) {
   }
   renderQueueSimilarityReport(report);
   if (keepOpen && !elements.queueSimilarityReportDialog.open) elements.queueSimilarityReportDialog.showModal();
+  if (!report.detailsAvailable) return;
+  const detailedReport = await safely(() => window.archiveApp.getQueueSimilarityReport(jobId));
+  if (requestId !== queueSimilarityReportRequest || activeQueueSimilarityReportJobId !== jobId) return;
+  if (detailedReport) renderQueueSimilarityReport(detailedReport);
+  else {
+    renderQueueSimilarityReport({ ...report, detailsAvailable: false });
+    elements.queueSimilarityReportContent.append(make('p', 'muted', '仓库项目的详细报告加载失败，请重试。'));
+  }
 }
 
 function closeQueueSimilarityReport({ preserve = false } = {}) {
@@ -2985,14 +3112,6 @@ function renderCatalogEditor(record) {
   return section;
 }
 
-function isHttpUrl(value) {
-  try {
-    return ['http:', 'https:'].includes(new URL(String(value || '')).protocol);
-  } catch {
-    return false;
-  }
-}
-
 function sourceLocationPresentation(record) {
   const originalPath = String(record.originalSourcePath || record.sourcePath || '').trim();
   if (record.sourceDisposition === 'missing') {
@@ -3096,21 +3215,25 @@ function renderCatalogDetail(record) {
     heading.append(make('p', '', '手动库存记录 · 未关联压缩包或文件清单'));
   }
   const sourceLocation = sourceLocationPresentation(record);
+  const sourceUrl = sourceLocation.isPath
+    ? uiState.sourceLocationUrl(sourceLocation.value, record.recordType === 'manual')
+    : '';
   {
     const sourceLine = make('p', 'source-location');
     sourceLine.append(document.createTextNode('原文件位置：'));
-    if (sourceLocation.isPath && isHttpUrl(sourceLocation.value)) {
+    if (sourceUrl) {
       const sourceLink = makeUserText('button', 'inline-link', sourceLocation.text);
       sourceLink.type = 'button';
-      sourceLink.dataset.externalUrl = sourceLocation.value;
+      sourceLink.dataset.externalUrl = sourceUrl;
       sourceLine.append(sourceLink);
     } else {
       sourceLine.append(makeUserText('span', '', sourceLocation.text));
     }
-    if (sourceLocation.canOpen && !isHttpUrl(sourceLocation.value)) {
+    if (sourceLocation.canOpen) {
       const openSource = make('button', 'mini-copy-button source-open-button', '打开');
       openSource.type = 'button';
-      openSource.dataset.openSource = record.id;
+      if (sourceUrl) openSource.dataset.externalUrl = sourceUrl;
+      else openSource.dataset.openSource = record.id;
       openSource.title = sourceLocation.inTrash ? '从回收站复原到原位置' : '打开原文件当前位置';
       sourceLine.append(openSource);
     }
@@ -3122,6 +3245,11 @@ function renderCatalogDetail(record) {
       sourceLine.append(relocate);
     }
     heading.append(sourceLine);
+  }
+  if (record.retainedSourceCopyPath) {
+    const retainedLine = make('p', 'muted');
+    retainedLine.append(make('span', '', '移动位置副本保留：'), makeUserText('span', '', record.retainedSourceCopyPath));
+    heading.append(retainedLine);
   }
   if (record.recordType !== 'manual') {
     const archiveFileNames = (record.archiveFiles || []).map((file) => file.name);
@@ -3260,36 +3388,46 @@ function renderSummary(state) {
     'awaiting_trash_safety_confirmation'
   ].includes(job.status)).length);
   document.querySelector('#summary-queued').textContent = String(jobs.filter((job) => job.status === 'queued').length);
-  document.querySelector('#summary-completed').textContent = String(jobs.filter((job) => job.status.startsWith('completed')).length);
+  document.querySelector('#summary-completed').textContent = String(jobs.filter(uiState.isCompletedQueueJob).length);
   document.querySelector('#summary-bytes').textContent = formatBytes(jobs.reduce((sum, job) => sum + job.totalBytes, 0));
   elements.runningIndicator.textContent = t(state.paused
-    ? '当前任务已暂停'
+    ? '当前队列已暂停'
     : state.pauseAfterCurrent ? '完成本项后暂停'
       : state.scheduleWaiting ? '等待定时时段'
-        : state.running ? '队列运行中' : '空闲');
+        : state.running
+          ? state.memoryWaiting
+            ? `正在运行 ${state.runningCount} / ${state.concurrencyLimit} · 内存不足，暂缓启动其他任务`
+            : `正在运行 ${state.runningCount} / ${state.concurrencyLimit}`
+          : '空闲');
   if (state.safetyHalt) {
     elements.runningIndicator.textContent = t('安全停止：等待确认');
   }
   elements.runningIndicator.classList.toggle('active', state.running);
-  document.querySelector('#start-queue').disabled = state.running || !jobs.some((job) =>
+  const queueRunningHint = '当前队列执行中。新任务可以继续添加，待本批任务完成后再选择入库方式。';
+  const archiveStart = document.querySelector('#start-queue');
+  const inventoryStart = document.querySelector('#start-inventory-only');
+  archiveStart.disabled = state.running || !jobs.some((job) => !job.runBatchId && job.taskKind !== 'catalog_refresh' &&
     ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
-  document.querySelector('#start-inventory-only').disabled = state.running || !jobs.some((job) =>
-    job.taskKind !== 'catalog_compress' && ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
+  inventoryStart.disabled = state.running || !jobs.some((job) => !job.runBatchId && job.taskKind !== 'catalog_compress' &&
+    ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
+  archiveStart.title = state.running ? t(queueRunningHint) : '';
+  inventoryStart.title = state.running ? t(queueRunningHint) : '';
   if (state.safetyHalt) document.querySelector('#start-queue').disabled = true;
   if (state.safetyHalt) document.querySelector('#start-inventory-only').disabled = true;
   document.querySelector('#scan-source').disabled = Boolean(activeScanToken);
   document.querySelector('#add-folder').disabled = false;
   document.querySelector('#add-video').disabled = false;
   setConfigControlsLocked(state.running);
-  document.querySelector('#clear-completed').disabled = !jobs.some((job) => String(job.status).startsWith('completed'));
-  document.querySelector('#clear-cancelled').disabled = !jobs.some((job) => job.status === 'cancelled');
-  document.querySelector('#clear-queue').disabled = jobs.length === 0;
-  document.querySelector('#finish-next').disabled = !jobs.some((job) => job.status === 'queued') && !state.running;
-  document.querySelector('#clear-duplicates').disabled = !jobs.some((job) =>
+  document.querySelector('#clear-completed').disabled = state.running || !jobs.some(uiState.canClearCompletedQueueJob);
+  document.querySelector('#clear-cancelled').disabled = state.running || !jobs.some((job) => job.status === 'cancelled');
+  document.querySelector('#clear-queue').disabled = state.running || jobs.length === 0;
+  document.querySelector('#finish-next').disabled = state.paused || state.pauseAfterCurrent ||
+    (!state.running && !jobs.some((job) => !job.runBatchId && job.status === 'queued'));
+  document.querySelector('#clear-duplicates').disabled = state.running || !jobs.some((job) =>
     (job.nameDuplicateMatches || []).length > 0 || (job.similarMatches || []).length > 0);
-  document.querySelector('#clear-exact-duplicates').disabled = !jobs.some((job) =>
+  document.querySelector('#clear-exact-duplicates').disabled = state.running || !jobs.some((job) =>
     (job.exactDuplicateMatches || []).length > 0 || (job.exactProjectMatches || []).length > 0);
-  document.querySelector('#confirm-all-duplicates').disabled = !jobs.some((job) =>
+  document.querySelector('#confirm-all-duplicates').disabled = state.running || !jobs.some((job) =>
     job.status === 'awaiting_duplicate_confirmation' ||
     (job.similarityPreflightBlocking !== false && job.status === 'awaiting_confirmation' && (job.confirmationReasons || []).some((reason) =>
       ['name_match', 'similar_title', 'same_video_size'].includes(reason))));
@@ -3297,7 +3435,16 @@ function renderSummary(state) {
   elements.undoCatalog.textContent = t(state.undoDepth ? `撤回：${state.undoLabel}` : '撤回');
   elements.undoCatalog.title = t(state.undoDepth ? `撤回：${state.undoLabel}` : '撤回');
 
-  const canPause = state.running && !state.paused && ['inventorying', 'compressing', 'verifying'].includes(currentJob?.status);
+  const duplicateMenu = document.querySelector('#clear-duplicates').closest('.action-menu');
+  const clearMenu = document.querySelector('#clear-queue').closest('.action-menu');
+  for (const menu of [duplicateMenu, clearMenu]) {
+    menu.classList.toggle('disabled', state.running);
+    menu.querySelector('summary')?.setAttribute('aria-disabled', String(Boolean(state.running)));
+    if (state.running) menu.removeAttribute('open');
+  }
+  const activeJobs = new Set(state.activeJobIds || []);
+  const canPause = state.running && !state.paused && Number(state.runningCount) > 0 &&
+    !jobs.some((job) => activeJobs.has(job.id) && job.status === 'moving');
   document.querySelector('#pause-queue').hidden = !canPause;
   document.querySelector('#resume-queue').hidden = !state.paused;
   document.querySelector('#cancel-current').hidden = !(state.paused && currentJob);
@@ -3326,16 +3473,48 @@ function renderSummary(state) {
   }
 }
 
+function syncArchiveOutputFields(previousConfig, config) {
+  if (!previousConfig || config.archiveOutputDirectory === previousConfig.archiveOutputDirectory) return;
+  elements.archiveOutputDirectory.value = config.archiveOutputDirectory || '';
+  elements.archiveStagingDirectory.value = config.archiveStagingDirectory || deriveStagingDirectory(config.archiveOutputDirectory);
+}
+
+function highlightQueueAttention(jobIds) {
+  clearTimeout(queueAttentionTimer);
+  queueAttentionJobIds = new Set(jobIds || []);
+  queueAttentionStartedAt = Date.now();
+  const rows = [...elements.taskList.querySelectorAll('tr[data-job-id]')];
+  for (const row of rows) {
+    row.classList.remove('queue-attention');
+    row.style.animationDelay = '';
+    if (queueAttentionJobIds.has(row.dataset.jobId)) {
+      void row.offsetWidth;
+      row.classList.add('queue-attention');
+    }
+  }
+  rows.find((row) => queueAttentionJobIds.has(row.dataset.jobId))
+    ?.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+  queueAttentionTimer = setTimeout(() => {
+    queueAttentionJobIds.clear();
+    for (const row of elements.taskList.querySelectorAll('.queue-attention')) {
+      row.classList.remove('queue-attention');
+      row.style.animationDelay = '';
+    }
+  }, 1800);
+}
+
 function render(state, includeConfig = false) {
+  const previousConfig = currentState?.config;
   const catalogWasLoading = Boolean(currentState?.catalogLoading);
   const previousJobs = currentState?.jobs || [];
   const mergedState = currentState
     ? { ...currentState, ...state, catalog: state.catalog || currentState.catalog }
     : state;
+  const refreshNotices = currentState ? uiState.directoryRefreshNotices(previousJobs, mergedState.jobs || []) : [];
   if (currentState) {
     const previousById = new Map(previousJobs.map((job) => [job.id, job]));
     for (const job of mergedState.jobs || []) {
-      if (job.unchangedDirectoryTitle && job.status === 'completed' && previousById.get(job.id)?.status !== 'completed') {
+      if (job.taskKind !== 'catalog_refresh' && job.unchangedDirectoryTitle && job.status === 'completed' && previousById.get(job.id)?.status !== 'completed') {
         const characters = Array.from(job.unchangedDirectoryTitle);
         const title = characters.length > 15 ? `${characters.slice(0, 15).join('')}…` : job.unchangedDirectoryTitle;
         showToast(`${title}与本地目录内容一致`);
@@ -3348,17 +3527,26 @@ function render(state, includeConfig = false) {
   currentState = mergedState;
   state = mergedState;
   if (includeConfig) renderConfig(state.config);
+  else syncArchiveOutputFields(previousConfig, state.config);
+  if (!previousConfig) updateCatalogFilterMenu('rating');
   renderSummary(state);
   renderJobs(state.jobs);
+  if (state.queueNoticeId && state.queueNoticeId !== lastQueueNoticeId) {
+    lastQueueNoticeId = state.queueNoticeId;
+    if (refreshNotices.length === 0) showToast(state.queueStartNotice, true, 9000);
+    highlightQueueAttention(state.queueBlockedJobIds);
+  }
+  for (const notice of refreshNotices) showToast(notice.message, notice.isError, 8000);
   renderLogs(state.logs);
   updateCatalogSelectionControls();
   const catalogControls = [elements.catalogSearch, elements.catalogTagFilter, elements.catalogBackupFilter,
     elements.catalogRatingFilter, elements.catalogSort];
   for (const control of catalogControls) control.disabled = Boolean(state.catalogLoading);
-  elements.catalogTagFilterMenu.classList.toggle('disabled', Boolean(state.catalogLoading));
-  elements.catalogTagFilterMenu.querySelector('summary')
-    ?.setAttribute('aria-disabled', String(Boolean(state.catalogLoading)));
-  if (state.catalogLoading) elements.catalogTagFilterMenu.removeAttribute('open');
+  for (const menu of document.querySelectorAll('.catalog-tag-filter-menu')) {
+    menu.classList.toggle('disabled', Boolean(state.catalogLoading));
+    menu.querySelector('summary')?.setAttribute('aria-disabled', String(Boolean(state.catalogLoading)));
+    if (state.catalogLoading) menu.removeAttribute('open');
+  }
   if (state.catalogLoading) elements.selectAllCatalog.disabled = true;
   else updateCatalogSelectionControls();
   if (state.catalogLoading) {
@@ -3545,8 +3733,8 @@ document.addEventListener('pointerdown', (event) => {
   for (const menu of document.querySelectorAll('.action-menu[open]')) {
     if (!menu.contains(event.target)) menu.removeAttribute('open');
   }
-  if (elements.catalogTagFilterMenu.open && !elements.catalogTagFilterMenu.contains(event.target)) {
-    elements.catalogTagFilterMenu.removeAttribute('open');
+  for (const menu of document.querySelectorAll('.catalog-tag-filter-menu[open]')) {
+    if (!menu.contains(event.target)) menu.removeAttribute('open');
   }
   if (similarityWhitelistPopover &&
       !similarityWhitelistPopover.contains(event.target) &&
@@ -3735,6 +3923,8 @@ elements.moveCompleted.addEventListener('change', async () => {
   control.addEventListener('change', updateIntakeOptionControls);
 });
 elements.similarityReportEnabled.addEventListener('change', () => { void saveConfig(); });
+elements.queueConcurrency.addEventListener('change', () => { void saveConfig(); });
+elements.archiveVolumeConfirmation.addEventListener('change', () => { void saveConfig(); });
 elements.largeFolderSimplification.addEventListener('change', () => {
   updatePerformanceAvoidanceControls();
   void saveConfig();
@@ -3941,16 +4131,19 @@ document.addEventListener('paste', async (event) => {
 });
 
 document.querySelector('#start-queue').addEventListener('click', async () => {
-  const state = await safely(() => window.archiveApp.startQueue());
+  const state = await safely(() => window.archiveApp.startQueue([...selectedJobIds]));
   if (state) {
     render(state);
-    if (state.archiveStartNotice) showToast(state.archiveStartNotice, true);
+    if (state.queueStartNotice && !state.queueNoticeId) showToast(state.queueStartNotice, true);
   }
 });
 
 async function beginInventoryOnlyQueue() {
-  const state = await safely(() => window.archiveApp.startInventoryOnlyQueue());
-  if (state) render(state);
+  const state = await safely(() => window.archiveApp.startInventoryOnlyQueue([...selectedJobIds]));
+  if (state) {
+    render(state);
+    if (state.queueStartNotice && !state.queueNoticeId) showToast(state.queueStartNotice, true);
+  }
 }
 
 document.querySelector('#start-inventory-only').addEventListener('click', () => {
@@ -4111,7 +4304,7 @@ elements.removeSelected.addEventListener('click', async () => {
 });
 
 document.querySelector('#clear-queue').addEventListener('click', async () => {
-  if (!await confirmUser('清空整个任务列表？如果当前正在运行，会停止当前任务并阻止后续任务启动。已入库档案和源文件不会删除。', { tone: 'danger', title: '清空任务列表', confirmLabel: '确认清空' })) return;
+  if (!await confirmUser('清空整个任务列表？已入库档案和源文件不会删除。', { tone: 'danger', title: '清空任务列表', confirmLabel: '确认清空' })) return;
   const state = await safely(() => window.archiveApp.clearQueue());
   if (state) {
     selectedJobIds.clear();
@@ -4120,7 +4313,7 @@ document.querySelector('#clear-queue').addEventListener('click', async () => {
 });
 
 document.querySelector('#clear-completed').addEventListener('click', async () => {
-  const completedCount = (currentState?.jobs || []).filter((job) => String(job.status).startsWith('completed')).length;
+  const completedCount = (currentState?.jobs || []).filter(uiState.canClearCompletedQueueJob).length;
   if (completedCount === 0) return;
   const result = await safely(() => window.archiveApp.clearCompletedJobs());
   if (!result) return;
@@ -4263,12 +4456,31 @@ elements.catalogSearch.addEventListener('blur', () => {
 });
 
 for (const filter of [elements.catalogBackupFilter, elements.catalogRatingFilter]) {
-  filter.addEventListener('change', () => { resetCatalogSelection(); catalogPage = 1; void refreshCatalog(); });
+  filter.addEventListener('change', () => {
+    updateCatalogFilterMenu(filter === elements.catalogBackupFilter ? 'backup' : 'rating');
+    resetCatalogSelection(); catalogPage = 1; void refreshCatalog();
+  });
 }
-elements.catalogTagFilterMenu.querySelector('summary').addEventListener('click', (event) => {
-  if (!elements.catalogTagFilterMenu.classList.contains('disabled')) return;
-  event.preventDefault();
-});
+for (const menu of document.querySelectorAll('.catalog-tag-filter-menu')) {
+  menu.querySelector('summary').addEventListener('click', (event) => {
+    if (menu.classList.contains('disabled')) event.preventDefault();
+  });
+  menu.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { menu.removeAttribute('open'); menu.querySelector('summary').focus(); }
+  });
+}
+for (const kind of ['backup', 'rating']) {
+  document.querySelector(`#catalog-${kind}-filter-options`).addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-catalog-filter]');
+    const menu = document.querySelector(`#catalog-${kind}-filter-menu`);
+    if (!button || menu.classList.contains('disabled')) return;
+    const select = kind === 'backup' ? elements.catalogBackupFilter : elements.catalogRatingFilter;
+    select.value = button.dataset.filterValue;
+    menu.removeAttribute('open');
+    select.dispatchEvent(new Event('change'));
+    menu.querySelector('summary').focus();
+  });
+}
 elements.catalogTagFilterOptions.addEventListener('click', (event) => {
   const button = event.target.closest('button[data-catalog-tag-filter]');
   if (!button || elements.catalogTagFilterMenu.classList.contains('disabled')) return;
@@ -4519,7 +4731,7 @@ elements.catalogPageInput.addEventListener('keydown', (event) => {
 });
 document.addEventListener('keydown', (event) => {
   if (!['ArrowLeft', 'ArrowRight'].includes(event.key) || event.defaultPrevented ||
-      event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      onboardingActive || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
   if (document.querySelector('#library-page')?.hidden || document.querySelector('dialog[open]')) return;
   if (event.target?.closest?.('input, textarea, select, [contenteditable="true"]')) return;
   const previous = event.key === 'ArrowLeft';
@@ -4616,6 +4828,24 @@ elements.warehouseDiscovery.addEventListener('click', (event) => {
   if (button) void openDiscoveryRecord(button.dataset.discoveryRecord);
 });
 
+function showDirectoryRefreshSubmission(result) {
+  render(result.state);
+  if (result.failedCount > 0) {
+    const firstReason = result.failures?.[0]?.reason ? `：${result.failures[0].reason}` : '';
+    showToast(`${result.failedCount} 个项目未能开始${firstReason}；${result.queuedCount} 个已开始检查`, true);
+    return;
+  }
+  if (result.queuedCount <= 0) return;
+  const ids = new Set(result.queuedJobIds || []);
+  const notices = uiState.directoryRefreshNotices([], (currentState?.jobs || []).filter((job) => ids.has(job.id)));
+  if (notices.length > 0) {
+    const notice = notices.find((item) => item.isError) || notices.at(-1);
+    showToast(notice.message, notice.isError, 8000);
+  } else showToast(result.queuedCount === 1
+    ? '已提交目录校对，请到归档工作台查看进度和待确认事项。'
+    : `已提交 ${result.queuedCount} 个目录校对，请到归档工作台查看进度和待确认事项。`, false, 9000);
+}
+
 elements.catalogDetail.addEventListener('click', (event) => {
   const refreshDirectory = event.target.closest('button[data-refresh-catalog-directory]');
   if (refreshDirectory) {
@@ -4626,9 +4856,7 @@ elements.catalogDetail.addEventListener('click', (event) => {
       )) return;
       const result = await safely(() => window.archiveApp.queueCatalogRecordsForRefresh([refreshDirectory.dataset.refreshCatalogDirectory]));
       if (!result) return;
-      render(result.state);
-      if (result.failedCount > 0) showToast(result.failures?.[0]?.reason || `${result.failedCount} 个项目未能更新；${result.queuedCount} 个已开始检查`, true);
-      else showToast('已开始检查目录变化');
+      showDirectoryRefreshSubmission(result);
     })();
     return;
   }
@@ -4771,7 +4999,7 @@ elements.selectAllCatalog.addEventListener('change', () => {
   syncCatalogItemState();
 });
 document.addEventListener('keydown', (event) => {
-  if (event.defaultPrevented || document.querySelector('#library-page').hidden || document.querySelector('dialog[open]')) return;
+  if (event.defaultPrevented || onboardingActive || document.querySelector('#library-page').hidden || document.querySelector('dialog[open]')) return;
   if (event.key === 'Escape' && cancelCatalogMarquee) {
     event.preventDefault();
     cancelCatalogMarquee();
@@ -4884,11 +5112,7 @@ elements.refreshDirectoriesSelected.addEventListener('click', () => {
     )) return;
     const result = await safely(() => window.archiveApp.queueCatalogRecordsForRefresh(eligible.map((record) => record.id)));
     if (!result) return;
-    render(result.state);
-    if (result.failedCount > 0) {
-      const firstReason = result.failures?.[0]?.reason ? `：${result.failures[0].reason}` : '';
-      showToast(`${result.failedCount} 个项目未能开始${firstReason}；${result.queuedCount} 个已开始检查`, true);
-    } else showToast(`已开始检查 ${result.queuedCount} 个目录`);
+    showDirectoryRefreshSubmission(result);
   })();
 });
 
@@ -4967,11 +5191,14 @@ elements.deleteCatalogSelected.addEventListener('click', () => {
   const uncompressedCount = selectedRecords.filter((record) => record.recordType !== 'manual' && (record.archiveFiles || []).length === 0).length;
   const manualCount = selectedRecords.length - archiveCount - uncompressedCount;
   const parts = [];
-  if (archiveCount > 0) parts.push(`${archiveCount} 个普通归档的压缩包将移入 Windows 回收站`);
+  if (archiveCount > 0) parts.push(isMac
+    ? `${archiveCount} 个本机压缩归档暂不能在 Mac Beta 中删除，请先取消选择这些项目`
+    : `${archiveCount} 个普通归档的压缩包将移入 Windows 回收站`);
   if (uncompressedCount > 0) parts.push(`${uncompressedCount} 个未压缩库存只删除仓库记录，原文件保持不变`);
   if (manualCount > 0) parts.push(`${manualCount} 条手动库存记录将被移除`);
   elements.deleteCatalogSummary.textContent = `${t(`所选 ${selectedRecords.length} 项：`)}${parts.map((part) => t(part)).join(t('；'))}${t('。')} ${t('只有必要操作全部成功后，对应仓库记录才会删除。本次运行期间可从仓库顶部撤回。')}`;
-  const restorableCount = selectedRecords.filter((record) => ['moved', 'trashed'].includes(record.sourceDisposition)).length;
+  elements.deleteCatalogForm.querySelector('button[type="submit"]').disabled = isMac && archiveCount > 0;
+  const restorableCount = selectedRecords.filter((record) => (isMac ? ['moved'] : ['moved', 'trashed']).includes(record.sourceDisposition)).length;
   elements.restoreOriginalSources.disabled = restorableCount === 0;
   elements.restoreOriginalSources.closest('.restore-source-option').classList.toggle('disabled', restorableCount === 0);
   elements.restoreOriginalSourcesHelp.textContent = t(restorableCount > 0

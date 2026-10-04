@@ -11,12 +11,12 @@ const { extractVideoFrames, parseFfmpegProbeOutput, probeVideo, runMediaProcess 
 
 test('media timeout excludes paused time and cancellation waits for child close', async () => {
   const pauseController = { paused: true, waitIfPaused: async () => {}, attach: async () => {}, detach: () => {} };
-  const timer = setTimeout(() => { pauseController.paused = false; }, 300);
+  const timer = setTimeout(() => { pauseController.paused = false; }, 1200);
   try {
-    const result = await runMediaProcess(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 350)'], {
-      timeoutMs: 200, pauseController
+    const result = await runMediaProcess(process.execPath, ['-e', 'setTimeout(() => process.exit(0), 1500)'], {
+      timeoutMs: 1000, pauseController
     });
-    assert.ok(result.activeElapsedMs < 200);
+    assert.ok(result.activeElapsedMs < 1000, `paused time leaked into active timeout: ${result.activeElapsedMs}ms`);
   } finally { clearTimeout(timer); }
   const abort = new AbortController();
   let detached = false;

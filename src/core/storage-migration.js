@@ -2,13 +2,14 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { makeArchiveStagingDirectory, normalizeForComparison } = require('./paths');
+const { makeArchiveStagingDirectory, makeDefaultConfig, normalizeForComparison, rebasePortableUserDataPaths } = require('./paths');
+const { makeUserDataLayout } = require('./storage-paths');
 
 const USER_DATA_COPY_MARKER = '.user-data-copy-in-progress';
 
-async function pathExists(targetPath) {
+async function pathExists(targetPath, fsImpl = fs) {
   try {
-    await fs.access(targetPath);
+    await fsImpl.access(targetPath);
     return true;
   } catch (error) {
     if (error.code === 'ENOENT') return false;
@@ -16,24 +17,51 @@ async function pathExists(targetPath) {
   }
 }
 
-async function inspectTree(targetPath) {
+async function inspectTree(targetPath, relativePath = '') {
   const stats = await fs.lstat(targetPath);
-  if (!stats.isDirectory()) return { files: 1, directories: 0, bytes: stats.size };
-  const result = { files: 0, directories: 1, bytes: 0 };
+  if (stats.isSymbolicLink()) throw new Error('用户数据复制不接受符号链接。');
+  if (!stats.isDirectory()) return { files: 1, directories: 0, bytes: stats.size, shape: [[relativePath, 'file', stats.size]] };
+  const result = { files: 0, directories: 1, bytes: 0, shape: [[relativePath, 'directory']] };
   for (const entry of await fs.readdir(targetPath)) {
-    const child = await inspectTree(path.join(targetPath, entry));
+    const child = await inspectTree(path.join(targetPath, entry), `${relativePath}/${entry}`);
     result.files += child.files;
     result.directories += child.directories;
     result.bytes += child.bytes;
+    for (const item of child.shape) result.shape.push(item);
   }
   return result;
 }
 
 async function verifyCopiedPath(sourcePath, targetPath) {
   const [source, target] = await Promise.all([inspectTree(sourcePath), inspectTree(targetPath)]);
-  if (source.files !== target.files || source.directories !== target.directories || source.bytes !== target.bytes) {
+  const normalizeShape = (tree) => JSON.stringify(tree.shape.sort((a, b) => a[0].localeCompare(b[0])));
+  if (normalizeShape(source) !== normalizeShape(target)) {
     throw new Error(`数据迁移复核失败：${path.basename(sourcePath)}`);
   }
+  if (path.basename(sourcePath) === 'config' && await pathExists(path.join(sourcePath, 'settings.json'))) {
+    const [before, after] = await Promise.all([sourcePath, targetPath].map((root) => fs.readFile(path.join(root, 'settings.json'), 'utf8')));
+    JSON.parse(before);
+    JSON.parse(after);
+    if (before !== after) throw new Error('数据迁移设置复制不一致。');
+  }
+}
+
+// Only settings and database presence are inspected here. Normal startup opens and queries the repository.
+async function inspectUserDataStartup(root, applicationRoot, fsImpl = fs) {
+  const layout = makeUserDataLayout(applicationRoot, null, root);
+  let saved = {};
+  let settingsPresent = false;
+  try {
+    saved = JSON.parse(await fsImpl.readFile(layout.settingsPath, 'utf8'));
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error('用户数据设置格式无效。');
+    settingsPresent = true;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  const config = rebasePortableUserDataPaths({ ...makeDefaultConfig(applicationRoot, layout), ...saved }, layout);
+  const repositoryDirectory = path.resolve(config.repositoryDirectory);
+  return { root: path.resolve(root), repositoryDirectory, settingsPresent,
+    databasePresent: await pathExists(path.join(repositoryDirectory, 'warehouse.sqlite'), fsImpl) };
 }
 
 async function prepareUserDataTarget(currentRoot, targetRoot) {
@@ -66,7 +94,7 @@ async function prepareUserDataTarget(currentRoot, targetRoot) {
 
   // Runtime caches, staged updates and the short-lived MCP connection credential
   // are recreated by the next process and must not be copied into a new data root.
-  const skipped = new Set(['electron', 'updates', 'mcp']);
+  const skipped = new Set(['electron', 'updates', 'mcp', 'cache']);
   const copyMarker = path.join(target, USER_DATA_COPY_MARKER);
   await fs.writeFile(copyMarker, `${new Date().toISOString()}\n`, 'utf8');
   let copyCompleted = false;
@@ -203,6 +231,7 @@ async function migrateToUserData(config, workspaceRoot, layout) {
 
 module.exports = {
   USER_DATA_COPY_MARKER,
+  inspectUserDataStartup,
   copyPathIfMissing,
   migrateToUserData,
   movePathIfMissing,

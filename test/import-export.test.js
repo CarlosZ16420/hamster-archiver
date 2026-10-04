@@ -9,6 +9,7 @@ const test = require('node:test');
 const { execFileSync } = require('node:child_process');
 const { QueueManager } = require('../src/core/queue-manager');
 const { AppStore } = require('../src/core/store');
+const { resolveThumbnailReference } = require('../src/core/warehouse-paths');
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const SEVEN_ZIP_PATH = process.env.HAMSTER_TEST_7ZIP_PATH || path.join(PROJECT_ROOT, 'tools', '7zip', '7z.exe');
@@ -85,7 +86,6 @@ async function createThumbnails(warehouseDir) {
 
 function makeTestEnv(t) {
   const stores = [];
-  const root = fs.mkdtemp(path.join(os.tmpdir(), 'hamster-ie-test-'));
   const env = {
     stores,
     root: null,
@@ -94,7 +94,7 @@ function makeTestEnv(t) {
   };
   t.after(async () => {
     env.closeAll();
-    const r = await root;
+    const r = await env.root;
     if (r) await fs.rm(r, { recursive: true, force: true }).catch(() => {});
   });
   return env;
@@ -141,6 +141,105 @@ test('4.1.1 dist: export warehouse to ZIP creates a valid archive with sqlite an
   assert.ok(listing.includes('warehouse.sqlite'), 'ZIP must contain warehouse.sqlite');
   assert.ok(listing.includes('thumb-001.png'), 'ZIP must contain thumbnail thumb-001.png');
   assert.ok(listing.includes('thumb-002.png'), 'ZIP must contain thumbnail thumb-002.png');
+});
+
+async function makeRemediationEnv(t, records = []) {
+  const env = makeTestEnv(t);
+  env.root = fs.mkdtemp(path.join(os.tmpdir(), 'hamster-ie-safety-'));
+  const root = await env.root;
+  const source = path.join(root, 'source-warehouse');
+  const target = path.join(root, 'target-warehouse');
+  const store = env.addStore(new AppStore(path.join(root, 'user-data')));
+  await store.saveCatalog(source, records);
+  const manager = await makeManager(store, target);
+  return { root, source, target, store, manager };
+}
+
+test('import skips duplicate resources and allocates shared new resources without overwriting existing images', async (t) => {
+  const records = [
+    { id: 'old', title: 'external old', manifest: [{ relativePath: 'old.png', thumbnailPath: 'shared/image.png' }] },
+    { id: 'new-a', manifest: [{ relativePath: 'a.png', thumbnailPath: 'shared/image.png' }] },
+    { id: 'new-b', manualImages: [{ ref: 'manual-image:b', thumbnailPath: 'shared/image.png' }] },
+    { id: 'new-a', manifest: [{ relativePath: 'ignored.png', thumbnailPath: 'ignored/image.png' }] }
+  ];
+  const { source, target, store, manager } = await makeRemediationEnv(t, records.slice(0, 3));
+  const loadCatalog = store.loadCatalog.bind(store);
+  store.loadCatalog = async (directory) => directory === source ? structuredClone(records) : loadCatalog(directory);
+  manager.catalog = [{ id: 'old', title: 'my title', manifest: [{ relativePath: 'old.png', thumbnailPath: 'shared/image.png' }] }];
+  await store.saveCatalog(target, manager.catalog);
+  for (const [directory, text] of [[source, 'imported'], [target, 'existing']]) {
+    await fs.mkdir(path.join(directory, 'thumbnails', 'shared'), { recursive: true });
+    await fs.writeFile(path.join(directory, 'thumbnails', 'shared', 'image.png'), text);
+  }
+  const result = await manager.importWarehouseFromDirectory(source);
+  assert.equal(result.importedCount, 2);
+  assert.equal(result.skippedCount, 2);
+  assert.equal(manager.catalog.find((r) => r.id === 'old').title, 'my title');
+  assert.equal(await fs.readFile(path.join(target, 'thumbnails', 'shared', 'image.png'), 'utf8'), 'existing');
+  const a = manager.catalog.find((r) => r.id === 'new-a').manifest[0].thumbnailPath;
+  const b = manager.catalog.find((r) => r.id === 'new-b').manualImages[0].thumbnailPath;
+  assert.equal(a, b);
+  assert.equal(await fs.readFile(resolveThumbnailReference(target, a), 'utf8'), 'imported');
+  const resourcesBefore = await fs.readdir(path.join(target, 'thumbnails'));
+  const duplicate = await manager.importWarehouseFromDirectory(source);
+  assert.equal(duplicate.importedCount, 0);
+  assert.deepEqual(await fs.readdir(path.join(target, 'thumbnails')), resourcesBefore);
+  manager.services.trashItem = (ownedPath) => fs.rm(ownedPath, { recursive: true, force: true });
+  await manager.deleteCatalogRecords(['new-a']);
+  assert.equal(await fs.readFile(resolveThumbnailReference(target, b), 'utf8'), 'imported');
+  await manager.deleteCatalogRecords(['new-b']);
+  await assert.rejects(fs.access(resolveThumbnailReference(target, b)), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(path.join(target, 'thumbnails', 'shared', 'image.png'), 'utf8'), 'existing');
+});
+
+test('import database failure preserves live state and removes only uncommitted resources; post-commit log failure is a warning', async (t) => {
+  const { source, target, store, manager } = await makeRemediationEnv(t, [
+    { id: 'new', manifest: [{ relativePath: 'a.png', thumbnailPath: 'new/a.png' }] }
+  ]);
+  await fs.mkdir(path.join(source, 'thumbnails', 'new'), { recursive: true });
+  await fs.writeFile(path.join(source, 'thumbnails', 'new', 'a.png'), 'new image');
+  const originalSave = store.saveCatalog;
+  store.saveCatalog = async () => { throw new Error('injected database failure'); };
+  await assert.rejects(manager.importWarehouseFromDirectory(source), /injected database/);
+  assert.equal(manager.catalog.length, 0);
+  assert.deepEqual(await fs.readdir(path.join(target, 'thumbnails')), []);
+  store.saveCatalog = originalSave;
+  manager.log = async () => { throw new Error('injected log failure'); };
+  const result = await manager.importWarehouseFromDirectory(source);
+  assert.equal(result.importedCount, 1);
+  assert.match(result.warnings[0], /log failure/);
+  const persisted = await store.loadCatalog(target);
+  assert.equal(await fs.readFile(resolveThumbnailReference(target, persisted[0].manifest[0].thumbnailPath), 'utf8'), 'new image');
+});
+
+test('failed export preserves an existing backup and successful Windows replacement publishes a verified new ZIP', async (t) => {
+  const { root, manager } = await makeRemediationEnv(t, []);
+  const target = path.join(root, 'backup.zip');
+  await fs.writeFile(target, 'old backup bytes');
+  manager.config.sevenZipPath = path.join(root, 'missing-7z.exe');
+  await assert.rejects(manager.exportWarehouseToFile(target));
+  assert.equal(await fs.readFile(target, 'utf8'), 'old backup bytes');
+  manager.config.sevenZipPath = SEVEN_ZIP_PATH;
+  const result = await manager.exportWarehouseToFile(target);
+  assert.equal(result.path, target);
+  execFileSync(SEVEN_ZIP_PATH, ['t', target], { stdio: 'ignore', windowsHide: true });
+  assert.match(execFileSync(SEVEN_ZIP_PATH, ['l', target], { encoding: 'utf8', windowsHide: true }), /warehouse.sqlite/);
+  assert.equal((await fs.readdir(root)).filter((name) => name.startsWith('.hamster-export-')).length, 0);
+});
+
+test('export refuses a target changed during preparation and preserves published results after logging failure', async (t) => {
+  const { root, store, manager } = await makeRemediationEnv(t, []);
+  const target = path.join(root, 'backup.zip');
+  await fs.writeFile(target, 'old');
+  const checkpoint = store.checkpoint.bind(store);
+  store.checkpoint = async (...args) => { await checkpoint(...args); await fs.writeFile(target, 'concurrent backup'); };
+  await assert.rejects(manager.exportWarehouseToFile(target), /已改变/);
+  assert.equal(await fs.readFile(target, 'utf8'), 'concurrent backup');
+  store.checkpoint = checkpoint;
+  manager.log = async () => { throw new Error('log failure'); };
+  const result = await manager.exportWarehouseToFile(target);
+  assert.match(result.warnings[0], /log failure/);
+  execFileSync(SEVEN_ZIP_PATH, ['t', target], { stdio: 'ignore', windowsHide: true });
 });
 
 test('4.1.1 dist: import exported ZIP into a fresh warehouse preserves all records', async (t) => {
@@ -216,10 +315,9 @@ test('4.1.1 dist: imported thumbnails are copied to the target warehouse', async
   const managerB = await makeManager(storeB, warehouseB);
   await managerB.importWarehouseFromArchiveOrDirectory(exportZip);
 
-  const thumb1 = path.join(warehouseB, 'thumbnails', 'rec-manual-001', 'thumb-001.png');
-  const thumb2 = path.join(warehouseB, 'thumbnails', 'rec-manual-001', 'thumb-002.png');
   const importedRecord = managerB.catalog.find((record) => record.id === 'rec-manual-001');
-  assert.equal(importedRecord.manualImages[0].thumbnailPath, 'rec-manual-001/thumb-001.png');
+  const thumb1 = resolveThumbnailReference(warehouseB, importedRecord.manualImages[0].thumbnailPath);
+  const thumb2 = resolveThumbnailReference(warehouseB, importedRecord.manualImages[1].thumbnailPath);
   assert.equal(
     managerB.getThumbnailPath('rec-manual-001', 'manual-rec-manual-001:thumb-001'),
     thumb1

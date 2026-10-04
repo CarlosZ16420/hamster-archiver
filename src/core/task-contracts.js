@@ -29,6 +29,7 @@ function codedError(code, message, stage = 'request', options = {}) {
   error.stage = stage;
   error.retryable = options.retryable === true;
   error.requiredAction = options.requiredAction || null;
+  if (options.requiredFields) error.requiredFields = [...options.requiredFields];
   return error;
 }
 
@@ -42,14 +43,18 @@ function errorEnvelope(error, fallbackStage = 'request') {
       stage: String(error?.stage || fallbackStage),
       message: String(error?.message || error || 'Hamster Archiver operation failed.'),
       retryable: error?.retryable === true,
-      requiredAction: error?.requiredAction || null
+      requiredAction: error?.requiredAction || null,
+      ...(error?.requiredFields ? { requiredFields: error.requiredFields } : {})
     }
   };
 }
 
 function taskStatus(jobs, task = {}) {
   if (task.recoveryRequired) return 'recovery_required';
-  if (!jobs.length) return task.failures?.length ? 'failed' : 'accepted';
+  if (task.cancelled) return 'cancelled';
+  if (task.cancellationRequested && !task.cancelFinalized) return 'cancelling';
+  if (task.decision && !task.decision.resolved) return 'needs_input';
+  if (!jobs.length) return task.failures?.length ? 'failed' : task.noChange ? 'completed' : task.preparing ? 'preparing' : 'accepted';
   if (jobs.some((job) => ['INTERRUPTED', 'SOURCE_DISPOSITION_COMMIT_FAILED'].includes(job.errorCode))) {
     return 'recovery_required';
   }
