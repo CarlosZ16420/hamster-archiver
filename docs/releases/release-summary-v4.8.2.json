@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.8.2",
+  "notes": {
+    "zh-CN": [
+      "归档完整核对源结构，保留空目录与跨盘暂存，遇到变化时保护原件。",
+      "改进队列批次、并发、目录校对与仓库搜索，并提供更安全的导入和导出。",
+      "v2 CLI/MCP 提供持久回执与任务恢复；用户数据切换经独立重启验收。"
+    ],
+    "en-US": [
+      "Archives verify complete source structure, preserve empty folders and cross-drive staging, and protect originals when changes occur.",
+      "Improve queue batches, concurrency, folder review, and Warehouse search, with safer imports and exports.",
+      "The v2 CLI/MCP adds durable receipts and task recovery; data-area switches receive a separate restart check."
+    ]
+  }
+}

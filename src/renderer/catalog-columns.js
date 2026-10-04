@@ -9,7 +9,7 @@
     { key: 'title', label: '名称', min: 140 },
     { key: 'type', label: '类型', min: 40 },
     { key: 'number', label: '文件', min: 32 },
-    { key: 'status', label: '大小 / 状态', min: 64 },
+    { key: 'status', label: '大小', min: 64 },
     { key: 'tags', label: '标签', min: 60 },
     { key: 'backup', label: '备份位置', min: 80 },
     { key: 'date', label: '入库时间', min: 96 },

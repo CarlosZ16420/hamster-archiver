@@ -6,7 +6,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { ApplicationTaskService, legacyTaskFingerprint } = require('../src/core/application-task-service');
+const { ApplicationTaskService, legacyTaskFingerprint, normalizePaths, taskFingerprint } = require('../src/core/application-task-service');
 const { createAutomationManifest } = require('../src/core/automation-definitions');
 const { parse, exitCodeFor } = require('../src/core/hamster-cli');
 const { IntegrationManager, OWNED_BEGIN, OWNED_END } = require('../src/core/integration-manager');
@@ -98,6 +98,30 @@ test('application task intake is immutable, idempotent before busy, and task-sco
   }), (error) => error.code === 'REQUEST_ID_CONFLICT');
 });
 
+test('junction and textual aliases resolve to one intake source', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-source-alias-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, 'source');
+  const alias = path.join(root, 'alias');
+  await fs.mkdir(source);
+  try { await fs.symlink(source, alias, process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch (error) { t.skip(`Junction creation unavailable: ${error.code}`); return; }
+  const result = await normalizePaths([source, `${source}${path.sep}`, alias]);
+  assert.deepEqual(result, [await fs.realpath(source)]);
+  const manager = new TaskManager();
+  const previous = await manager.recordAutomationRequest({
+    requestId: 'old-junction-request', taskId: 'old-junction-task', jobs: [], failures: [],
+    fingerprint: taskFingerprint([alias], {
+      mode: 'inventory_only', archiveOutputDirectory: '', archiveStagingDirectory: '',
+      sourceDisposition: 'keep', processedSourceDirectory: ''
+    })
+  });
+  const replay = await new ApplicationTaskService(manager).submit({
+    requestId: 'old-junction-request', paths: [alias], mode: 'inventory_only', waitMilliseconds: 0
+  });
+  assert.equal(replay.task.id, previous.taskId);
+});
+
 test('task contract reports source cleanup warnings as partial failures', () => {
   assert.equal(taskStatus([{ status: 'completed_cleanup_failed' }]), 'partial_failed');
   assert.equal(taskStatus([{ status: 'completed' }, { status: 'failed' }]), 'partial_failed');
@@ -142,10 +166,24 @@ test('formal CLI preserves Unicode arguments and validates bounded waits', () =>
   const intake = parse(['intake', 'D:\\资料\\Project A', '--archive', '--output', 'E:\\归档', '--staging', 'E:\\暂存', '--source', 'keep', '--json']);
   assert.equal(intake.input.paths[0], 'D:\\资料\\Project A');
   assert.equal(intake.input.archiveStagingDirectory, 'E:\\暂存');
+  assert.equal(parse(['task', 'wait', 'task-1', '--timeout', '0', '--json']).input.timeoutSeconds, 0);
   assert.equal(parse(['task', 'wait', 'task-1', '--timeout', '60', '--json']).input.timeoutSeconds, 60);
-  assert.throws(() => parse(['task', 'wait', 'task-1', '--timeout', '61']), /0 to 60/);
+  for (const value of ['-1', '61', '1.5', '1e1', 'abc', '', '00']) {
+    assert.throws(() => parse(['task', 'wait', 'task-1', '--timeout', value]), /0 to 60/);
+  }
   assert.equal(exitCodeFor({ code: 'CLI_USAGE' }), 2);
   assert.equal(exitCodeFor({ code: 'CONNECTION_STALE' }), 3);
+});
+
+test('CLI source change pages and explicit choices use the v2 task contract', () => {
+  const command = parse(['task', 'get', 'task-id', '--source-changes', '--offset', '500', '--limit', '500', '--json']);
+  assert.deepEqual(command.input, { taskId: 'task-id', responseVersion: 2, includeSourceChanges: true, changesOffset: 500, changesLimit: 500 });
+  for (const choice of ['overwrite', 'new_independent', 'skip']) {
+    assert.equal(parse(['task', 'resolve', 'task-id', '--decision', 'job-id', '--revision', '3', '--choice', choice, '--json']).input.choice, choice);
+  }
+  for (const args of [ ['task', 'get', 'id', '--source-changes', '--limit', '501'],
+    ['task', 'get', 'id', '--source-changes', '--offset', '-1'], ['task', 'get', 'id', '--limit', '100'],
+    ['task', 'wait', 'id', '--source-changes'] ]) assert.throws(() => parse(args), { code: 'CLI_USAGE' });
 });
 
 test('automation manifest comes from the central stable definition', () => {

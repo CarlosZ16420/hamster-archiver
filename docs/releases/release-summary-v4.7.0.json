@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "version": "4.7.0",
+  "notes": {
+    "zh-CN": [
+      "新增直接 CLI 任务入口，支持项目粒度、任务级重复处理、结果文件和丢响应恢复。",
+      "任务配置在受理时固定；完成回执按仓库保存，清队列后仍可离线查询。",
+      "MCP 请求共用总时限并保留启动诊断；原有桌面流程与用户资料位置保持兼容。",
+      "仓库搜索返回超过 2000 条的完整匹配；异常归档源处置完成后保存失败时，离线回执保留恢复线索。"
+    ],
+    "en-US": [
+      "Direct CLI tasks now support project layout, task-scoped duplicate handling, result files, and lost-response recovery.",
+      "Execution settings are frozen at admission; terminal receipts remain available offline after queue cleanup.",
+      "MCP calls share a total deadline and retain launch diagnostics; desktop flows and user data locations stay compatible.",
+      "Warehouse search returns all matches beyond 2,000 items; offline receipts retain recovery evidence when saving the final source action fails after abnormal archive confirmation."
+    ]
+  }
+}

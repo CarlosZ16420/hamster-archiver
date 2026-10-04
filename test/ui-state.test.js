@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 const {
   catalogGridRowsForSize,
   catalogPageForAnchor,
@@ -17,8 +18,204 @@ const {
   shouldShowDuplicateConfirmation,
   similarityProgressPresentation,
   summarizeScanSkips,
+  sourceLocationUrl,
   sourceDispositionPresentation
 } = require('../src/renderer/ui-state');
+
+test('directory refresh reports each decision and result once without notifying historical tasks at startup', () => {
+  const { directoryRefreshNotices } = require('../src/renderer/ui-state');
+  const queued = { id: 'review', taskKind: 'catalog_refresh', status: 'queued', displayName: '测试目录' };
+  for (const [status, unchangedDirectoryTitle, expected, isError] of [
+    ['completed', '测试目录', '目录未发现变化', false],
+    ['completed', undefined, '仓库已更新', false],
+    ['awaiting_source_change_confirmation', undefined, '请到归档工作台查看并确认', true],
+    ['failed', undefined, '查看原因并处理', true],
+    ['cancelled', undefined, '校对已取消', false]
+  ]) {
+    const job = { ...queued, status, unchangedDirectoryTitle };
+    const notices = directoryRefreshNotices([queued], [job]);
+    assert.equal(notices.length, 1);
+    assert.match(notices[0].message, new RegExp(expected));
+    assert.equal(notices[0].isError, isError);
+    assert.deepEqual(directoryRefreshNotices([job], [job]), []);
+  }
+  assert.deepEqual(directoryRefreshNotices([queued], [queued]), []);
+  assert.deepEqual(directoryRefreshNotices([], [{ ...queued, taskKind: 'intake', status: 'completed' }]), []);
+});
+
+test('queue similarity projects are sibling panels and an empty queue has no panel', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  function make(tag, className = '', text = '') {
+    return { tag, className, text, dataset: {}, children: [],
+      append(...children) { this.children.push(...children); },
+      replaceChildren(...children) { this.children = children; }
+    };
+  }
+  const content = make('div');
+  const context = vm.createContext({ make, makeUserText: make, makeStage: make,
+    elements: { queueSimilarityReportContent: content } });
+  vm.runInContext(app.slice(app.indexOf('function renderQueueSimilarityReport('),
+    app.indexOf('async function loadQueueSimilarityReport(')), context);
+  const report = { displayName: 'Example', sourcePath: 'example', jobId: 'one',
+    similarProjects: [{ id: 'warehouse', title: 'Existing', reasons: [] }] };
+  context.renderQueueSimilarityReport({ ...report,
+    queueProjects: [{ jobId: 'two', title: 'Pending', reasons: [] }] });
+  assert.equal(content.children.length, 3);
+  assert.equal(content.children[1].children[0].text, '队列中的相似项目');
+  assert.equal(content.children[2].children[0].text, '仓库中的相似项目');
+  assert.ok(content.children[0].children.every((child) => child.className !== 'queue-similarity-projects'));
+  const project = content.children[1].children[1].children[0];
+  const projectLocation = project.children[0].children.find((child) => child.className === 'queue-similarity-location');
+  assert.equal(projectLocation.children[2].text, '打开');
+  assert.equal(projectLocation.children[2].dataset.reportOpenSource, 'two');
+  context.renderQueueSimilarityReport({ ...report, queueProjects: [] });
+  assert.equal(content.children.length, 2);
+  assert.equal(content.children[1].children[0].text, '仓库中的相似项目');
+});
+
+test('chosen archive output is reflected in the form without resetting unrelated unsaved settings', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const elements = { archiveOutputDirectory: { value: '' }, archiveStagingDirectory: { value: '' },
+    archivePassword: { value: 'unsaved input' } };
+  const context = vm.createContext({ elements, deriveStagingDirectory: (value) => `${value}-staging` });
+  vm.runInContext(app.slice(app.indexOf('function syncArchiveOutputFields('), app.indexOf('function highlightQueueAttention(')), context);
+  context.syncArchiveOutputFields({ archiveOutputDirectory: '' }, { archiveOutputDirectory: 'chosen-folder', archiveStagingDirectory: 'chosen-staging' });
+  assert.equal(elements.archiveOutputDirectory.value, 'chosen-folder');
+  assert.equal(elements.archiveStagingDirectory.value, 'chosen-staging');
+  assert.equal(elements.archivePassword.value, 'unsaved input');
+  elements.archiveOutputDirectory.value = 'user editing';
+  context.syncArchiveOutputFields({ archiveOutputDirectory: 'chosen-folder' }, { archiveOutputDirectory: 'chosen-folder' });
+  assert.equal(elements.archiveOutputDirectory.value, 'user editing');
+});
+
+test('completed queue presentation includes duplicate skips while cleanup preserves failed source commits', () => {
+  const { isCompletedQueueJob, canClearCompletedQueueJob } = require('../src/renderer/ui-state');
+  for (const status of ['completed', 'completed_cleanup_failed', 'skipped_duplicate']) {
+    assert.equal(isCompletedQueueJob({ status }), true);
+    assert.equal(canClearCompletedQueueJob({ status }), true);
+  }
+  assert.equal(canClearCompletedQueueJob({ status: 'completed_cleanup_failed', errorCode: 'SOURCE_DISPOSITION_COMMIT_FAILED' }), false);
+  for (const status of ['queued', 'awaiting_duplicate_confirmation', 'failed', 'cancelled', 'inventorying']) {
+    assert.equal(isCompletedQueueJob({ status }), false);
+    assert.equal(canClearCompletedQueueJob({ status }), false);
+  }
+});
+
+test('backup and rating menus reflect their filter values and preserve user location text across locales', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const i18n = require('../src/renderer/i18n');
+  function make(tag, className = '', text = '') {
+    return { tag, className, textContent: text, dataset: {}, attributes: {}, children: [],
+      append(child) { this.children.push(child); }, replaceChildren(...children) { this.children = children; },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      toggleAttribute(name, enabled) { if (enabled) this.attributes[name] = ''; else delete this.attributes[name]; }
+    };
+  }
+  const nodes = {};
+  for (const kind of ['backup', 'rating']) for (const suffix of ['label', 'options']) nodes[`#catalog-${kind}-filter-${suffix}`] = make('div');
+  function filter(options, value) {
+    return { options, value, get selectedOptions() { return this.options.filter((option) => option.value === this.value); } };
+  }
+  const elements = {
+    catalogBackupFilter: filter([{ value: '', textContent: '全部备份位置' }, { value: '仓库', textContent: '仓库' }], '仓库'),
+    catalogRatingFilter: filter([{ value: '', textContent: '全部星级' }, { value: '0', textContent: '未评分' }], '0')
+  };
+  const context = vm.createContext({ elements, make, t: i18n.translate, document: { querySelector: (selector) => nodes[selector] } });
+  vm.runInContext(app.slice(app.indexOf('function updateCatalogFilterMenu('), app.indexOf('async function refreshCatalog(')), context);
+  i18n.setLocale('en-US');
+  context.updateCatalogFilterMenu('backup');
+  context.updateCatalogFilterMenu('rating');
+  assert.equal(nodes['#catalog-backup-filter-label'].textContent, '仓库');
+  assert.equal(nodes['#catalog-backup-filter-options'].children[0].textContent, 'All backup locations');
+  assert.equal(nodes['#catalog-backup-filter-options'].children[1].attributes['aria-selected'], 'true');
+  assert.equal(nodes['#catalog-rating-filter-label'].textContent, 'Unrated');
+  assert.equal(nodes['#catalog-rating-filter-options'].children[1].dataset.filterValue, '0');
+  i18n.setLocale('zh-CN');
+  context.updateCatalogFilterMenu('rating');
+  assert.equal(nodes['#catalog-rating-filter-label'].textContent, '未评分');
+});
+
+test('fast directory completion keeps the result toast instead of replacing it with submission feedback', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const messages = [];
+  const context = vm.createContext({
+    currentState: null,
+    uiState: require('../src/renderer/ui-state'),
+    render(state) { context.currentState = state; },
+    showToast(message, isError) { messages.push({ message, isError }); }
+  });
+  vm.runInContext(app.slice(app.indexOf('function showDirectoryRefreshSubmission('),
+    app.indexOf("elements.catalogDetail.addEventListener('click'")), context);
+  const job = { id: 'review', taskKind: 'catalog_refresh', displayName: 'Example',
+    status: 'completed', unchangedDirectoryTitle: 'Example' };
+  context.showDirectoryRefreshSubmission({ state: { jobs: [job] },
+    queuedJobIds: ['review'], queuedCount: 1, failedCount: 0 });
+  assert.match(messages.at(-1).message, /校对完成：目录未发现变化/);
+  context.showDirectoryRefreshSubmission({ state: { jobs: [{ ...job, status: 'queued' }] },
+    queuedJobIds: ['review'], queuedCount: 1, failedCount: 0 });
+  assert.match(messages.at(-1).message, /归档工作台查看进度/);
+});
+
+test('manual inventory web addresses normalize for the default-browser opener without changing stored text', () => {
+  assert.equal(sourceLocationUrl('www.baidu.com', true), 'https://www.baidu.com/');
+  assert.equal(sourceLocationUrl(' example.com:8443/path?q=one#part ', true), 'https://example.com:8443/path?q=one#part');
+  assert.equal(sourceLocationUrl('https://example.com/path?q=one#part', true), 'https://example.com/path?q=one#part');
+  assert.equal(sourceLocationUrl('http://localhost:8080/path', true), 'http://localhost:8080/path');
+  assert.equal(sourceLocationUrl('https://例子.中国/目录', true), new URL('https://例子.中国/目录').href);
+  assert.equal(sourceLocationUrl('例子.中国/目录', true), new URL('https://例子.中国/目录').href);
+});
+
+test('local locations and unsupported protocols do not become browser links', () => {
+  for (const location of ['', 'C:\\files\\example.com', 'C:/files/example.com', '\\\\server\\share',
+    '/files/example.com', 'example.com\\folder', 'a local folder', 'javascript:alert(1)',
+    'file:///C:/files', 'ftp://example.com', 'data:text/html,hello', '//example.com', 'user@example.com',
+    'https://', '-bad.example.com', 'example..com']) {
+    assert.equal(sourceLocationUrl(location, true), '', location);
+  }
+  assert.equal(sourceLocationUrl('example.com'), '', 'ordinary file records must not guess web addresses');
+  assert.equal(sourceLocationUrl('https://example.com'), 'https://example.com/');
+});
+
+test('manual detail renders both address and Open as external-browser controls, preserving local opens', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  function make(tag, className = '', text = '') {
+    return {
+      tag, className, text, dataset: {}, children: [],
+      append(...children) { this.children.push(...children); },
+      replaceChildren(...children) { this.children = children; }
+    };
+  }
+  const detail = make('div');
+  const context = vm.createContext({
+    uiState: { sourceLocationUrl }, activeCatalogId: 'manual', elements: { catalogDetail: detail },
+    document: { createTextNode: (text) => text }, make, makeUserText: make,
+    hideSimilarityWhitelistAction() {}, releaseDetailThumbnails() {},
+    catalogTitle: (record) => record.title,
+    makeCatalogDate: () => make('p'), renderCatalogEditor: () => make('section'),
+    renderSimilarProjects: () => make('section')
+  });
+  const presentation = app.slice(app.indexOf('function sourceLocationPresentation('), app.indexOf('function renderSimilarProjects('));
+  const render = app.slice(app.indexOf('function renderCatalogDetail('), app.indexOf('async function loadCatalogDetails('));
+  vm.runInContext(`${presentation}\n${render}`, context);
+  for (const sourcePath of ['www.baidu.com', 'https://example.com/path', 'C:\\files\\example.com']) {
+    context.renderCatalogDetail({ id: 'manual', title: 'Manual', recordType: 'manual', sourcePath });
+    const line = detail.children[0].children.find((child) => child.className === 'source-location');
+    const url = sourceLocationUrl(sourcePath, true);
+    const controls = line.children.filter((child) => child.tag === 'button');
+    if (url) {
+      assert.equal(controls.length, 2);
+      assert.equal(controls[0].text, sourcePath, 'display the original address');
+      for (const control of controls) {
+        assert.equal(control.dataset.externalUrl, url);
+        assert.equal(control.dataset.openSource, undefined, 'URLs must bypass the filesystem opener');
+      }
+    } else {
+      assert.equal(controls.length, 1);
+      assert.equal(controls[0].dataset.openSource, 'manual');
+      assert.equal(controls[0].dataset.externalUrl, undefined);
+    }
+  }
+});
 
 test('thumbnail pagination fills complete rows for each density and keeps anchor content nearby', () => {
   assert.equal(catalogGridRowsForSize('large'), 3);
@@ -85,6 +282,8 @@ test('only a fresh automatic duplicate skip is removed from the queue selection'
 
 test('running queue intake remains available while settings stay locked', () => {
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const preload = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
 
   assert.match(app, /job\?\.deferredUntilNextRun === true\s*\? '等待下次入库'/);
   assert.match(app, /for \(const jobId of uiState\.newlyAutoSkippedJobIds\(previousJobs, mergedState\.jobs \|\| \[\]\)\)/);
@@ -95,6 +294,15 @@ test('running queue intake remains available while settings stay locked', () => 
   assert.match(app, /async function prepareQueueIntake\(\) \{\s*if \(currentState\?\.running\) return true;/);
   assert.match(app, /job\.deferredUntilNextRun !== true[\s\S]*job\.status === 'queued'/);
   assert.match(app, /setConfigControlsLocked\(state\.running\)/);
+  assert.match(html, /id="queue-concurrency"[\s\S]*?<option value="1">1<\/option>[\s\S]*?<option value="2">2<\/option>[\s\S]*?<option value="3">3<\/option>/);
+  assert.match(html, /id="start-inventory-only"[^>]*>不压缩入库<\/button>/);
+  assert.match(html, /id="start-queue"[^>]*>压缩入库<\/button>/);
+  assert.match(app, /dividerCell\.textContent = `待启动 · \$\{pendingJobs\.length\} 项`/);
+  assert.match(app, /startQueue\(\[\.\.\.selectedJobIds\]\)/);
+  assert.match(app, /startInventoryOnlyQueue\(\[\.\.\.selectedJobIds\]\)/);
+  assert.match(app, /clear-queue'\)\.disabled = state\.running/);
+  assert.match(app, /clear-duplicates'\)\.disabled = state\.running/);
+  assert.match(preload, /startQueue: \(jobIds = \[\]\) => ipcRenderer\.invoke\('queue:start', jobIds\)/);
 });
 
 test('similarity evidence distinguishes identical content from a complete project duplicate', () => {
@@ -166,7 +374,7 @@ test('maintenance paths are selectable and usage guide is the final footer actio
   assert.match(html, /id="select-user-data"[^>]*>切换<\/button>/);
   assert.doesNotMatch(app, /userDataPathDirty|changeUserDataLocation\(requestedPath\)/);
   assert.match(preload, /changeUserDataLocation:\s*\(\)\s*=>\s*ipcRenderer\.invoke\('user-data:change-location'\)/);
-  assert.match(main, /ipcMain\.handle\('user-data:change-location', async \(event\)[\s\S]*?dialog\.showOpenDialog/);
+  assert.match(main, /handleIpc\('user-data:change-location', async \(event\)[\s\S]*?dialog\.showOpenDialog/);
   assert.match(html, /id="archive-staging-directory"[^>]*><button data-pick="archive-staging-directory"/);
   assert.match(html, /欢迎反馈<\/button>[\s\S]*id="open-usage-guide"[^>]*>使用说明<\/button>[\s\S]*<\/footer>/);
 });
@@ -607,7 +815,13 @@ test('warehouse is the default page and empty warehouses offer a dismissible onb
   assert.match(app, /state\?\.config\?\.suppressOnboarding/);
   assert.match(app, /activatePage\('workbench-page'\)/);
   assert.match(app, /target:\s*'\.location-panel',[\s\S]*?placement:\s*'right'/);
-  assert.match(app, /progress:\s*'新手引导 · 6\/6'/);
+  const onboardingSource = app.slice(app.indexOf('const onboardingSteps = ['), app.indexOf('function closeOnboarding('));
+  const onboarding = vm.runInNewContext(`${onboardingSource}\nonboardingSteps`);
+  assert.equal(onboarding.length, 5);
+  assert.deepEqual(Array.from(onboarding, (step) => step.progress), [
+    '新手引导 · 1/5', '新手引导 · 2/5', '新手引导 · 3/5', '新手引导 · 4/5', '新手引导 · 5/5'
+  ]);
+  assert.ok(onboarding.every((step) => step.target !== '#archive-output-directory-field'));
   assert.match(app, /target:\s*\['#source-disposition-options', '#source-safety-chip'\]/);
   assert.match(app, /target:\s*'#drop-zone'/);
   assert.match(app, /celebration-burst/);
@@ -714,7 +928,7 @@ test('automatic update checks do not change header status or show failure notifi
   assert.doesNotMatch(main, /stableBranch:\s*options\?\.silent/);
 });
 
-test('warehouse controls expose the new batch menu, queue viewport and thumbnail outline behavior', () => {
+test('warehouse controls expose the batch menu, queue viewport and thumbnail icon breathing', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
   const styles = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'styles.css'), 'utf8');
@@ -728,9 +942,8 @@ test('warehouse controls expose the new batch menu, queue viewport and thumbnail
   assert.doesNotMatch(html, />批量追加标签<\/button>|>批量修改备份位置<\/button>/);
   assert.match(app, /rows\.length > 10/);
   assert.match(styles, /#task-list-container\.queue-scrollable[^}]*overflow-y:\s*auto/);
-  assert.match(styles, /#catalog-grid-view:hover::after[^}]*thumbnail-outline-breathe/);
-  assert.match(styles, /@keyframes thumbnail-outline-breathe[^}]*scale\(1\)[\s\S]*scale\(1\.15\)/);
-  assert.match(styles, /#catalog-grid-view::after[^}]*inset:\s*-2px;[^}]*border-radius:\s*10px;/s);
+  assert.match(styles, /#catalog-grid-view:hover svg[^}]*thumbnail-button-breathe/);
+  assert.doesNotMatch(styles, /thumbnail-outline-(?:breathe|ripple)|#catalog-grid-view::(?:before|after)/);
   assert.match(app, /archiveApp\.logToast\(String\(message \|\| ''\), isError \? 'error' : 'info'\)/);
   assert.match(preload, /logToast: \(message, level = 'info'\) => ipcRenderer\.invoke\('app:log-toast', message, level\)/);
   assert.match(html, /id="hide-uncompressed-tag"[\s\S]*不展示“未压缩”标签/);

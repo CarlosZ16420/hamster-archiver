@@ -22,9 +22,12 @@ if (!read('CHANGELOG.md').includes(`## ${version}`)) {
 }
 for (const readme of ['README.md', 'README.en.md']) {
   const content = read(readme);
-  if (!content.includes(`version-${version}-`) ||
-      !content.includes(`HamsterArchiver-v${version}-win-x64/`)) {
-    errors.push(`${readme} 的版本徽章或目录示例未更新为 ${version}`);
+  const isMacBeta = /-beta\.mac\.\d+$/.test(version);
+  const expectedAsset = isMacBeta
+    ? `HamsterArchiver-v${version}-mac-universal.dmg`
+    : `HamsterArchiver-v${version}-win-x64/`;
+  if (!content.includes(`version-${version.replace('-', '--')}-`) || !content.includes(expectedAsset)) {
+    errors.push(`${readme} 的版本徽章或发行文件示例未更新为 ${version}`);
   }
 }
 const releaseNotes = path.join(projectRoot, 'docs', 'releases', `release-notes-v${version}.md`);

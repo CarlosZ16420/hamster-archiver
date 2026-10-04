@@ -6,8 +6,8 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { createMcpApplicationServices } = require('../src/core/mcp-application-services');
-const { runUserDataMigration } = require('../src/core/mcp-user-data-migration-worker');
+const { createMcpApplicationServices, inspectUserDataState } = require('../src/core/mcp-application-services');
+const { launchApplication, readPlan, runUserDataMigration, waitForValidation } = require('../src/core/mcp-user-data-migration-worker');
 const { prepareUserDataTarget } = require('../src/core/storage-migration');
 const { writeJsonAtomic } = require('../src/core/store');
 
@@ -63,6 +63,30 @@ async function fixture(t) {
   return { root, applicationRoot, currentDirectory, repositoryDirectory, queueManager, appStore, context, events };
 }
 
+test('migration launches the desktop even when its worker inherits Electron Node mode', async (t) => {
+  const before = process.env.ELECTRON_RUN_AS_NODE;
+  process.env.ELECTRON_RUN_AS_NODE = '1';
+  t.after(() => {
+    if (before === undefined) delete process.env.ELECTRON_RUN_AS_NODE;
+    else process.env.ELECTRON_RUN_AS_NODE = before;
+  });
+  let launch;
+  await launchApplication({ applicationExecutable: 'electron.exe', applicationArguments: ['app'],
+    applicationRoot: 'app', development: true, targetDirectory: 'target',
+    validationRequestFile: 'request', validationFile: 'response' }, {
+    spawnImpl: (executable, args, options) => {
+      launch = { executable, args, options };
+      const child = new EventEmitter();
+      queueMicrotask(() => child.emit('spawn'));
+      return child;
+    }
+  });
+  assert.equal(Object.hasOwn(launch.options.env, 'ELECTRON_RUN_AS_NODE'), false);
+  assert.equal(launch.options.env.HAMSTER_DEV_USER_DATA_DIR, 'target');
+  assert.equal(launch.options.env.HAMSTER_USER_DATA_VALIDATION_REQUEST, 'request');
+  assert.deepEqual(launch.args, ['app']);
+});
+
 function spawnedWorker({ onSpawn } = {}) {
   const child = new EventEmitter();
   child.exitCode = null;
@@ -77,6 +101,46 @@ function spawnedWorker({ onSpawn } = {}) {
     }
   });
   return child;
+}
+
+async function scheduleLogMigration(data) {
+  const targetDirectory = path.join(data.root, 'new-user-data');
+  const logPath = path.join(data.currentDirectory, 'logs', 'app.log');
+  const pointer = `${JSON.stringify({ version: 1, userDataDirectory: data.currentDirectory })}\n`;
+  await fs.mkdir(path.dirname(logPath));
+  await fs.writeFile(logPath, 'before-exit\n');
+  await fs.writeFile(data.context.activeUserDataLocationPath, pointer);
+  let planPath;
+  data.context.spawnImpl = (_executable, _args, options) => spawnedWorker({
+    onSpawn: async () => {
+      planPath = options.env.HAMSTER_USER_DATA_MIGRATION_PLAN;
+      const plan = await readPlan(planPath);
+      await fs.writeFile(plan.startedFile, '{}');
+    }
+  });
+  data.context.requestQuitForRestart = async () => {
+    await fs.appendFile(logPath, 'final-exit\n');
+  };
+  const services = createMcpApplicationServices(data.context);
+  const preflight = await services.userData.preflightMove({ targetDirectory });
+  const result = await services.userData.move({ targetDirectory, expectedStateFingerprint: preflight.stateFingerprint });
+  assert.equal(result.scheduled, true);
+  const plan = await readPlan(planPath);
+  const afterExit = await inspectUserDataState(data.currentDirectory);
+  assert.notEqual(afterExit.treeFingerprint, plan.expectedSourceTreeFingerprint);
+  assert.equal(afterExit.exitStableTreeFingerprint, plan.expectedExitStableSourceTreeFingerprint);
+  return { targetDirectory, logPath, pointer, plan };
+}
+
+async function runScheduledWorker(plan) {
+  return runUserDataMigration(plan, {
+    fsImpl: fs,
+    prepareUserDataTarget,
+    writeJsonAtomic,
+    waitForProcessExit: async () => {},
+    launchApplication: async () => ({ exitCode: null, unref() {} }),
+    waitForValidation: async () => ({ version: plan.currentVersion })
+  });
 }
 
 test('application UI, clipboard and controlled paths accept only fixed capabilities', async (t) => {
@@ -166,6 +230,55 @@ test('migration execution rejects a stale preflight fingerprint before closing t
   await assert.rejects(() => fs.access(targetDirectory), { code: 'ENOENT' });
 });
 
+test('migration preflight still rejects a log append before scheduling', async (t) => {
+  const data = await fixture(t);
+  const logPath = path.join(data.currentDirectory, 'logs', 'app.log');
+  await fs.mkdir(path.dirname(logPath));
+  await fs.writeFile(logPath, 'before\n');
+  const services = createMcpApplicationServices(data.context);
+  const targetDirectory = path.join(data.root, 'new-user-data');
+  const preflight = await services.userData.preflightMove({ targetDirectory });
+  await fs.appendFile(logPath, 'after\n');
+  await assert.rejects(
+    () => services.userData.move({ targetDirectory, expectedStateFingerprint: preflight.stateFingerprint }),
+    { code: 'STALE_MIGRATION_STATE' }
+  );
+  assert.deepEqual(data.events, []);
+  await assert.rejects(() => fs.access(targetDirectory), { code: 'ENOENT' });
+});
+
+test('migration worker accepts only the exit log append and copies the final log', async (t) => {
+  const data = await fixture(t);
+  const { targetDirectory, pointer, plan } = await scheduleLogMigration(data);
+  const result = await runScheduledWorker(plan);
+  assert.equal(result.completed, true);
+  assert.equal(await fs.readFile(path.join(targetDirectory, 'logs', 'app.log'), 'utf8'), 'before-exit\nfinal-exit\n');
+  assert.equal(await fs.readFile(path.join(data.currentDirectory, 'logs', 'app.log'), 'utf8'), 'before-exit\nfinal-exit\n');
+  assert.notEqual(await fs.readFile(plan.locationFilePath, 'utf8'), pointer);
+  assert.equal(JSON.parse(await fs.readFile(plan.locationFilePath, 'utf8')).userDataDirectory, targetDirectory);
+  assert.equal(JSON.parse(await fs.readFile(path.join(plan.runRoot, 'completed.json'), 'utf8')).targetDirectory, targetDirectory);
+});
+
+for (const [label, relativePath, content] of [
+  ['settings', path.join('config', 'settings.json'), '{"language":"en-US","changed":true}\n'],
+  ['repository', path.join('warehouse', 'warehouse.sqlite'), 'changed test database']
+]) {
+  test(`migration worker rejects ${label} changes after scheduling while retaining source and pointer`, async (t) => {
+    const data = await fixture(t);
+    const { targetDirectory, pointer, plan } = await scheduleLogMigration(data);
+    await fs.writeFile(path.join(data.currentDirectory, relativePath), content);
+    await assert.rejects(() => runScheduledWorker(plan), /状态与调度时不一致/);
+    assert.equal(await fs.readFile(plan.locationFilePath, 'utf8'), pointer);
+    assert.equal(await fs.readFile(path.join(data.currentDirectory, relativePath), 'utf8'), content);
+    assert.equal((await fs.stat(data.currentDirectory)).isDirectory(), true);
+    await assert.rejects(() => fs.access(targetDirectory), { code: 'ENOENT' });
+    const failure = JSON.parse(await fs.readFile(path.join(plan.runRoot, 'failed.json'), 'utf8'));
+    assert.equal(failure.sourceRetained, true);
+    assert.equal(failure.targetRetained, false);
+    assert.equal(failure.pointerRestored, true);
+  });
+}
+
 test('migration worker launch failure does not request application exit', async (t) => {
   const data = await fixture(t);
   data.context.spawnImpl = () => spawnedWorker({ onSpawn: async () => { throw new Error('spawn blocked'); } });
@@ -206,7 +319,7 @@ test('startup validation failure restores the pointer while retaining source and
   const locationFilePath = path.join(data.applicationRoot, 'user-data-location.json');
   const originalPointer = `${JSON.stringify({ version: 1, userDataDirectory: data.currentDirectory }, null, 2)}\n`;
   await fs.writeFile(locationFilePath, originalPointer);
-  const sourceState = await require('../src/core/mcp-application-services').inspectUserDataState(data.currentDirectory);
+  const sourceState = await inspectUserDataState(data.currentDirectory);
   const plan = {
     migrationId: 'test-migration',
     sourceDirectory: data.currentDirectory,
@@ -217,6 +330,7 @@ test('startup validation failure restores the pointer while retaining source and
     targetPid: 123,
     currentVersion: '4.6.0',
     expectedSourceTreeFingerprint: sourceState.treeFingerprint,
+    expectedExitStableSourceTreeFingerprint: sourceState.exitStableTreeFingerprint,
     originalLocation: { exists: true, contentBase64: Buffer.from(originalPointer).toString('base64') },
     runRoot,
     startedFile: path.join(runRoot, 'started.json'),
@@ -249,4 +363,92 @@ test('user data migration skips transient MCP connection credentials', async (t)
   await prepareUserDataTarget(data.currentDirectory, target);
   await assert.rejects(() => fs.access(path.join(target, 'mcp')), { code: 'ENOENT' });
   assert.equal(await fs.readFile(path.join(target, 'config', 'settings.json'), 'utf8'), '{"language":"zh-CN"}\n');
+});
+
+test('startup validation binds the response to migration identity, actual repository, readiness and copied record count', async (t) => {
+  const data = await fixture(t);
+  const validationFile = path.join(data.root, 'validation.json');
+  const expectedIdentity = { migrationId: 'current-migration', root: data.currentDirectory,
+    repositoryDirectory: data.repositoryDirectory, recordCount: 1 };
+  const valid = { version: '4.7.2', migrationId: expectedIdentity.migrationId, userDataRoot: expectedIdentity.root,
+    repositoryDirectory: expectedIdentity.repositoryDirectory, recordCount: 1,
+    settingsRead: true, databaseReady: true, windowReady: true };
+  for (const change of [{ migrationId: 'old' }, { userDataRoot: data.root }, { databaseReady: false },
+    { recordCount: 0 }, { repositoryDirectory: data.root }, { version: 'wrong' }]) {
+    await writeJsonAtomic(validationFile, { ...valid, ...change });
+    await assert.rejects(waitForValidation({ exitCode: null }, validationFile, '4.7.2', { expectedIdentity, timeoutMs: 50 }));
+  }
+  await writeJsonAtomic(validationFile, valid);
+  assert.deepEqual(await waitForValidation({ exitCode: null }, validationFile, '4.7.2', { expectedIdentity }), valid);
+  await fs.rm(validationFile);
+  await assert.rejects(waitForValidation({ exitCode: 1 }, validationFile, '4.7.2', { timeoutMs: 50 }), /退出/);
+  await assert.rejects(waitForValidation({ exitCode: null }, validationFile, '4.7.2', { timeoutMs: 1, delayImpl: async () => {} }), /启动验证/);
+});
+
+test('desktop switching waits for writes, accepts existing data without merging and validates its own repository', async (t) => {
+  const data = await fixture(t);
+  const target = path.join(data.root, 'existing-data');
+  const externalWarehouse = path.join(data.root, 'external-warehouse');
+  await fs.mkdir(path.join(target, 'config'), { recursive: true });
+  await fs.mkdir(externalWarehouse);
+  await fs.writeFile(path.join(target, 'config', 'settings.json'), JSON.stringify({ repositoryDirectory: externalWarehouse }));
+  await fs.writeFile(path.join(externalWarehouse, 'warehouse.sqlite'), 'target database');
+  data.queueManager.waitForCatalogOperations = async () => { data.events.push('writes-drained'); };
+  data.queueManager.waitForLogWrites = async () => { data.events.push('logs-drained'); };
+  let plan;
+  data.context.spawnImpl = (_executable, _args, options) => spawnedWorker({ onSpawn: async () => {
+    plan = await readPlan(options.env.HAMSTER_USER_DATA_MIGRATION_PLAN);
+    await fs.writeFile(plan.startedFile, '{}');
+  } });
+  const services = createMcpApplicationServices(data.context);
+  await services.userData.switchLocation({ targetDirectory: target });
+  assert.equal(data.queueManager.userDataSwitchPending, true);
+  assert.deepEqual(data.events.slice(0, 4), ['writes-drained', 'logs-drained', 'save-settings', 'checkpoint']);
+  let launches = 0;
+  await runUserDataMigration(plan, {
+    waitForProcessExit: async () => { assert.equal(launches, 0); },
+    launchApplication: async (launchedPlan) => {
+      launches++;
+      const request = JSON.parse(await fs.readFile(launchedPlan.validationRequestFile, 'utf8'));
+      assert.equal(request.repositoryDirectory, externalWarehouse);
+      assert.equal(request.recordCount, undefined);
+      return { exitCode: null, unref() {} };
+    },
+    waitForValidation: async () => ({ version: plan.currentVersion })
+  });
+  assert.equal(await fs.readFile(path.join(externalWarehouse, 'warehouse.sqlite'), 'utf8'), 'target database');
+  assert.equal(await fs.readFile(path.join(data.repositoryDirectory, 'warehouse.sqlite'), 'utf8'), 'test database');
+  await assert.rejects(fs.access(path.join(target, 'warehouse')), { code: 'ENOENT' });
+});
+
+test('failed desktop startup restores an absent pointer and refuses rollback while the controlled process cannot exit', async (t) => {
+  const data = await fixture(t);
+  for (const refusesExit of [false, true]) {
+    const target = path.join(data.root, `desktop-target-${refusesExit}`);
+    const runRoot = path.join(data.root, `desktop-run-${refusesExit}`);
+    const locationFilePath = data.context.activeUserDataLocationPath;
+    await fs.rm(locationFilePath, { force: true });
+    const plan = { migrationId: `desktop-${refusesExit}`, desktopSwitch: true, sourceDirectory: data.currentDirectory,
+      targetDirectory: target, locationFilePath, applicationRoot: data.applicationRoot, targetPid: 123,
+      currentVersion: '4.7.2', originalLocation: { exists: false }, runRoot,
+      startedFile: path.join(runRoot, 'started.json'), cancelledFile: path.join(runRoot, 'cancelled.json'),
+      validationFile: path.join(runRoot, 'validation.json') };
+    let launches = 0;
+    await assert.rejects(runUserDataMigration(plan, {
+      waitForProcessExit: async (pid) => { if (pid === 456 && refusesExit) throw new Error('normal exit refused'); },
+      launchApplication: async () => { launches++; return { pid: 456, exitCode: null, unref() {} }; },
+      waitForValidation: async () => { throw new Error('startup failed'); }
+    }), /startup failed/);
+    if (refusesExit) {
+      assert.equal(launches, 1);
+      assert.equal(JSON.parse(await fs.readFile(locationFilePath)).userDataDirectory, target);
+    } else {
+      assert.equal(launches, 2);
+      await assert.rejects(fs.access(locationFilePath), { code: 'ENOENT' });
+    }
+    const failure = JSON.parse(await fs.readFile(path.join(runRoot, 'failed.json')));
+    assert.equal(failure.pointerRestored, !refusesExit);
+    await fs.access(target);
+    await fs.access(data.currentDirectory);
+  }
 });

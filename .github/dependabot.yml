@@ -4,7 +4,9 @@ updates:
     directory: /
     schedule:
       interval: monthly
-    open-pull-requests-limit: 5
+    # Version upgrades are requested and accepted as ordinary tasks.
+    # Security update PRs remain enabled separately in repository settings.
+    open-pull-requests-limit: 0
     versioning-strategy: increase
     labels:
       - dependencies
@@ -12,6 +14,6 @@ updates:
     directory: /
     schedule:
       interval: monthly
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 0
     labels:
       - dependencies

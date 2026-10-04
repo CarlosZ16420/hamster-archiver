@@ -42,7 +42,8 @@ const settingsPatchProperties = {
   archiveFormat: { type: 'string', enum: ['7z', 'zip'] },
   compressionLevel: { type: 'integer', minimum: 0, maximum: 9 },
   archiveVolumeEnabled: { type: 'boolean' },
-  archiveVolumeBytes: { type: 'integer', minimum: 64 * MIB, maximum: 10 * GIB },
+  archiveVolumeBytes: { type: 'integer', minimum: 64 * MIB, maximum: 100 * GIB },
+  archiveVolumeConfirmation: { type: 'boolean' },
   archivePassword: optionalStringSchema(128),
   recordArchivePassword: { type: 'boolean' },
   videoFrameBackup: { type: 'boolean' },
@@ -281,8 +282,13 @@ const capabilities = [
   ['intake.submit', 'intake', 'Submit one complete inventory or archive request. The application validates, queues, restores and returns a trustworthy task receipt.', {
     requestId: optionalStringSchema(128), paths: { type: 'array', minItems: 1, maxItems: 100, items: stringSchema() },
     mode: { type: 'string', enum: ['archive', 'inventory_only'] },
+    responseVersion: { type: 'integer', enum: [1, 2] },
+    start: { type: 'boolean' },
+    layout: { type: 'string', enum: ['single', 'children', 'ask'] },
+    onDuplicate: { type: 'string', enum: ['use_existing', 'ask', 'create_new', 'skip'] },
     archiveOutputDirectory: stringSchema(), archiveStagingDirectory: stringSchema(),
-    sourceDisposition: { type: 'string', enum: SOURCE_DISPOSITIONS }, processedSourceDirectory: stringSchema()
+    sourceDisposition: { type: 'string', enum: SOURCE_DISPOSITIONS }, processedSourceDirectory: stringSchema(),
+    waitMilliseconds: { type: 'integer', minimum: 0, maximum: 2000 }
   }, false, ['paths', 'mode']],
   ['intake.add_batch', 'intake', 'Add up to 100 folders or videos and optionally start their selected mode.', {
     requestId: stringSchema(128), paths: { type: 'array', minItems: 1, maxItems: 100, items: stringSchema() },
@@ -291,14 +297,28 @@ const capabilities = [
   }, false, ['requestId', 'paths', 'mode']],
   ['queue.state', 'queue', 'Read compact, paginated queue state. Filter by requestId or jobId when polling to avoid unrelated jobs.', { requestId: optionalStringSchema(128), jobId: optionalStringSchema(128), ...pageProperties }, true],
   ['queue.request', 'queue', 'Read the retained receipt for one AI request, including jobs removed from the visible queue.', { requestId: stringSchema(128) }, true, ['requestId']],
-  ['task.get', 'task', 'Read one application task receipt.', { taskId: stringSchema(128) }, true, ['taskId']],
+  ['task.get', 'task', 'Read one application task receipt.', { taskId: stringSchema(128),
+    responseVersion: { type: 'integer', enum: [1, 2] }, includeSourceChanges: { type: 'boolean' },
+    changesOffset: { type: 'integer', minimum: 0 }, changesLimit: { type: 'integer', minimum: 1, maximum: 500 }
+  }, true, ['taskId']],
   ['task.wait', 'task', 'Wait for one task for a bounded time. Timeout ends waiting and never cancels the task.', {
-    taskId: stringSchema(128), timeoutSeconds: { type: 'integer', minimum: 0, maximum: 60 }
+    taskId: stringSchema(128), timeoutSeconds: { type: 'integer', minimum: 0, maximum: 60 },
+    responseVersion: { type: 'integer', enum: [1, 2] }
   }, true, ['taskId']],
   ['task.resolve', 'task', 'Resolve only the pending jobs that belong to this task.', {
-    taskId: stringSchema(128), jobId: optionalStringSchema(128), action: { type: 'string', enum: ['continue', 'skip'] }
-  }, false, ['taskId', 'action']],
-  ['task.retry', 'task', 'Retry only failed or cancelled jobs in this task.', { taskId: stringSchema(128) }, false, ['taskId']],
+    taskId: stringSchema(128), jobId: optionalStringSchema(128), action: { type: 'string', enum: ['continue', 'skip'] },
+    decisionId: optionalStringSchema(128), revision: { type: 'integer', minimum: 1 },
+    choice: { type: 'string', enum: ['single', 'children', 'use_existing', 'create_new', 'continue', 'overwrite', 'new_independent', 'skip'] },
+    rootFiles: { type: 'string', enum: ['exclude'] }, responseVersion: { type: 'integer', enum: [1, 2] }
+  }, false, ['taskId']],
+  ['task.retry', 'task', 'Retry selected failed jobs or intake failures in this task.', {
+    taskId: stringSchema(128),
+    jobIds: { type: 'array', minItems: 1, maxItems: 100, items: stringSchema(128) },
+    failureSources: { type: 'array', minItems: 1, maxItems: 100, items: stringSchema() }
+  }, false, ['taskId']],
+  ['task.start', 'task', 'Explicitly authorize and start a task previously submitted with start:false.', {
+    taskId: stringSchema(128), responseVersion: { type: 'integer', enum: [1, 2] }
+  }, false, ['taskId']],
   ['task.cancel', 'task', 'Safely cancel unfinished jobs in this task.', { taskId: stringSchema(128) }, false, ['taskId']],
   ['queue.start_archive', 'queue', 'Choose archive mode and start eligible jobs.', {}, false],
   ['queue.start_inventory', 'queue', 'Choose inventory-only mode and start eligible jobs.', {}, false],
@@ -467,7 +487,10 @@ function createCapabilityService(manager, services = {}) {
     if (saved.fingerprint !== managerFingerprint(manager)) throw new Error('STALE_CONFIRMATION: product state changed; request a fresh preflight');
   }
 
-  async function execute(name, input) {
+  async function execute(name, input, context = {}) {
+    if (manager.userDataSwitchPending && !capabilities.find((item) => item.name === name)?.readOnly) {
+      throw Object.assign(new Error('用户数据切换验证期间不能写入。'), { code: 'USER_DATA_SWITCH_PENDING' });
+    }
     if (name === 'settings.get') return { settings: publicSettings(manager.config), intakePreferences: intakePreferences(manager) };
     if (name === 'settings.patch') {
       const patch = { ...(input.patch || {}) };
@@ -511,13 +534,14 @@ function createCapabilityService(manager, services = {}) {
     if (name === 'intake.scan') return compactState(await manager.scanSource(path.resolve(input.directory), input.scanToken || 'mcp'));
     if (name === 'intake.submit') {
       if (!services.tasks) throw new Error('CAPABILITY_UNAVAILABLE: application task service is not installed');
-      return services.tasks.submit({ ...input, waitMilliseconds: 1500 });
+      return services.tasks.submit({ ...input, waitMilliseconds: input.waitMilliseconds ?? 1500 });
     }
     if (name === 'intake.add_batch') {
       if (!services.tasks) throw new Error('CAPABILITY_UNAVAILABLE: application task service is not installed');
       const existing = manager.findAutomationRequest?.(input.requestId);
       const receipt = await services.tasks.submit({
         ...input,
+        startAuthorized: input.start !== false,
         waitMilliseconds: input.start === false ? 0 : 1500
       });
       return {
@@ -529,10 +553,11 @@ function createCapabilityService(manager, services = {}) {
         receipt
       };
     }
-    if (name === 'task.get') return services.tasks.get(input.taskId);
-    if (name === 'task.wait') return services.tasks.wait(input.taskId, (input.timeoutSeconds ?? 20) * 1000);
+    if (name === 'task.get') return services.tasks.get(input.taskId, input.responseVersion || 1, input);
+    if (name === 'task.wait') return services.tasks.wait(input.taskId, (input.timeoutSeconds ?? 20) * 1000, input.responseVersion || 1, context.signal);
     if (name === 'task.resolve') return services.tasks.resolve(input.taskId, input);
-    if (name === 'task.retry') return services.tasks.retry(input.taskId);
+    if (name === 'task.retry') return services.tasks.retry(input.taskId, input);
+    if (name === 'task.start') return services.tasks.start(input.taskId, input.responseVersion || 1);
     if (name === 'task.cancel') return services.tasks.cancel(input.taskId);
     if (name === 'queue.state') {
       const jobs = (manager.jobs || []).filter((job) =>
@@ -580,7 +605,13 @@ function createCapabilityService(manager, services = {}) {
       }
       if (name.startsWith('catalog.')) {
         const recordIds = input.recordIds || (input.recordId ? [input.recordId] : result?.id ? [result.id] : []);
-        return { records: recordIds.map((id) => catalogSummary((manager.catalog || []).find((record) => record.id === id))).filter(Boolean), totalRecords: manager.catalog?.length || 0 };
+        return {
+          records: recordIds.map((id) => catalogSummary((manager.catalog || []).find((record) => record.id === id))).filter(Boolean),
+          totalRecords: manager.catalog?.length || 0,
+          ...(name === 'catalog.delete' ? {
+            deletedIds: result?.deletedIds || [], failures: redact(result?.failures || [])
+          } : {})
+        };
       }
       if (name.startsWith('similarity.')) {
         return { path: result?.path || '', count: Number(result?.count) || manager.similarityIgnoreTerms?.length || 0, totalRecords: manager.catalog?.length || 0 };
@@ -644,7 +675,7 @@ function createCapabilityService(manager, services = {}) {
       if (!entry) throw new Error('UNKNOWN_CAPABILITY');
       return { ...entry, ...availability(entry) };
     },
-    async call(name, input = {}, confirmationToken = '') {
+    async call(name, input = {}, confirmationToken = '', context = {}) {
       const entry = capabilityMap.get(name);
       if (!entry) throw new Error('UNKNOWN_CAPABILITY');
       const status = availability(entry);
@@ -654,7 +685,7 @@ function createCapabilityService(manager, services = {}) {
         if (!confirmationToken) return issueConfirmation(name, input, impact);
         consumeConfirmation(confirmationToken, name, input);
       } else if (confirmationToken) throw new Error('UNEXPECTED_CONFIRMATION');
-      return execute(name, input);
+      return execute(name, input, context);
     }
   };
 }

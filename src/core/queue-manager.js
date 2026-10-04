@@ -1,8 +1,10 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { AsyncLocalStorage } = require('node:async_hooks');
 const { execFile } = require('node:child_process');
 const { EventEmitter } = require('node:events');
+const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const { constants: fsConstants } = require('node:fs');
 const path = require('node:path');
@@ -37,16 +39,15 @@ const {
   MIN_TINY_FILE_MD5_THRESHOLD_BYTES,
   buildManifest,
   compareSourceSnapshots,
-  completeManifestMd5,
   collectDirectories,
   collectFiles,
   scanSourceSnapshot,
   sourceSnapshotFromManifest,
   verifyManifestMd5AgainstCompleteCandidates,
-  verifyManifestMd5AgainstReference,
   validateManifestUnchanged
 } = require('./manifest');
-const { CancelledError, recoverPublishedArchiveFiles, runArchiveJob } = require('./archive-engine');
+const { CancelledError, recoverPublishedArchiveFiles, resolveArchiveVolumeBytes, runArchiveJob } = require('./archive-engine');
+const { performanceTrace } = require('./performance-trace');
 const {
   DEFAULT_SIMILARITY_IGNORE_TERMS,
   DEFAULT_SIMILARITY_STRENGTH,
@@ -55,6 +56,7 @@ const {
   createManifestReviewFingerprint,
   createProjectFingerprint,
   createSimilarityScorer,
+  describeProjectMatchEvidence,
   documentTerms,
   findExactProjectMatches,
   findExactProjectShapeMatches,
@@ -68,6 +70,7 @@ const {
   similarityCandidateKeys
 } = require('./duplicate-check');
 const { PauseController } = require('./process-controller');
+const { isTerminalTaskStatus, taskStatus, TERMINAL_JOB_STATUSES } = require('./task-contracts');
 const {
   normalizeThumbnailReferences,
   resolveThumbnailReference
@@ -76,6 +79,12 @@ const {
 const SIMILARITY_VERSION = 6;
 const execFileAsync = promisify(execFile);
 const DUPLICATE_CONFIRMATION_REASONS = new Set(['name_match', 'similar_title', 'same_video_size']);
+const MIN_QUEUE_CONCURRENCY = 1;
+const MAX_QUEUE_CONCURRENCY = 3;
+const MEMORY_POLL_INTERVAL_MS = 2_000;
+const SYSTEM_MEMORY_RESERVE_BYTES = 512 * MIB;
+const TASK_MEMORY_RESERVATION_BYTES = 384 * MIB;
+const CATALOG_COMMIT_RETRY = Symbol('catalog-commit-retry');
 const CONFIG_LOG_LABELS = Object.freeze({
   language: '界面语言',
   intakeDirectory: '待处理目录',
@@ -93,6 +102,7 @@ const CONFIG_LOG_LABELS = Object.freeze({
   compressionLevel: '压缩等级',
   archiveVolumeEnabled: '分卷压缩',
   archiveVolumeBytes: '单卷大小',
+  archiveVolumeConfirmation: '大文件分卷压缩，需手动确认',
   archiveNamingMode: '压缩包命名方式',
   customArchiveName: '自定义压缩包名称',
   archivePassword: '压缩密码（内容未记录）',
@@ -112,6 +122,7 @@ const CONFIG_LOG_LABELS = Object.freeze({
   scheduleEnabled: '定时运行',
   scheduleStart: '定时开始时间',
   scheduleEnd: '定时结束时间',
+  queueConcurrency: '同时执行任务数',
   suppressOnboarding: '新手引导提示',
   suppressInventoryOnlyRisk: '不压缩入库风险提示',
   suppressCatalogCompressionRisk: '库内压缩风险提示'
@@ -126,7 +137,18 @@ function changedConfigLabels(previous, current) {
 function isDuplicateCandidateJob(job) {
   const status = String(job?.status || '');
   return ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation',
-    'awaiting_source_change_confirmation', 'inventorying', 'compressing', 'verifying'].includes(status);
+    'awaiting_source_change_confirmation', 'awaiting_anomaly_confirmation',
+    'awaiting_trash_safety_confirmation'].includes(status) || RUNNING_STATUSES.has(status);
+}
+
+function catalogRecordIdsForJob(job) {
+  return [job?.sourceCatalogRecordId, job?.sourceChangeTargetRecordId].filter(Boolean).map(String);
+}
+
+function missingCatalogSourceRecordError() {
+  const error = new Error('关联的未压缩仓库记录已不存在。请取消此任务并重新接收源项目；原文件未被此任务修改。');
+  error.code = 'CATALOG_SOURCE_RECORD_MISSING';
+  return error;
 }
 
 function normalizeCatalogMetadata(record) {
@@ -221,6 +243,108 @@ function getOriginalSourcePath(record) {
   return typeof record?.originalSourcePath === 'string' ? record.originalSourcePath.trim() : '';
 }
 
+function assertCopiedSourceStructure(expected, actual) {
+  const shape = (snapshot) => ({
+    files: (snapshot.files || []).map((file) => [file.relativePath, Number(file.size)])
+      .sort((a, b) => a[0].localeCompare(b[0])),
+    directories: [...(snapshot.directories || [])].sort()
+  });
+  const videoMatches = expected?.sourceType === 'video' && expected.files?.length === 1 &&
+    actual.files?.length === 1 && expected.files[0].size === actual.files[0].size;
+  if (!expected?.complete || !actual?.complete ||
+      !(videoMatches || isDeepStrictEqual(shape(expected), shape(actual)))) {
+    const error = new Error('跨磁盘复制结构复核失败，文件路径、逐文件大小或目录结构不一致。');
+    error.code = 'SOURCE_COPY_STRUCTURE_MISMATCH';
+    throw error;
+  }
+}
+
+function sourceDispositionRecoveryLog(recovery) {
+  const original = String(recovery.originalSourcePath || '');
+  if (recovery.sourceDisposition === 'trashed') {
+    return `源文件恢复线索：原位置 ${original}；已移入 Windows 回收站。`;
+  }
+  if (recovery.sourceDisposition === 'moved_source_retained') {
+    return `源文件恢复线索：原位置 ${original}；已复制到 ${recovery.movedTo}，原位置副本保留。`;
+  }
+  return `源文件恢复线索：原位置 ${original}；已移动到 ${recovery.movedTo}。`;
+}
+
+async function pathsReferToSameSource(left, right) {
+  if (!left || !right) return false;
+  if (normalizeForComparison(left) === normalizeForComparison(right)) return true;
+  try {
+    const [resolvedLeft, resolvedRight] = await Promise.all([fs.realpath(left), fs.realpath(right)]);
+    return normalizeForComparison(resolvedLeft) === normalizeForComparison(resolvedRight);
+  } catch {
+    return false;
+  }
+}
+
+async function classifySourcePathCandidates(records, sourcePath, signal) {
+  const recordPath = (record) => getOriginalSourcePath(record) || String(record.sourcePath || '').trim();
+  const sourceKey = normalizeForComparison(sourcePath);
+  const same = [];
+  const unresolved = [];
+  let missingCount = 0;
+  for (const record of records) {
+    const originalPath = recordPath(record);
+    if (!originalPath) { missingCount += 1; continue; }
+    if (normalizeForComparison(originalPath) === sourceKey) same.push(record);
+    else unresolved.push(record);
+  }
+  if (unresolved.length === 0) return { same, different: [], unknownCount: missingCount };
+  const sourceName = path.basename(sourcePath).toLowerCase();
+  const prioritized = unresolved.length <= 64 ? unresolved : [
+    ...unresolved.filter((record) => path.basename(recordPath(record)).toLowerCase() === sourceName),
+    ...unresolved.filter((record) => path.basename(recordPath(record)).toLowerCase() !== sourceName)
+  ].slice(0, 64);
+  const resolveBounded = async (value) => {
+    let timer;
+    let onAbort;
+    try {
+      return await Promise.race([
+        fs.realpath(value).then((resolved) => ({ path: resolved, timedOut: false }),
+          () => ({ path: null, timedOut: false })),
+        new Promise((resolve) => {
+          timer = setTimeout(() => resolve({ path: null, timedOut: true }), 1500);
+          if (signal) {
+            onAbort = () => resolve({ path: null, timedOut: true });
+            signal.addEventListener('abort', onAbort, { once: true });
+          }
+        })
+      ]);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) signal.removeEventListener('abort', onAbort);
+    }
+  };
+  if (signal?.aborted) throw new CancelledError();
+  const canonicalSource = await resolveBounded(sourcePath);
+  if (signal?.aborted) throw new CancelledError();
+  if (!canonicalSource.path) return { same, different: [], unknownCount: unresolved.length + missingCount };
+  const canonicalKey = normalizeForComparison(canonicalSource.path);
+  const different = [];
+  let resolvedCount = 0;
+  for (let offset = 0; offset < prioritized.length; offset += 16) {
+    if (signal?.aborted) throw new CancelledError();
+    const batch = await Promise.all(prioritized.slice(offset, offset + 16).map(async (record) => ({
+      record,
+      resolved: await resolveBounded(recordPath(record))
+    })));
+    if (signal?.aborted) throw new CancelledError();
+    for (const { record, resolved } of batch) {
+      if (!resolved.path) continue;
+      resolvedCount += 1;
+      if (normalizeForComparison(resolved.path) === canonicalKey) same.push(record);
+      else different.push(record);
+    }
+    // A timed-out request may still occupy an OS worker; avoid starting another batch.
+    if (batch.some(({ resolved }) => resolved.timedOut)) break;
+  }
+  return { same, different, unknownCount: unresolved.length - resolvedCount + missingCount };
+}
+
 function contentUpdatedAt(record) {
   const value = Date.parse(record?.sourceSnapshotUpdatedAt || record?.completedAt || record?.inventoryDate || '');
   return Number.isFinite(value) ? value : 0;
@@ -246,8 +370,24 @@ function recordSourceSnapshot(record) {
   );
 }
 
+function sourceBaselineFingerprint(record) {
+  const snapshot = recordSourceSnapshot(record);
+  return crypto.createHash('sha256').update(JSON.stringify({
+    id: record?.id, metadataUpdatedAt: record?.metadataUpdatedAt,
+    updatedAt: record?.sourceSnapshotUpdatedAt || record?.completedAt || record?.inventoryDate,
+    sourcePath: getOriginalSourcePath(record), sourceType: record?.sourceType, archiveState: record?.archiveState,
+    files: snapshot?.files, directories: snapshot?.directories, complete: snapshot?.complete
+  })).digest('hex');
+}
+
 function sourceChangeReportPayload(job, record, snapshot, difference, sameSourceRecords = []) {
+  const revision = (Number(job.sourceChangeDecisionRevision) || 0) + 1;
+  const baselineFingerprint = sourceBaselineFingerprint(record);
   return {
+    revision, baselineFingerprint,
+    evidenceFingerprint: crypto.createHash('sha256').update(JSON.stringify([
+      job.id, record?.id, snapshot?.snapshotId, baselineFingerprint, revision
+    ])).digest('hex'),
     jobId: job.id,
     taskKind: job.taskKind,
     processingMode: job.processingMode,
@@ -276,6 +416,12 @@ function duplicatePolicyAllowsAutomaticCheck(job) {
   return ['normal', 'normal_with_exclusions'].includes(job?.duplicatePolicy || 'normal');
 }
 
+function autoSkipExactDuplicateForJob(job, config) {
+  if (job?.automationDuplicatePolicy === 'use_existing' || job?.automationDuplicatePolicy === 'skip') return true;
+  if (job?.automationDuplicatePolicy === 'ask' || job?.automationDuplicatePolicy === 'create_new') return false;
+  return (job?.automationRuntimeOptions?.autoSkipExactDuplicates ?? config.autoSkipExactDuplicates) === true;
+}
+
 function duplicateExclusionIds(job) {
   return [...new Set([
     job?.sourceCatalogRecordId,
@@ -299,7 +445,74 @@ function hasSelectedIntakeMode(job) {
 }
 
 function isRunnableQueuedJob(job) {
-  return job?.status === 'queued' && hasSelectedIntakeMode(job);
+  return job?.status === 'queued' && hasSelectedIntakeMode(job) && job.automationStartAuthorized !== false;
+}
+
+function retainAutomationRequests(entries, now = Date.now()) {
+  const cutoff = now - 30 * 24 * 60 * 60 * 1000;
+  const active = [];
+  const history = [];
+  for (const entry of entries) {
+    const status = taskStatus(entry.jobs || [], entry);
+    if (entry.recoveryRequired || !isTerminalTaskStatus(status)) active.push(entry);
+    else if (Date.parse(entry.updatedAt || entry.createdAt || '') >= cutoff) history.push(entry);
+  }
+  const kept = new Set([...active, ...history.slice(-200)]);
+  return entries.filter((entry) => kept.has(entry));
+}
+
+function withTerminalReceipts(manager, entry) {
+  if (entry.terminalReceipts || entry.recoveryRequired ||
+      !isTerminalTaskStatus(taskStatus(entry.jobs || [], entry))) return entry;
+  const { getApplicationTaskService } = require('./application-task-service');
+  const service = getApplicationTaskService(manager);
+  const v1 = service.receipt(entry, 1);
+  const v2 = service.receipt(entry, 2);
+  const asOf = new Date().toISOString();
+  if (v2.evidence) v2.evidence = { ...v2.evidence, persisted: true, asOf };
+  return { ...entry, terminalReceipts: { 1: v1, 2: v2 } };
+}
+
+function normalizeQueueConcurrency(value) {
+  const concurrency = Number(value);
+  return Number.isInteger(concurrency) && concurrency >= MIN_QUEUE_CONCURRENCY && concurrency <= MAX_QUEUE_CONCURRENCY
+    ? concurrency
+    : MIN_QUEUE_CONCURRENCY;
+}
+
+function isTerminalJob(job) {
+  return String(job?.status || '').startsWith('completed') ||
+    ['cancelled', 'failed', 'skipped_duplicate'].includes(job?.status);
+}
+
+function jobChangesSource(job, config) {
+  if (job?.processingMode === 'inventory_only' || job?.taskKind === 'catalog_refresh') return false;
+  if (job?.mcpPreserveSource === true || job?.mcpSourceDisposition === 'keep') return false;
+  if (['move', 'trash'].includes(job?.mcpSourceDisposition)) return true;
+  return Boolean(config?.moveCompleted || config?.autoTrashCompleted);
+}
+
+function pathsOverlap(firstPath, secondPath) {
+  const first = path.resolve(firstPath || '');
+  const second = path.resolve(secondPath || '');
+  if (normalizeForComparison(first) === normalizeForComparison(second)) return true;
+  return isPathInside(first, second) || isPathInside(second, first);
+}
+
+function pathForConflict(targetPath, allowMissing = false) {
+  if (!String(targetPath || '').trim()) return null;
+  let current = path.resolve(targetPath);
+  const missing = [];
+  while (true) {
+    try { return path.join(fsSync.realpathSync.native(current), ...missing); }
+    catch (error) {
+      if (!allowMissing || error.code !== 'ENOENT') return null;
+      const parent = path.dirname(current);
+      if (parent === current) return null;
+      missing.unshift(path.basename(current));
+      current = parent;
+    }
+  }
 }
 
 function deferJobUntilNextRun(job, deferred) {
@@ -360,6 +573,14 @@ function normalizedDirectorySnapshot(directories) {
     normalized.push(relativePath);
   }
   return normalized.sort((left, right) => left.localeCompare(right, 'zh-CN'));
+}
+
+function directorySnapshotsEqual(left, right) {
+  const leftSnapshot = normalizedDirectorySnapshot(left);
+  const rightSnapshot = normalizedDirectorySnapshot(right);
+  return leftSnapshot !== null && rightSnapshot !== null &&
+    leftSnapshot.length === rightSnapshot.length &&
+    leftSnapshot.every((directory, index) => directory === rightSnapshot[index]);
 }
 
 function sourceTreeSnapshotsEqual(leftManifest, leftDirectories, rightManifest, rightDirectories) {
@@ -451,6 +672,7 @@ async function runInventoryOnlyJob(job, config, hooks = {}, signal) {
   const pauseController = hooks.pauseController;
   await onStage('inventorying', '正在生成未压缩入库清单与 MD5');
   const manifest = hooks.preparedManifest || await buildManifest(job.sourcePath, job.sourceType, {
+    jobId: job.id,
     signal,
     pauseController,
     preparedSnapshot: hooks.preparedSnapshot,
@@ -498,6 +720,17 @@ async function runInventoryOnlyJob(job, config, hooks = {}, signal) {
     hasPassword: false,
     verifiedAt: new Date().toISOString()
   };
+}
+
+async function confirmCurrentSourceSnapshot(sourcePath, sourceType, manifest, directories, signal, pauseController) {
+  const baseline = sourceSnapshotFromManifest(sourcePath, sourceType, manifest, directories);
+  const current = await scanSourceSnapshot(sourcePath, sourceType, { signal, pauseController });
+  const comparison = compareSourceSnapshots(baseline, current);
+  if (!current.complete || !comparison.complete || comparison.changed) {
+    const error = new Error('入库前源文件或目录集合发生变化，请重新扫描。');
+    error.code = 'SOURCE_CHANGED';
+    throw error;
+  }
 }
 
 function validateCatalogMetadata(record, metadata = {}) {
@@ -559,6 +792,26 @@ async function pathExists(targetPath) {
   }
 }
 
+async function assertArchiveFileIdentity(archivePath, archiveFile) {
+  const stats = await fs.lstat(archivePath, { bigint: true });
+  const recordedSize = Number(archiveFile.size);
+  if (!stats.isFile() || (archiveFile.size !== undefined && Number.isSafeInteger(recordedSize) &&
+      recordedSize >= 0 && Number(stats.size) !== recordedSize)) {
+    throw new Error(`归档成品身份与记录不符，已拒绝删除：${path.basename(archivePath)}`);
+  }
+  const expected = archiveFile.identity;
+  if (!expected) return;
+  const actual = {
+    device: String(stats.dev),
+    inode: String(stats.ino),
+    modifiedNs: String(stats.mtimeNs),
+    createdNs: String(stats.birthtimeNs)
+  };
+  if (Object.keys(actual).some((key) => String(expected[key] || '') !== actual[key])) {
+    throw new Error(`归档成品身份与记录不符，已拒绝删除：${path.basename(archivePath)}`);
+  }
+}
+
 async function quarantineAndTrashArchiveFiles(record, stagingDirectory, trashItem, pathExists) {
   if (!trashItem) throw new Error('Windows 回收站服务不可用。');
   if (!record.archiveDirectory) throw new Error('归档记录缺少压缩包目录，已拒绝删除。');
@@ -567,7 +820,10 @@ async function quarantineAndTrashArchiveFiles(record, stagingDirectory, trashIte
   for (const archiveFile of record.archiveFiles || []) {
     const fileName = assertSafePathSegment(archiveFile.name, '归档文件');
     const archivePath = assertOwnedChildPath(archiveDirectory, path.join(archiveDirectory, fileName));
-    if (await pathExists(archivePath)) archivePaths.push(archivePath);
+    if (await pathExists(archivePath)) {
+      await assertArchiveFileIdentity(archivePath, archiveFile);
+      archivePaths.push({ archivePath, archiveFile });
+    }
   }
   if (archivePaths.length === 0) return null;
   const configuredStaging = String(stagingDirectory || '').trim();
@@ -581,27 +837,43 @@ async function quarantineAndTrashArchiveFiles(record, stagingDirectory, trashIte
   await fs.mkdir(quarantineDirectory, { recursive: true });
   const moved = [];
   try {
-    for (const archivePath of archivePaths) {
+    for (const { archivePath, archiveFile } of archivePaths) {
       const quarantinedPath = path.join(quarantineDirectory, path.basename(archivePath));
       await fs.rename(archivePath, quarantinedPath);
-      moved.push({ archivePath, quarantinedPath });
+      moved.push({ archivePath, archiveFile, quarantinedPath });
+      await assertArchiveFileIdentity(quarantinedPath, archiveFile);
     }
     await trashItem(quarantineDirectory);
     return {
       trashPath: quarantineDirectory,
       files: moved.map((item) => ({
         originalPath: item.archivePath,
-        quarantinedName: path.basename(item.quarantinedPath)
+        quarantinedName: path.basename(item.quarantinedPath),
+        archiveFile: item.archiveFile
       }))
     };
   } catch (error) {
+    const recoveryFailures = [];
     for (const item of moved.reverse()) {
       try {
-        if (await pathExists(item.quarantinedPath)) await fs.rename(item.quarantinedPath, item.archivePath);
-      } catch { /* 隔离目录保留，便于人工恢复。 */ }
+        if (!(await pathExists(item.quarantinedPath))) {
+          throw new Error('隔离文件已不存在');
+        }
+        await assertArchiveFileIdentity(item.quarantinedPath, item.archiveFile);
+        // A hard link reserves the original name atomically and fails with EEXIST.
+        // A rename could overwrite a new file created after a pathExists check.
+        await fs.link(item.quarantinedPath, item.archivePath);
+        await assertArchiveFileIdentity(item.archivePath, item.archiveFile);
+        await fs.unlink(item.quarantinedPath);
+      } catch (recoveryError) {
+        recoveryFailures.push(`${path.basename(item.archivePath)}：${recoveryError.message}`);
+      }
     }
-    try { await fs.rm(quarantineDirectory, { recursive: false }); } catch {}
-    throw new Error(`多卷压缩包删除未完成，已回滚：${error.message}`);
+    if (recoveryFailures.length === 0) {
+      try { await fs.rm(quarantineDirectory, { recursive: false }); } catch {}
+      throw new Error(`多卷压缩包删除未完成，已回滚：${error.message}`);
+    }
+    throw new Error(`多卷压缩包删除未完成，部分文件未能回滚；请核对隔离目录 ${quarantineDirectory}（${recoveryFailures.join('；')}）：${error.message}`);
   }
 }
 
@@ -632,6 +904,31 @@ function catalogSearchText(record) {
     record.backupLocation, record.sourcePath, record.archiveBaseName,
     ...(record.manifest || []).map((file) => file.relativePath)
   ].filter(Boolean).join('\n').toLocaleLowerCase('zh-CN');
+}
+
+function catalogSearchDetails(record, needle) {
+  const searchableFields = [
+    record.title, record.displayName, ...(record.tags || []), record.notes,
+    record.backupLocation, record.sourcePath, record.archiveBaseName
+  ];
+  const matchedFiles = [];
+  for (const file of record.manifest || []) {
+    const relativePath = String(file?.relativePath || '');
+    searchableFields.push(relativePath);
+    if (matchedFiles.length >= 20) continue;
+    if (relativePath.toLowerCase().includes(needle) || String(file?.md5 || '').toLowerCase() === needle) {
+      matchedFiles.push({ relativePath, size: file.size, md5: file.md5 });
+    }
+  }
+  return {
+    recordText: searchableFields.filter(Boolean).join('\n').toLocaleLowerCase('zh-CN'),
+    matchedFiles,
+    title: String(record.title || record.displayName || '').toLocaleLowerCase('zh-CN'),
+    titleScore: Math.max(
+      fuzzyTextScore(needle, record.title || ''),
+      fuzzyTextScore(needle, record.displayName || '')
+    )
+  };
 }
 
 function relocateOwnedPaths(value, oldRoot, newRoot) {
@@ -675,13 +972,14 @@ class QueueManager extends EventEmitter {
       archiveFormat: '7z',
       compressionLevel: 1,
       archiveVolumeEnabled: true,
+      archiveVolumeConfirmation: true,
       archiveVolumeBytes: LARGE_TASK_BYTES,
       smallItemFilter: true,
       minimumTaskBytes: 100 * MIB,
       largeFolderSimplification: true,
       largeFolderFileThreshold: DEFAULT_LARGE_FOLDER_FILE_THRESHOLD,
       largeFolderMd5SampleLimit: DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT,
-      skipTinyMd5Files: true,
+      skipTinyMd5Files: false,
       tinyFileMd5ThresholdBytes: DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES,
       autoSkipExactDuplicates: true,
       autoSkipExactDuplicateAction: 'keep',
@@ -689,6 +987,7 @@ class QueueManager extends EventEmitter {
       scheduleEnabled: false,
       scheduleStart: '',
       scheduleEnd: '',
+      queueConcurrency: 1,
       moveCompleted: false,
       processedSourceDirectory: '',
       recordArchivePassword: true,
@@ -717,6 +1016,7 @@ class QueueManager extends EventEmitter {
         Number(this.config.tinyFileMd5ThresholdBytes) <= MAX_TINY_FILE_MD5_THRESHOLD_BYTES
       ? Number(this.config.tinyFileMd5ThresholdBytes)
       : DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES;
+    this.config.queueConcurrency = normalizeQueueConcurrency(this.config.queueConcurrency);
     if (!this.config.repositoryDirectory) {
       this.config.repositoryDirectory = path.join(
         path.dirname(this.config.archiveOutputDirectory || process.cwd()),
@@ -725,6 +1025,7 @@ class QueueManager extends EventEmitter {
     }
     if (this.config.autoTrashCompleted) this.config.moveCompleted = false;
     this.jobs = [];
+    this.intakeAdmissionTail = Promise.resolve();
     this.catalog = [];
     this.catalogLoading = false;
     this.catalogLoadProgress = { loaded: 0, total: 0 };
@@ -735,15 +1036,28 @@ class QueueManager extends EventEmitter {
     this.logPersistenceError = '';
     this.skippedRootFiles = [];
     this.running = false;
-    this.abortController = null;
-    this.pauseController = null;
+    this.activeBatchId = null;
+    this.activeRuns = new Map();
+    this.outputReservations = new Set();
+    this.sourceReservations = new Map();
+    this.anomalyOperations = new Set();
+    this.memoryWaiting = false;
+    this.schedulerWake = null;
+    this.schedulerWakePending = false;
     this.paused = false;
+    this.pauseInProgress = false;
     this.stopRequested = false;
     this.pauseAfterCurrent = false;
+    this.pauseAfterCurrentArmed = false;
     this.scheduleWaiting = false;
     this.schedulePaused = false;
     this.undoStack = [];
     this.catalogOperationTail = Promise.resolve();
+    this.catalogOperationScope = new AsyncLocalStorage();
+    this.trashDispositionTail = Promise.resolve();
+    this.duplicateReservationTails = new Map();
+    this.duplicateReservationReleases = new Map();
+    this.jobPersistenceTail = Promise.resolve();
     this.pendingCatalogOperations = 0;
     this.similarityIgnoreTerms = [];
     this.similarityIgnoreTermsWritePromise = Promise.resolve();
@@ -752,13 +1066,16 @@ class QueueManager extends EventEmitter {
     this.similarityMaintenanceTask = null;
     this.termStatisticsDirty = true;
     this.progressEmissionTimer = null;
-    this.pendingProgress = null;
+    this.pendingProgress = new Map();
     this.randomWalkBag = [];
     this.catalogThumbnailSummaryCache = new WeakMap();
+    this.archiveVerificationEvidence = new WeakMap();
     this.safetyHalt = this.config.pendingTrashSafetyHalt && typeof this.config.pendingTrashSafetyHalt === 'object'
       ? { ...this.config.pendingTrashSafetyHalt }
       : null;
     this.automationRequests = [];
+    this.automationCancellationIntents = new Set();
+    this.automationLedgerTail = Promise.resolve();
     this.services = services;
   }
 
@@ -794,13 +1111,25 @@ class QueueManager extends EventEmitter {
     const savedAutomationRequests = typeof this.store.loadAutomationRequests === 'function'
       ? await this.store.loadAutomationRequests()
       : [];
-    const retentionStart = Date.now() - (30 * 24 * 60 * 60 * 1000);
     const automationRequestCandidates = Array.isArray(savedAutomationRequests) ? savedAutomationRequests : [];
-    this.automationRequests = automationRequestCandidates
+    this.automationRequests = retainAutomationRequests(automationRequestCandidates
       .filter((entry) => entry && typeof entry.requestId === 'string' &&
-        typeof entry.repositoryDirectory === 'string' && Array.isArray(entry.jobs) &&
-        Date.parse(entry.updatedAt || entry.createdAt || '') >= retentionStart)
-      .slice(-200);
+        typeof entry.repositoryDirectory === 'string' && Array.isArray(entry.jobs)));
+    this.automationCancellationIntents = new Set(this.automationRequests
+      .filter((entry) => entry.cancellationRequested === true && entry.cancelFinalized !== true)
+      .map((entry) => entry.taskId));
+    const cancellingTaskIds = new Set(this.automationRequests
+      .filter((entry) => entry.cancellationRequested === true &&
+        normalizeForComparison(entry.repositoryDirectory) === normalizeForComparison(this.config.repositoryDirectory))
+      .map((entry) => entry.taskId));
+    let revokedCancelledJobs = false;
+    for (const job of this.jobs) {
+      if (cancellingTaskIds.has(job.applicationTaskId) && job.automationStartAuthorized !== false) {
+        job.automationStartAuthorized = false;
+        revokedCancelledJobs = true;
+      }
+    }
+    if (revokedCancelledJobs) await this.store.saveJobs(this.config.repositoryDirectory, this.jobs);
     if (this.automationRequests.length !== automationRequestCandidates.length && typeof this.store.saveAutomationRequests === 'function') {
       await this.store.saveAutomationRequests(this.automationRequests);
     }
@@ -825,17 +1154,38 @@ class QueueManager extends EventEmitter {
     }
     let recovered = false;
     this.jobs = this.jobs.map((job) => {
-      if (!RUNNING_STATUSES.has(job.status)) return job;
+      const wasRunning = RUNNING_STATUSES.has(job.status);
+      const hadInterruptedBatch = Boolean(job.runBatchId);
+      if (!wasRunning && !hadInterruptedBatch) return job;
       recovered = true;
+      const recoveredJob = { ...job };
+      delete recoveredJob.runBatchId;
+      if (!wasRunning) return recoveredJob;
       return {
-        ...job,
+        ...recoveredJob,
         status: 'failed',
         progress: 0,
         stageText: '程序上次运行时被中断，可重新扫描或重试。',
         errorCode: 'INTERRUPTED'
       };
     });
+    for (const job of this.jobs) {
+      if (!['queued', 'awaiting_confirmation'].includes(job.status)) continue;
+      const previous = JSON.stringify([job.archiveVolumeConfirmation, job.requiresConfirmation,
+        job.confirmationReasons, job.status, job.stageText]);
+      if (typeof job.archiveVolumeConfirmation !== 'boolean') {
+        job.archiveVolumeConfirmation = (job.automationRuntimeOptions || this.config).archiveVolumeConfirmation !== false;
+      }
+      this.refreshVolumeConfirmation(job);
+      if (JSON.stringify([job.archiveVolumeConfirmation, job.requiresConfirmation,
+        job.confirmationReasons, job.status, job.stageText]) !== previous) recovered = true;
+    }
     if (recovered) await this.persistJobs();
+    for (const job of this.jobs) {
+      if (job.status !== 'awaiting_anomaly_confirmation') continue;
+      const outputKey = this.outputReservationKey(job);
+      if (outputKey) this.outputReservations.add(outputKey);
+    }
     const pendingTrashSafetyJob = this.jobs.find((job) => job.status === 'awaiting_trash_safety_confirmation');
     if (!this.safetyHalt && pendingTrashSafetyJob) {
       this.safetyHalt = {
@@ -922,6 +1272,9 @@ class QueueManager extends EventEmitter {
       }
       this.catalogLoadProgress = { loaded: this.catalog.length, total: this.catalog.length };
       this.catalogLoading = false;
+      // Reconcile a job committed before its automation receipt could be saved.
+      // Catalog evidence is available only after this load has finished.
+      await this.refreshAutomationRequests();
       this.emitState();
       return this.catalog;
     })().catch((error) => {
@@ -964,11 +1317,16 @@ class QueueManager extends EventEmitter {
       running: this.running,
       paused: this.paused,
       pauseAfterCurrent: this.pauseAfterCurrent,
+      activeBatchId: this.activeBatchId,
+      activeJobIds: [...this.activeRuns.keys()],
+      runningCount: this.activeRuns.size,
+      concurrencyLimit: normalizeQueueConcurrency(this.config.queueConcurrency),
+      memoryWaiting: this.memoryWaiting,
       scheduleWaiting: this.scheduleWaiting,
       safetyHalt: this.safetyHalt ? { ...this.safetyHalt } : null,
       undoDepth: this.undoStack.length,
       undoLabel: this.undoStack.at(-1)?.label || '',
-      currentJobId: this.jobs.find((job) => RUNNING_STATUSES.has(job.status))?.id || null
+      currentJobId: this.jobs.find((job) => this.activeRuns.has(job.id))?.id || null
     };
   }
 
@@ -1042,10 +1400,14 @@ class QueueManager extends EventEmitter {
   }
 
   async reloadSimilarityIgnoreTerms({ rebuild = true } = {}) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.reloadSimilarityIgnoreTerms({ rebuild }));
+    }
     if (!this.config.similarityIgnoreTermsPath) {
       this.similarityIgnoreTerms = parseSimilarityIgnoreTerms(DEFAULT_SIMILARITY_IGNORE_TERMS);
       return { path: '', count: this.similarityIgnoreTerms.length, state: this.getState() };
     }
+    if (rebuild && this.running) throw new Error('当前批次执行期间不能重算整个仓库的相似关系。');
     const filePath = await this.ensureSimilarityIgnoreTermsFile();
     this.similarityIgnoreTerms = parseSimilarityIgnoreTerms(await fs.readFile(filePath, 'utf8'));
     if (rebuild && Array.isArray(this.catalog)) {
@@ -1073,16 +1435,18 @@ class QueueManager extends EventEmitter {
   }
 
   // IDF 语料来自当前目录的标题与头部视频名；词元解析在打分器内有缓存，全量重算很便宜。
-  refreshTermStatistics() {
+  refreshTermStatistics(catalog = this.catalog) {
     const frequencies = new Map();
-    for (const record of this.catalog) {
+    for (const record of catalog) {
       for (const token of documentTerms(record, this.similarityIgnoreTerms)) {
         frequencies.set(token, (frequencies.get(token) || 0) + 1);
       }
     }
-    setTermStatistics(frequencies, this.catalog.length);
-    this.termStatisticsDirty = false;
-    return { frequencies, total: this.catalog.length };
+    if (catalog === this.catalog) {
+      setTermStatistics(frequencies, catalog.length);
+      this.termStatisticsDirty = false;
+    }
+    return { frequencies, total: catalog.length };
   }
 
   ensureTermStatistics() {
@@ -1090,7 +1454,9 @@ class QueueManager extends EventEmitter {
   }
 
   async rebuildAndPersistSimilarityRelations(message) {
-    // 先同步启动重建（让 similarityRebuildPromise 立即可等待），日志和持久化随后跟进。
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.rebuildAndPersistSimilarityRelations(message));
+    }
     const rebuild = this.rebuildAllSimilarityRelations();
     try {
       await rebuild;
@@ -1115,6 +1481,10 @@ class QueueManager extends EventEmitter {
 
   // “全局重算”入口：不管自动开关状态，按当前强度重算每一条仓库记录。
   async recalculateAllSimilarity() {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.recalculateAllSimilarity());
+    }
+    if (this.running) throw new Error('当前批次执行期间不能重算整个仓库的相似关系。');
     if (this.running) throw new Error('队列运行期间不能重算相似度。');
     await this.log('info', '开始全局重算仓库相似关系…');
     await this.rebuildAllSimilarityRelations();
@@ -1124,12 +1494,12 @@ class QueueManager extends EventEmitter {
     return this.getState();
   }
 
-  async performSimilarityRebuild({ reportProgress = true, useCatalogSnapshot = false } = {}) {
-    const statistics = this.refreshTermStatistics();
+  async performSimilarityRebuild({ reportProgress = true, useCatalogSnapshot = false, catalog = this.catalog } = {}) {
+    const statistics = this.refreshTermStatistics(catalog);
     const scorer = createSimilarityScorer(this.similarityIgnoreTerms, statistics);
     const stamp = this.similarityVersionStamp();
     // 使用稳定快照和按 ID 查找，避免重建让出事件循环时目录增删导致索引错位。
-    const snapshot = [...this.catalog];
+    const snapshot = [...catalog];
     const total = snapshot.length;
     const startedAt = Date.now();
     const emitProgress = (completed, active) => {
@@ -1272,35 +1642,43 @@ class QueueManager extends EventEmitter {
         kind === 'content' ? 20 : undefined
       ));
       for (const id of excludedIds) ids.delete(id);
-      return this.catalog.filter((record) => ids.has(record.id));
+      return this.catalog.filter((record) => ids.has(record.id) &&
+        (!Array.isArray(manifest.directories) || !Array.isArray(record.directories) ||
+          directorySnapshotsEqual(manifest.directories, record.directories)));
     }
     const matches = kind === 'content'
       ? findExactProjectMatches(manifest, this.catalog.filter((record) => !excludedIds.has(String(record.id))), '')
       : findExactProjectShapeMatches(manifest, this.catalog.filter((record) => !excludedIds.has(String(record.id))), '');
     const ids = new Set(matches.map((match) => match.id));
-    return this.catalog.filter((record) => ids.has(record.id));
+    return this.catalog.filter((record) => ids.has(record.id) &&
+      (!Array.isArray(manifest.directories) || !Array.isArray(record.directories) ||
+        directorySnapshotsEqual(manifest.directories, record.directories)));
   }
 
-  findSameSourceTreeMatches(job, manifest, directories) {
+  async findSameSourceTreeMatches(job, manifest, directories, runContext = this.activeRuns.get(job.id)) {
     if (job.sourceType !== 'directory') return [];
     if (!hasCompleteSourceTreeSnapshot(job, manifest, directories)) return [];
-    const sourceKey = normalizeForComparison(job.sourcePath);
     const exclusions = new Set(duplicateExclusionIds(job));
-    return this.findIndexedProjectCandidates(manifest, 'shape', [...exclusions])
-      .filter((record) => record.sourceTreeSnapshotComplete === true &&
-        !exclusions.has(String(record.id)) &&
-        record.sourceType === job.sourceType &&
-        normalizeForComparison(getOriginalSourcePath(record)) === sourceKey &&
-        hasCompleteSourceTreeSnapshot(record, record.manifest, record.directories) &&
-        sourceTreeSnapshotsEqual(manifest, directories, record.manifest, record.directories))
-      .map((record) => ({
+    const candidates = await this.runCatalogOperation(() =>
+      this.findIndexedProjectCandidates(manifest, 'shape', [...exclusions])
+        .filter((record) => record.sourceTreeSnapshotComplete === true &&
+          !exclusions.has(String(record.id)) &&
+          record.sourceType === job.sourceType &&
+          hasCompleteSourceTreeSnapshot(record, record.manifest, record.directories) &&
+          sourceTreeSnapshotsEqual(manifest, directories, record.manifest, record.directories)));
+    const matches = [];
+    const sameSource = (await classifySourcePathCandidates(candidates, job.sourcePath, runContext?.abortController.signal)).same;
+    for (const record of sameSource) {
+      matches.push({
         id: record.id,
         title: record.title || record.displayName || '',
         displayName: record.displayName || record.title || '',
         fileCount: record.manifest.length,
         verification: 'same_source_tree'
-      }))
-      .slice(0, 20);
+      });
+      if (matches.length === 20) break;
+    }
+    return matches;
   }
 
   rememberCatalogAction(label, recordIds, fields = []) {
@@ -1328,15 +1706,85 @@ class QueueManager extends EventEmitter {
   }
 
   runCatalogOperation(operation) {
+    if (this.catalogOperationScope.getStore() === this) return Promise.resolve().then(operation);
+    if (this.userDataSwitchPending) return Promise.reject(Object.assign(new Error('用户数据切换验证期间不能写入。'), { code: 'USER_DATA_SWITCH_PENDING' }));
     this.pendingCatalogOperations += 1;
     const previous = this.catalogOperationTail.catch(() => {});
     let release;
     const current = new Promise((resolve) => { release = resolve; });
     this.catalogOperationTail = previous.then(() => current);
-    return previous.then(operation).finally(() => {
+    return previous.then(() => this.catalogOperationScope.run(this, operation)).finally(() => {
       this.pendingCatalogOperations -= 1;
       release();
     });
+  }
+
+  async runTrashDisposition(operation) {
+    const previous = this.trashDispositionTail;
+    let release;
+    this.trashDispositionTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  async reserveDuplicateShape(job, manifest, runContext) {
+    if (this.duplicateReservationReleases.has(job.id)) return;
+    const fingerprint = createProjectFingerprint(manifest);
+    if (!fingerprint.valid) return;
+    const videoMd5 = job.sourceType === 'video' && manifest.length === 1
+      ? String(manifest[0]?.md5 || '').toLowerCase() : '';
+    const key = /^[a-f0-9]{32}$/.test(videoMd5) ? `video:${videoMd5}` : `shape:${fingerprint.shapeHash}`;
+    const previous = this.duplicateReservationTails.get(key) || Promise.resolve();
+    let release;
+    const finished = new Promise((resolve) => { release = resolve; });
+    const turn = previous.then(() => finished);
+    this.duplicateReservationTails.set(key, turn);
+    void turn.then(() => {
+      if (this.duplicateReservationTails.get(key) === turn) this.duplicateReservationTails.delete(key);
+    });
+    const signal = runContext.abortController.signal;
+    let onAbort;
+    const aborted = new Promise((_, reject) => {
+      onAbort = () => reject(new CancelledError());
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    try {
+      if (signal.aborted) throw new CancelledError();
+      await Promise.race([previous, aborted]);
+      if (signal.aborted) throw new CancelledError();
+      this.duplicateReservationReleases.set(job.id, release);
+    } catch (error) {
+      release();
+      throw error;
+    } finally {
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  releaseDuplicateShape(job) {
+    const release = this.duplicateReservationReleases.get(job.id);
+    if (!release) return;
+    this.duplicateReservationReleases.delete(job.id);
+    release();
+  }
+
+  async runCatalogCommitWhenRunnable(runContext, operation) {
+    while (true) {
+      // Pausing happens outside the catalog lock so a paused archive cannot block
+      // unrelated catalog reads or writes for an arbitrary amount of time.
+      await this.waitForRunCheckpoint(runContext);
+      const result = await this.runCatalogOperation(async () => {
+        const signal = runContext.abortController.signal;
+        if (this.stopRequested || signal.aborted) throw new CancelledError();
+        if (this.paused || runContext.pauseController.paused === true) return CATALOG_COMMIT_RETRY;
+        return operation();
+      });
+      if (result !== CATALOG_COMMIT_RETRY) return result;
+    }
   }
 
   hasPendingCatalogOperations() {
@@ -1344,7 +1792,10 @@ class QueueManager extends EventEmitter {
   }
 
   async waitForCatalogOperations() {
-    await this.catalogOperationTail.catch(() => {});
+    await Promise.all([
+      this.catalogOperationTail.catch(() => {}),
+      this.intakeAdmissionTail.catch(() => {})
+    ]);
   }
 
   async saveCatalogRecords(records) {
@@ -1493,7 +1944,15 @@ class QueueManager extends EventEmitter {
       }
       for (const file of group.files || []) {
         if (file.restored) continue;
-        await fs.rename(path.join(group.trashPath, file.quarantinedName), file.originalPath);
+        const quarantinedPath = path.join(group.trashPath, file.quarantinedName);
+        try {
+          await assertArchiveFileIdentity(quarantinedPath, file.archiveFile || {});
+          await fs.link(quarantinedPath, file.originalPath);
+          await assertArchiveFileIdentity(file.originalPath, file.archiveFile || {});
+          await fs.unlink(quarantinedPath);
+        } catch (error) {
+          throw new Error(`原压缩包无法安全撤回；请保留隔离文件 ${quarantinedPath} 并核对 ${file.originalPath}：${error.message}`);
+        }
         file.restored = true;
       }
       try { await fs.rm(group.trashPath, { recursive: false }); } catch {}
@@ -1560,14 +2019,14 @@ class QueueManager extends EventEmitter {
     let queryCandidateIds = null;
     if (needle) {
       const exactMd5Ids = /^[a-f0-9]{32}$/i.test(needle) && this.store.findCatalogIdsByMd5
-        ? this.store.findCatalogIdsByMd5(this.config.repositoryDirectory, needle, 2000)
+        ? this.store.findCatalogIdsByMd5(this.config.repositoryDirectory, needle, Infinity)
         : [];
       if (exactMd5Ids.length > 0) {
         queryCandidateIds = new Set(exactMd5Ids);
       } else {
         const grams = searchGrams(needle);
         const ids = this.store.findCatalogIdsBySearchTerms
-          ? this.store.findCatalogIdsBySearchTerms(this.config.repositoryDirectory, grams, 2000)
+          ? this.store.findCatalogIdsBySearchTerms(this.config.repositoryDirectory, grams, Infinity)
           : this.catalog.filter((record) => grams.some((gram) => searchGrams(catalogSearchText(record)).includes(gram))).map((record) => record.id);
         queryCandidateIds = new Set(ids);
       }
@@ -1575,6 +2034,7 @@ class QueueManager extends EventEmitter {
     const candidateCatalog = queryCandidateIds
       ? this.catalog.filter((record) => queryCandidateIds.has(record.id))
       : this.catalog;
+    const searchDetailsByRecord = new WeakMap();
     const results = candidateCatalog
       .filter((record) => {
         if (possibleDuplicateFilter && !(record.similarRecords?.length > 0)) return false;
@@ -1584,35 +2044,21 @@ class QueueManager extends EventEmitter {
         if (inventoryDateFilter && localDateKey(record.inventoryDate || record.completedAt || record.verifiedAt) !== inventoryDateFilter) return false;
         if (hasRatingFilter && record.rating !== ratingFilter) return false;
         if (!needle) return true;
-        const recordText = catalogSearchText(record);
-        if (recordText.includes(needle)) return true;
-        const titleScore = Math.max(
-          fuzzyTextScore(needle, record.title || ''),
-          fuzzyTextScore(needle, record.displayName || '')
-        );
-        if (titleScore >= 0.45) return true;
-        return (record.manifest || []).some((file) =>
-          file.relativePath.toLowerCase().includes(needle) || file.md5?.toLowerCase() === needle
-        );
+        const details = catalogSearchDetails(record, needle);
+        const matches = details.recordText.includes(needle) || details.titleScore >= 0.45 || details.matchedFiles.length > 0;
+        if (matches) searchDetailsByRecord.set(record, details);
+        return matches;
       })
       .map((record) => {
         const summary = this.summarizeCatalogRecord(record);
         if (!needle) return { ...summary, searchScore: 0 };
-        const recordText = catalogSearchText(record);
-        const title = String(record.title || record.displayName || '').toLocaleLowerCase('zh-CN');
-        let searchScore = Math.max(
-          fuzzyTextScore(needle, record.title || ''),
-          fuzzyTextScore(needle, record.displayName || '')
-        );
-        if (title === needle) searchScore = 1.2;
-        else if (title.startsWith(needle)) searchScore = Math.max(searchScore, 1.1);
-        else if (title.includes(needle)) searchScore = Math.max(searchScore, 1.05);
-        else if (recordText.includes(needle)) searchScore = Math.max(searchScore, 0.86);
-        const matchedFiles = (record.manifest || [])
-          .filter((file) => file.relativePath.toLowerCase().includes(needle) || file.md5?.toLowerCase() === needle)
-          .slice(0, 20)
-          .map((file) => ({ relativePath: file.relativePath, size: file.size, md5: file.md5 }));
-        return { ...summary, matchedFiles, searchScore };
+        const details = searchDetailsByRecord.get(record) || catalogSearchDetails(record, needle);
+        let searchScore = details.titleScore;
+        if (details.title === needle) searchScore = 1.2;
+        else if (details.title.startsWith(needle)) searchScore = Math.max(searchScore, 1.1);
+        else if (details.title.includes(needle)) searchScore = Math.max(searchScore, 1.05);
+        else if (details.recordText.includes(needle)) searchScore = Math.max(searchScore, 0.86);
+        return { ...summary, matchedFiles: details.matchedFiles, searchScore };
       });
 
     const dateValue = (record) => {
@@ -1761,6 +2207,10 @@ class QueueManager extends EventEmitter {
   }
 
   async recalculateCatalogSimilarity(recordId) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.recalculateCatalogSimilarity(recordId));
+    }
+    this.assertCatalogRecordsNotQueued([recordId]);
     const record = this.catalog.find((candidate) => candidate.id === recordId);
     if (!record) throw new Error('没有找到指定仓库记录。');
     this.refreshSimilarityForRecord(record);
@@ -1771,6 +2221,10 @@ class QueueManager extends EventEmitter {
   }
 
   async removeCatalogSimilarity(recordId, similarId) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.removeCatalogSimilarity(recordId, similarId));
+    }
+    this.assertCatalogRecordsNotQueued([recordId, similarId]);
     if (recordId === similarId) throw new Error('不能移除项目与自身的关系。');
     const record = this.catalog.find((candidate) => candidate.id === recordId);
     const similar = this.catalog.find((candidate) => candidate.id === similarId);
@@ -1793,6 +2247,10 @@ class QueueManager extends EventEmitter {
   }
 
   async updateCatalogMetadata(recordId, metadata) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.updateCatalogMetadata(recordId, metadata));
+    }
+    this.assertCatalogRecordsNotQueued([recordId]);
     const record = this.catalog.find((candidate) => candidate.id === recordId);
     if (!record) throw new Error('没有找到指定归档记录。');
     const validated = validateCatalogMetadata(record, metadata);
@@ -1811,6 +2269,10 @@ class QueueManager extends EventEmitter {
   }
 
   async setCatalogCover(recordId, thumbnailRef) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.setCatalogCover(recordId, thumbnailRef));
+    }
+    this.assertCatalogRecordsNotQueued([recordId]);
     const record = this.catalog.find((candidate) => candidate.id === recordId);
     if (!record) throw new Error('没有找到指定仓库记录。');
     const thumbnail = recordThumbnailEntries(record)
@@ -1829,6 +2291,10 @@ class QueueManager extends EventEmitter {
   }
 
   async deleteCatalogThumbnail(recordId, thumbnailRef) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.deleteCatalogThumbnail(recordId, thumbnailRef));
+    }
+    this.assertCatalogRecordsNotQueued([recordId]);
     const record = this.catalog.find((candidate) => candidate.id === recordId);
     if (!record) throw new Error('没有找到指定仓库记录。');
     const thumbnail = recordThumbnailEntries(record)
@@ -1909,6 +2375,9 @@ class QueueManager extends EventEmitter {
   }
 
   async addManualCatalogRecord(input = {}) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.addManualCatalogRecord(input));
+    }
     const title = String(input.title ?? input.name ?? '').trim();
     const notes = String(input.notes ?? '').trim();
     const tags = normalizeTagsInput(input.tags ?? []);
@@ -1967,6 +2436,10 @@ class QueueManager extends EventEmitter {
   }
 
   async addCatalogImage(recordId, input = {}) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.addCatalogImage(recordId, input));
+    }
+    this.assertCatalogRecordsNotQueued([recordId]);
     const record = this.catalog.find((candidate) => candidate.id === recordId);
     if (!record) throw new Error('没有找到指定仓库记录。');
     if (!this.services.storeCatalogImage) throw new Error('当前程序无法保存所选图片。');
@@ -1988,6 +2461,10 @@ class QueueManager extends EventEmitter {
   }
 
   async addTagsToCatalogRecords(recordIds, inputTags) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.addTagsToCatalogRecords(recordIds, inputTags));
+    }
+    this.assertCatalogRecordsNotQueued(recordIds);
     const ids = new Set(recordIds || []);
     if (ids.size === 0) throw new Error('请先选择仓库内容。');
     const newTags = normalizeTagsInput(inputTags);
@@ -2012,6 +2489,10 @@ class QueueManager extends EventEmitter {
   }
 
   async updateBackupLocationForCatalogRecords(recordIds, inputLocation) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.updateBackupLocationForCatalogRecords(recordIds, inputLocation));
+    }
+    this.assertCatalogRecordsNotQueued(recordIds);
     const ids = new Set(recordIds || []);
     if (ids.size === 0) throw new Error('请先选择仓库内容。');
     const backupLocation = String(inputLocation ?? '').trim();
@@ -2054,24 +2535,24 @@ class QueueManager extends EventEmitter {
         await fs.rename(movedPath, originalPath);
       } catch (error) {
         if (error.code !== 'EXDEV') throw error;
-        const incomingPath = `${originalPath}.restoring-${record.id}`;
+        const snapshot = await scanSourceSnapshot(movedPath, record.sourceType);
+        if (!snapshot.complete) throw new Error('移动位置的源清单不完整，已停止复原。');
+        const incomingRoot = await fs.mkdtemp(path.join(path.dirname(originalPath), '.hamster-restoring-'));
+        const incomingPath = path.join(incomingRoot, path.basename(movedPath));
         try {
           if (record.sourceType === 'directory') {
             await fs.cp(movedPath, incomingPath, { recursive: true, errorOnExist: true, force: false });
-            const restored = await inspectPath(incomingPath, 'directory');
-            if (restored.fileCount !== Number(record.fileCount) || restored.totalBytes !== Number(record.originalBytes)) {
-              throw new Error('跨磁盘复原校验失败，文件数量或大小不一致。');
-            }
           } else {
             await fs.copyFile(movedPath, incomingPath, fsConstants.COPYFILE_EXCL);
-            const restored = await fs.stat(incomingPath);
-            if (restored.size !== Number(record.originalBytes)) throw new Error('跨磁盘复原校验失败，文件大小不一致。');
           }
-          await fs.rename(incomingPath, originalPath);
-          await fs.rm(movedPath, { recursive: record.sourceType === 'directory', force: false });
-        } catch (copyError) {
-          await fs.rm(incomingPath, { recursive: true, force: true }).catch(() => {});
-          throw copyError;
+          assertCopiedSourceStructure(snapshot, await scanSourceSnapshot(incomingPath, record.sourceType));
+          await validateManifestUnchanged(movedPath, record.sourceType, [], undefined, undefined, snapshot);
+          if (await pathExists(originalPath)) throw new Error(`原文件位置已存在同名内容，已停止复原：${originalPath}`);
+          if (record.sourceType === 'directory') await fs.rename(incomingPath, originalPath);
+          else await fs.link(incomingPath, originalPath);
+          record.retainedSourceCopyPath = movedPath;
+        } finally {
+          await fs.rm(incomingRoot, { recursive: true, force: true }).catch(() => {});
         }
       }
     }
@@ -2080,11 +2561,17 @@ class QueueManager extends EventEmitter {
     record.movedTo = '';
     record.sourceLocationCheckedAt = new Date().toISOString();
     record.metadataUpdatedAt = new Date().toISOString();
-    await this.log('warning', `已把原文件复原到：${originalPath}`, record.jobId, false);
+    await this.log('warning', record.retainedSourceCopyPath
+      ? `已把原文件复原到：${originalPath}；移动位置副本保留：${record.retainedSourceCopyPath}`
+      : `已把原文件复原到：${originalPath}`, record.jobId, false);
     return true;
   }
 
   async restoreCatalogSource(recordId) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.restoreCatalogSource(recordId));
+    }
+    this.assertCatalogRecordsNotQueued([recordId]);
     const record = this.catalog.find((candidate) => candidate.id === recordId);
     if (!record) throw new Error('没有找到指定仓库记录。');
     const pathExists = this.services.pathExists || (async (targetPath) => {
@@ -2097,7 +2584,8 @@ class QueueManager extends EventEmitter {
     if (!restored) throw new Error('当前原文件不在可复原状态。');
     await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
     this.emitState();
-    return { record: this.getCatalogDetails(recordId), path: getOriginalSourcePath(record) };
+    return { record: this.getCatalogDetails(recordId), path: getOriginalSourcePath(record),
+      retainedSourceCopyPath: record.retainedSourceCopyPath || '' };
   }
 
   pruneDeletedCatalogMatches(deletedIds) {
@@ -2149,7 +2637,12 @@ class QueueManager extends EventEmitter {
   }
 
   async deleteCatalogRecords(recordIds, options = {}) {
-    return this.runCatalogOperation(() => this.performDeleteCatalogRecords(recordIds, options));
+    // Reserve the intake boundary before any asynchronous catalog work begins.
+    // A concurrent intake must observe either the old record or its completed deletion.
+    this.pendingCatalogOperations += 1;
+    return this.withIntakeAdmission(() =>
+      this.runCatalogOperation(() => this.performDeleteCatalogRecords(recordIds, options))
+    ).finally(() => { this.pendingCatalogOperations -= 1; });
   }
 
   async performDeleteCatalogRecords(recordIds, options = {}) {
@@ -2174,6 +2667,19 @@ class QueueManager extends EventEmitter {
         await this.log('error', `删除仓库内容失败：没有找到记录 ${recordId}。`, null, false);
         continue;
       }
+      const dependentJob = this.jobs.find((job) => isDuplicateCandidateJob(job) &&
+        (job.sourceCatalogRecordId === recordId || job.sourceChangeTargetRecordId === recordId));
+      if (dependentJob) {
+        failures.push({
+          id: recordId,
+          title: record.title,
+          code: 'CATALOG_RECORD_IN_USE',
+          jobId: dependentJob.id,
+          message: '该仓库记录已有未完成的关联任务。请先完成或取消该任务，再删除记录。',
+          messageEn: 'This Warehouse item has an unfinished dependent task. Complete or cancel that task before deleting the item.'
+        });
+        continue;
+      }
       const originalIndex = originalIndexById.get(record.id);
       let archiveRecovery = null;
       const thumbnailRecoveries = [];
@@ -2191,13 +2697,17 @@ class QueueManager extends EventEmitter {
           );
         }
         const thumbnailFolders = [
-          record.jobId,
+          record.importedFrom ? null : record.jobId,
           ...(record.thumbnailOwnerJobIds || []),
-          (record.manualImages || []).length > 0 ? `manual-${record.id}` : null
+          !record.importedFrom && (record.manualImages || []).length > 0 ? `manual-${record.id}` : null
         ].filter(Boolean).filter((value, index, values) => values.indexOf(value) === index);
         for (const thumbnailFolder of thumbnailFolders) {
           const safeFolder = assertSafePathSegment(thumbnailFolder, '缩略图目录');
           const thumbnailPath = assertOwnedChildPath(thumbnailRoot, path.join(thumbnailRoot, safeFolder));
+          if (this.catalog.some((other) => other.id !== recordId && recordThumbnailEntries(other).some((entry) => {
+            const reference = resolveThumbnailReference(this.config.repositoryDirectory, entry.thumbnailPath);
+            return reference && isPathInside(thumbnailPath, reference);
+          }))) continue;
           if (await pathExists(thumbnailPath)) {
             try {
               if (this.services.trashItem) {
@@ -2290,26 +2800,50 @@ class QueueManager extends EventEmitter {
     };
   }
 
-  findSameSourceUncompressedRecords(sourcePath, sourceType = 'directory') {
+  async findSameSourceUncompressedRecords(sourcePath, sourceType = 'directory') {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.findSameSourceUncompressedRecords(sourcePath, sourceType));
+    }
     if (sourceType !== 'directory') return [];
     const sourceKey = normalizeForComparison(sourcePath);
     if (!this.sameSourcePathIndex || this.sameSourcePathIndex.catalog !== this.catalog ||
         this.sameSourcePathIndex.length !== this.catalog.length) {
       const paths = new Map();
+      const byName = new Map();
+      const records = [];
       for (const record of this.catalog) {
         const originalPath = getOriginalSourcePath(record);
-        if (!originalPath) continue;
-        const key = normalizeForComparison(originalPath);
-        const records = paths.get(key) || [];
+        if (!originalPath || record.recordType === 'manual' || record.archiveState !== 'uncompressed' ||
+            record.sourceType !== 'directory') continue;
         records.push(record);
-        paths.set(key, records);
+        const key = normalizeForComparison(originalPath);
+        const pathRecords = paths.get(key) || [];
+        pathRecords.push(record);
+        paths.set(key, pathRecords);
+        const name = path.basename(originalPath).toLowerCase();
+        const sameNamed = byName.get(name) || [];
+        sameNamed.push(record);
+        byName.set(name, sameNamed);
       }
-      this.sameSourcePathIndex = { catalog: this.catalog, length: this.catalog.length, paths };
+      this.sameSourcePathIndex = { catalog: this.catalog, length: this.catalog.length, paths, byName, records };
     }
-    return (this.sameSourcePathIndex.paths.get(sourceKey) || []).filter((record) => record.recordType !== 'manual' &&
-      record.archiveState === 'uncompressed' && record.sourceType === 'directory' &&
-      getOriginalSourcePath(record) && normalizeForComparison(getOriginalSourcePath(record)) === sourceKey)
-      .sort((left, right) => contentUpdatedAt(right) - contentUpdatedAt(left) || String(left.id).localeCompare(String(right.id)));
+    const index = this.sameSourcePathIndex;
+    let candidates = index.paths.get(sourceKey) || [];
+    if (candidates.length === 0) {
+      // Keep alias checks bounded. A small catalog can include renamed junctions;
+      // a large catalog searches same-named records without walking every path.
+      const possibleAliases = index.records.length <= 64
+        ? index.records
+        : (index.byName.get(path.basename(sourcePath).toLowerCase()) || []).slice(0, 64);
+      if (possibleAliases.length === 0) return [];
+      const canonicalSource = normalizeForComparison(await fs.realpath(sourcePath).catch(() => sourcePath));
+      const resolved = await Promise.all(possibleAliases.map(async (record) => {
+        const originalPath = getOriginalSourcePath(record);
+        return [record, normalizeForComparison(await fs.realpath(originalPath).catch(() => originalPath))];
+      }));
+      candidates = resolved.filter(([, key]) => key === canonicalSource).map(([record]) => record);
+    }
+    return candidates.slice().sort((left, right) => contentUpdatedAt(right) - contentUpdatedAt(left) || String(left.id).localeCompare(String(right.id)));
   }
 
   async savePendingSourceSnapshot(jobId, snapshot) {
@@ -2320,7 +2854,7 @@ class QueueManager extends EventEmitter {
     await this.store.savePendingManifest(this.config.repositoryDirectory, jobId, holder);
   }
 
-  async getSourceChangeReport(jobId) {
+  async getSourceChangeReport(jobId, options = null) {
     const job = this.findJob(jobId);
     if (job.status !== 'awaiting_source_change_confirmation' || !job.sourceChangeReport) {
       throw new Error('当前任务没有等待确认的目录变化。');
@@ -2329,8 +2863,37 @@ class QueueManager extends EventEmitter {
     const record = this.catalog.find((candidate) => candidate.id === targetId);
     const pending = await this.store.loadPendingManifest(this.config.repositoryDirectory, job.id);
     const snapshot = pending?.sourceSnapshot;
-    if (!record || !snapshot) throw new Error('目录对比数据已经不可用，请取消任务后重新检查。');
+    if (!record || !snapshot || snapshot.snapshotId !== job.sourceChangeReport.snapshotId ||
+        (job.sourceChangeReport.baselineFingerprint &&
+          sourceBaselineFingerprint(record) !== job.sourceChangeReport.baselineFingerprint)) {
+      throw Object.assign(new Error('目录对比数据已经不可用，请取消任务后重新检查。'), { code: 'STALE_DECISION' });
+    }
     const difference = compareSourceSnapshots(recordSourceSnapshot(record), snapshot);
+    if (options) {
+      const offset = options.offset ?? 0;
+      const limit = options.limit ?? 100;
+      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 500) {
+        throw Object.assign(new Error('Invalid source change pagination.'), { code: 'INVALID_PAGINATION' });
+      }
+      const groups = [
+        ['added_file', difference.addedFiles], ['modified_file', difference.modifiedFiles],
+        ['deleted_file', difference.deletedFiles], ['added_directory', difference.addedDirectories],
+        ['deleted_directory', difference.deletedDirectories]
+      ];
+      const total = groups.reduce((sum, [, entries]) => sum + (entries?.length || 0), 0);
+      const changes = [];
+      let position = 0;
+      for (const [kind, entries] of groups) {
+        for (const entry of entries || []) {
+          if (position >= offset && changes.length < limit) changes.push({ kind,
+            ...(typeof entry === 'string' ? { relativePath: entry } : entry) });
+          position++;
+        }
+      }
+      return { ...structuredClone(job.sourceChangeReport), summary: difference.summary,
+        changes, total, offset, limit, truncated: offset + changes.length < total,
+        nextOffset: offset + changes.length < total ? offset + changes.length : null };
+    }
     return {
       ...structuredClone(job.sourceChangeReport),
       summary: difference.summary || job.sourceChangeReport.summary,
@@ -2342,14 +2905,28 @@ class QueueManager extends EventEmitter {
     };
   }
 
-  async resolveSourceChange(jobId, action) {
+  async resolveSourceChange(jobId, action, options = {}) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      const state = await this.runCatalogOperation(() => this.resolveSourceChange(jobId, action, { ...options, autoStart: false }));
+      if (options.autoStart !== false && action !== 'skip') void this.startQueue([jobId]);
+      return state;
+    }
     const job = this.findJob(jobId);
     if (job.status !== 'awaiting_source_change_confirmation' || !job.sourceChangeReport) {
       throw new Error('当前任务没有等待确认的目录变化。');
     }
     if (!['overwrite', 'new_independent', 'skip'].includes(action)) throw new Error('请选择有效的目录变化处理方式。');
+    const report = job.sourceChangeReport;
+    if (options.revision !== undefined && options.revision !== (report.revision || job.sourceChangeDecisionRevision || 1)) {
+      throw Object.assign(new Error('The decision evidence has changed.'), { code: 'STALE_DECISION' });
+    }
+    // Validate the saved comparison and current target; this never scans source media.
+    await this.getSourceChangeReport(jobId, { offset: 0, limit: 1 });
     if (action === 'skip') {
-      job.status = 'cancelled';
+      job.status = 'skipped_duplicate';
+      job.businessSkipReason = 'source_change';
+      job.automationDuplicatePolicy = 'skip';
+      job.exactProjectMatches = [];
       job.stageText = '已跳过目录变化，仓库与原文件均未修改';
       job.completedAt = new Date().toISOString();
       delete job.sourceChangeDecision;
@@ -2359,9 +2936,11 @@ class QueueManager extends EventEmitter {
       await this.log('info', '用户选择跳过目录变化；仓库记录和原文件均未修改。', job.id);
       return this.getState();
     }
-    const report = job.sourceChangeReport;
     job.sourceChangeDecision = {
       action,
+      revision: report.revision || job.sourceChangeDecisionRevision || 1,
+      baselineFingerprint: report.baselineFingerprint,
+      evidenceFingerprint: report.evidenceFingerprint,
       snapshotId: report.snapshotId,
       baselineUpdatedAt: report.targetRecord?.updatedAt,
       decidedAt: new Date().toISOString()
@@ -2385,10 +2964,6 @@ class QueueManager extends EventEmitter {
     await this.log('warning', action === 'overwrite'
       ? '用户已确认按本地当前内容覆盖原仓库项目。'
       : '用户已确认新建独立项目；原仓库项目保持不变。', job.id);
-    const batchIds = this.jobs.filter((candidate) => (job.taskBatchId ? candidate.taskBatchId === job.taskBatchId : candidate.id === job.id) &&
-      ['queued', 'awaiting_confirmation', 'awaiting_source_change_confirmation'].includes(candidate.status))
-      .map((candidate) => candidate.id);
-    void this.startQueue(batchIds.length > 0 ? batchIds : [job.id]);
     return this.getState();
   }
 
@@ -2428,10 +3003,50 @@ class QueueManager extends EventEmitter {
     return this.getCatalogDetails(record.id);
   }
 
-  async getQueueSimilarityReport(jobId) {
+  async getQueueSimilarityReport(jobId, { summaryOnly = false } = {}) {
     const job = this.jobs.find((candidate) => candidate.id === jobId);
     if (!job) throw new Error('没有找到指定队列项目。');
     if (this.config.similarityReportEnabled === false) throw new Error('队列相似报告已关闭。');
+
+    // Resolve saved queue references against the current catalog before presenting
+    // them: a matching task may have completed since the match was recorded.
+    const catalogReferences = new Map();
+    for (const record of this.catalog) {
+      catalogReferences.set(record.id, record);
+      if (record.jobId) catalogReferences.set(record.jobId, record);
+    }
+    const queueReferences = new Map(this.jobs.filter(isDuplicateCandidateJob).map((candidate) => [candidate.id, candidate]));
+    const catalogSummaries = new Map();
+    const queueSummaries = new Map();
+    const addSummary = (id, reasons, score = 0) => {
+      if (!id || id === job.id) return;
+      const record = catalogReferences.get(id);
+      const candidate = record || queueReferences.get(id);
+      if (!candidate) return;
+      const summaries = record ? catalogSummaries : queueSummaries;
+      const key = candidate.id;
+      if (!summaries.has(key)) summaries.set(key, {
+        id: key, title: candidate.title || candidate.displayName || '',
+        ...(record ? {} : { jobId: key, sourcePath: candidate.sourcePath, sourceType: candidate.sourceType }),
+        score: 0, reasons: []
+      });
+      const summary = summaries.get(key);
+      summary.score = Math.max(summary.score, Number(score) || 0);
+      summary.reasons = [...new Set([...summary.reasons, ...reasons])];
+    };
+    for (const match of job.nameDuplicateMatches || []) addSummary(match.archiveId || match.jobId, ['项目名称完全一致']);
+    for (const match of job.similarMatches || []) addSummary(match.id, match.reasons || [], match.score);
+    for (const match of job.exactProjectMatches || []) addSummary(match.id, ['项目完全重复']);
+    for (const match of job.exactDuplicateMatches || []) {
+      for (const previous of match.previous || []) addSummary(previous.archiveId, ['文件内容完全一致']);
+    }
+    const summaryReport = {
+      jobId: job.id, displayName: job.displayName, sourcePath: job.sourcePath, sourceType: job.sourceType,
+      queueProjects: [...queueSummaries.values()], similarProjects: [...catalogSummaries.values()],
+      detailsAvailable: catalogSummaries.size > 0, detailsLoaded: false
+    };
+    // Queue-only reports use existing task evidence, never source scans or hashes.
+    if (summaryOnly || catalogSummaries.size === 0) return summaryReport;
 
     let manifest = await this.store.loadPendingManifest(this.config.repositoryDirectory, job.id);
     const completedRecord = this.catalog.find((record) => record.jobId === job.id);
@@ -2456,13 +3071,7 @@ class QueueManager extends EventEmitter {
       ? completedRecord.directories
       : await collectDirectories(job.sourcePath, job.sourceType);
     const subject = { ...job, manifest, directories };
-    const linkedIds = new Set([
-      ...(job.nameDuplicateMatches || []).map((match) => match.archiveId),
-      ...(job.similarMatches || []).map((match) => match.id),
-      ...(job.exactProjectMatches || []).map((match) => match.id),
-      ...(job.exactDuplicateMatches || []).flatMap((match) =>
-        (match.previous || []).map((previous) => previous.archiveId))
-    ].filter(Boolean));
+    const linkedIds = new Set(catalogSummaries.keys());
     const linkedCandidates = this.catalog.filter((record) => linkedIds.has(record.id));
     const subjectCatalogRecordId = job.sourceCatalogRecordId || completedRecord?.id;
     const indexedExactFileMatches = this.findIndexedExactFileMatches(
@@ -2476,8 +3085,9 @@ class QueueManager extends EventEmitter {
 
     const evidenceByRecord = new Map();
     const ensureEvidence = (recordId) => {
-      const record = this.catalog.find((candidate) => candidate.id === recordId);
+      const record = catalogReferences.get(recordId);
       if (!record) return null;
+      recordId = record.id;
       if (!evidenceByRecord.has(recordId)) {
         evidenceByRecord.set(recordId, {
           id: record.id,
@@ -2493,7 +3103,7 @@ class QueueManager extends EventEmitter {
       return evidenceByRecord.get(recordId);
     };
     for (const match of job.nameDuplicateMatches || []) {
-      const evidence = ensureEvidence(match.archiveId);
+      const evidence = ensureEvidence(match.archiveId || match.jobId);
       evidence?.reasons.add('项目名称完全一致');
     }
     for (const match of job.similarMatches || []) {
@@ -2544,6 +3154,8 @@ class QueueManager extends EventEmitter {
       right.exactFileCount - left.exactFileCount || right.score - left.score || left.title.localeCompare(right.title, 'zh-CN'));
 
     return {
+      ...summaryReport,
+      detailsLoaded: true,
       jobId: job.id,
       displayName: job.displayName,
       sourcePath: job.sourcePath,
@@ -2571,25 +3183,25 @@ class QueueManager extends EventEmitter {
   }
 
   emitProgressThrottled(job, delayMs = 250) {
-    this.pendingProgress = {
+    this.pendingProgress.set(job.id, {
       jobId: job.id,
       stage: job.status,
-      percentage: Math.max(0, Math.min(100, Math.round(Number(job.progress) || 0)))
-    };
+      percentage: Math.max(0, Math.min(100, Math.round(Number(job.progress) || 0))),
+      stageText: String(job.stageText || '').slice(0, 300)
+    });
     if (this.progressEmissionTimer) return;
     this.progressEmissionTimer = setTimeout(() => {
       this.progressEmissionTimer = null;
-      const progress = this.pendingProgress;
-      this.pendingProgress = null;
-      if (progress) this.emit('progress', progress);
+      const progressEvents = [...this.pendingProgress.values()];
+      this.pendingProgress.clear();
+      for (const progress of progressEvents) this.emit('progress', progress);
     }, delayMs);
     this.progressEmissionTimer.unref?.();
   }
 
   discardPendingProgress(jobId) {
-    if (this.pendingProgress?.jobId !== jobId) return;
-    this.pendingProgress = null;
-    if (this.progressEmissionTimer) {
+    this.pendingProgress.delete(jobId);
+    if (this.pendingProgress.size === 0 && this.progressEmissionTimer) {
       clearTimeout(this.progressEmissionTimer);
       this.progressEmissionTimer = null;
     }
@@ -2623,6 +3235,9 @@ class QueueManager extends EventEmitter {
   }
 
   async updateConfig(config, context = {}) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.updateConfig(config, context));
+    }
     if (this.running) throw new Error('队列运行期间不能修改设置。');
     const previousConfig = structuredClone(this.config);
     const backupLocation = String(config.backupLocation ?? this.config.backupLocation ?? '').trim();
@@ -2654,8 +3269,11 @@ class QueueManager extends EventEmitter {
     const archiveVolumeBytes = Number(config.archiveVolumeBytes ?? this.config.archiveVolumeBytes ?? LARGE_TASK_BYTES);
     if (!Number.isInteger(archiveVolumeBytes) ||
         archiveVolumeBytes < MIN_ARCHIVE_VOLUME_BYTES || archiveVolumeBytes > MAX_ARCHIVE_VOLUME_BYTES) {
-      throw new Error('单卷大小必须是 64 MiB—10 GiB 之间的整数。');
+      throw new Error('单卷大小必须是 64 MiB—100 GiB 之间的整数。');
     }
+    const archiveVolumeConfirmation = Object.prototype.hasOwnProperty.call(config, 'archiveVolumeConfirmation')
+      ? config.archiveVolumeConfirmation !== false
+      : this.config.archiveVolumeConfirmation !== false;
     const smallItemFilter = Object.prototype.hasOwnProperty.call(config, 'smallItemFilter')
       ? config.smallItemFilter === true
       : this.config.smallItemFilter === true;
@@ -2709,6 +3327,10 @@ class QueueManager extends EventEmitter {
     if (config.scheduleEnabled && (!validTime(scheduleStart) || !validTime(scheduleEnd) || scheduleStart === scheduleEnd)) {
       throw new Error('定时运行需要填写不同的开始和结束时间。');
     }
+    const queueConcurrency = Number(config.queueConcurrency ?? this.config.queueConcurrency ?? 1);
+    if (!Number.isInteger(queueConcurrency) || queueConcurrency < MIN_QUEUE_CONCURRENCY || queueConcurrency > MAX_QUEUE_CONCURRENCY) {
+      throw new Error('同时执行任务数只能选择 1、2 或 3。');
+    }
     const archiveNamingMode = String(config.archiveNamingMode ?? this.config.archiveNamingMode ?? 'timestamp_random');
     if (!['timestamp_random', 'original', 'custom_random'].includes(archiveNamingMode)) {
       throw new Error('请选择有效的压缩包命名方式。');
@@ -2728,6 +3350,9 @@ class QueueManager extends EventEmitter {
       : Boolean(config.similarityEnabled);
     const moveCompleted = Boolean(config.moveCompleted);
     const autoTrashCompleted = Boolean(config.autoTrashCompleted);
+    if (process.platform === 'darwin' && autoTrashCompleted) {
+      throw new Error('macOS 版本暂不支持可验证恢复的废纸篓操作，请保留或移动源文件。');
+    }
     if (moveCompleted && autoTrashCompleted) throw new Error('归档后移动与移入回收站不能同时启用。');
     if (this.safetyHalt && autoTrashCompleted) {
       throw new Error('请先确认回收站安全警告，再决定是否重新启用自动移入回收站。');
@@ -2767,6 +3392,7 @@ class QueueManager extends EventEmitter {
       compressionLevel,
       archiveVolumeEnabled,
       archiveVolumeBytes,
+      archiveVolumeConfirmation,
       smallItemFilter,
       largeFolderSimplification,
       largeFolderFileThreshold,
@@ -2780,6 +3406,7 @@ class QueueManager extends EventEmitter {
       minimumTaskBytes: Number.isFinite(minimumTaskBytes) ? minimumTaskBytes : 100 * MIB,
       scheduleStart,
       scheduleEnd,
+      queueConcurrency,
       archiveNamingMode,
       customArchiveName,
       similarityStrength,
@@ -2821,6 +3448,15 @@ class QueueManager extends EventEmitter {
       this.undoStack = [];
       await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
     }
+    if ((previousConfig.archiveVolumeConfirmation !== false) !== archiveVolumeConfirmation) {
+      for (const job of this.jobs) {
+        if (job.applicationTaskId || job.automationRuntimeOptions || job.runBatchId ||
+            !['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation', 'failed', 'cancelled'].includes(job.status)) continue;
+        job.archiveVolumeConfirmation = archiveVolumeConfirmation;
+        this.refreshVolumeConfirmation(job);
+      }
+      await this.persistJobs();
+    }
     const changedLabels = changedConfigLabels(previousConfig, this.config);
     if (changedLabels.length > 0) {
       await this.log('info', `设置已保存；变更：${changedLabels.join('、')}。`, null, false);
@@ -2829,13 +3465,16 @@ class QueueManager extends EventEmitter {
     return this.getState();
   }
 
-  async skipExactDuplicateJob(job, projectMatches, manifest = null) {
+  async skipExactDuplicateJob(job, projectMatches, manifest = null, { explicit = false } = {}) {
     const matches = (projectMatches || []).slice(0, 20);
     const matchedTitles = matches.map((match) => match.title || match.displayName).filter(Boolean);
-    const removeFromQueue = this.config.autoSkipExactDuplicateAction === 'remove';
+    const removeFromQueue = (job.automationRuntimeOptions?.autoSkipExactDuplicateAction ??
+      this.config.autoSkipExactDuplicateAction) === 'remove';
     Object.assign(job, {
       status: 'skipped_duplicate',
-      stageText: '与仓库内项目完全一致，已自动跳过',
+      stageText: explicit ? '已按本次选择跳过，源文件和仓库未修改'
+        : job.automationDuplicatePolicy === 'use_existing' ? '已复用核验一致的已有记录，未新建项目'
+          : '与仓库内项目完全一致，已自动跳过',
       progress: 100,
       exactProjectMatches: matches,
       automaticDuplicateCheckPending: false,
@@ -2848,33 +3487,79 @@ class QueueManager extends EventEmitter {
     else if (Array.isArray(manifest)) {
       await this.store.savePendingManifest(this.config.repositoryDirectory, job.id, manifest);
     }
-    if (this.config.archiveStagingDirectory) {
-      await fs.rm(path.join(this.config.archiveStagingDirectory, job.id), { recursive: true, force: true });
+    const stagingDirectory = job.archiveStagingDirectory || this.config.archiveStagingDirectory;
+    if (stagingDirectory) {
+      await fs.rm(path.join(stagingDirectory, job.id), { recursive: true, force: true });
     }
+    // Capture the terminal job and its match evidence before the visible row goes away.
+    await this.refreshAutomationRequests();
     if (removeFromQueue) this.jobs = this.jobs.filter((candidate) => candidate.id !== job.id);
     await this.persistJobs();
     const targetSummary = matchedTitles.length > 0 ? `：${matchedTitles.join('、')}` : '';
-    await this.log('info', `自动跳过项目完全重复的任务“${job.displayName}”${targetSummary}；源文件和仓库均未修改，${removeFromQueue ? '队列项已删除' : '队列项已保留'}。`, job.id);
+    const action = explicit ? '按本次选择跳过任务' : job.automationDuplicatePolicy === 'use_existing'
+      ? '复用核验一致的已有记录' : '自动跳过项目完全重复的任务';
+    await this.log('info', `${action}“${job.displayName}”${targetSummary}；源文件和仓库均未修改，${removeFromQueue ? '队列项已删除' : '队列项已保留'}。`, job.id);
   }
 
-  async verifyExactProjectMatches(job, manifest) {
+  async verifyExactProjectMatches(job, manifest, runContext = this.activeRuns.get(job.id)) {
     const exclusions = duplicateExclusionIds(job);
-    const directCandidates = this.findIndexedProjectCandidates(manifest, 'content', exclusions);
+    const { directCandidates, shapeCandidates } = await this.runCatalogOperation(() => ({
+      directCandidates: this.findIndexedProjectCandidates(manifest, 'content', exclusions),
+      shapeCandidates: this.findIndexedProjectCandidates(manifest, 'shape', exclusions)
+    }));
     const directMatches = findExactProjectMatches(manifest, directCandidates, '');
     if (directMatches.length > 0) return { manifest, matches: directMatches, verificationIncomplete: false };
-    const shapeCandidates = this.findIndexedProjectCandidates(manifest, 'shape', exclusions);
     if (shapeCandidates.length === 0) return { manifest, matches: [], verificationIncomplete: false };
-    let verificationManifest = manifest;
-    const completeShapeCandidates = shapeCandidates.filter((record) => hasCompleteMd5Manifest(record.manifest));
-    if (!hasCompleteMd5Manifest(verificationManifest) && completeShapeCandidates.length > 0) {
-      const candidateResult = await verifyManifestMd5AgainstCompleteCandidates(
-        job.sourcePath,
-        job.sourceType,
-        verificationManifest,
-        completeShapeCandidates,
-        {
-          signal: this.abortController?.signal,
-          pauseController: this.pauseController,
+    const compatibleCandidates = shapeCandidates.filter((record) =>
+      manifestCompatibleWithKnownMd5(manifest, record.manifest));
+    const completeCandidates = compatibleCandidates.filter((record) => hasCompleteMd5Manifest(record.manifest));
+    const partialCandidates = compatibleCandidates.filter((record) => !hasCompleteMd5Manifest(record.manifest));
+    const checkedPartialCandidates = partialCandidates.slice(0, 64);
+    const pathStates = new Map(checkedPartialCandidates.map((record) =>
+      [record, { different: [], same: 0, unknown: 0 }]));
+    const candidatePaths = checkedPartialCandidates.flatMap((record) => {
+      const paths = [getOriginalSourcePath(record), String(record.sourcePath || '').trim()]
+        .filter(Boolean)
+        .filter((value, index, all) => all.findIndex((other) =>
+          normalizeForComparison(other) === normalizeForComparison(value)) === index);
+      if (paths.length === 0) pathStates.get(record).unknown += 1;
+      return paths.map((candidatePath) => ({ record, candidatePath,
+        originalSourcePath: candidatePath, sourcePath: candidatePath }));
+    });
+    for (let offset = 0; offset < candidatePaths.length; offset += 64) {
+      const batch = candidatePaths.slice(offset, offset + 64);
+      const classification = await classifySourcePathCandidates(batch, job.sourcePath, runContext?.abortController.signal);
+      const different = new Set(classification.different);
+      const same = new Set(classification.same);
+      for (const candidate of batch) {
+        const state = pathStates.get(candidate.record);
+        if (different.has(candidate)) state.different.push(candidate.candidatePath);
+        else if (same.has(candidate)) state.same += 1;
+        else state.unknown += 1;
+      }
+    }
+    const pathVerificationIncomplete = partialCandidates.length > checkedPartialCandidates.length ||
+      [...pathStates.values()].some((state) => state.unknown > 0 ||
+        (state.different.length > 0 && state.same > 0));
+    if (pathVerificationIncomplete) {
+      await this.log('warning', '部分内容一致候选的来源路径暂不可核验，已转为人工复核；不会自动跳过。', job.id);
+    }
+    const eligibleCandidates = [...completeCandidates, ...checkedPartialCandidates.filter((record) =>
+      pathStates.get(record).different.length > 0)];
+    if (eligibleCandidates.length === 0) {
+      return { manifest, matches: [], verificationIncomplete: pathVerificationIncomplete };
+    }
+    let candidateResult;
+    try {
+      candidateResult = await verifyManifestMd5AgainstCompleteCandidates(
+        job.sourcePath, job.sourceType, manifest, eligibleCandidates, {
+          signal: runContext?.abortController.signal,
+          pauseController: runContext?.pauseController,
+          budget: {
+            remainingFiles: manifest.length,
+            remainingBytes: manifest.reduce((sum, file) => sum + Number(file?.size || 0), 0)
+          },
+          getCandidatePaths: (record) => pathStates.get(record)?.different || [],
           onProgress: (progress) => {
             job.stageText = `正在筛选内容完全一致候选：${progress.processedFiles}/${progress.totalFiles} · ${progress.currentFile}`;
             job.progress = progress.percent;
@@ -2882,108 +3567,21 @@ class QueueManager extends EventEmitter {
           }
         }
       );
-      verificationManifest = candidateResult.manifest;
-      const candidateMatches = findExactProjectMatches(
-        verificationManifest,
-        candidateResult.matches,
-        ''
-      );
-      if (candidateMatches.length > 0) {
-        return { manifest: verificationManifest, matches: candidateMatches, verificationIncomplete: false };
-      }
-      if (candidateResult.hashedFiles > 0 && candidateResult.matches.length === 0) {
-        await this.log('info', `内容完全一致候选已提前排除；读取 ${candidateResult.hashedFiles} 个文件后停止完整核验。`, job.id);
-      }
-    }
-
-    const partialShapeCandidates = shapeCandidates.filter((record) =>
-      !hasCompleteMd5Manifest(record.manifest) &&
-      normalizeForComparison(getOriginalSourcePath(record)) !== normalizeForComparison(job.sourcePath) &&
-      manifestCompatibleWithKnownMd5(verificationManifest, record.manifest));
-    if (partialShapeCandidates.length === 0) {
-      return { manifest: verificationManifest, matches: [], verificationIncomplete: false };
-    }
-    try {
-      verificationManifest = hasCompleteMd5Manifest(manifest)
-        ? verificationManifest
-        : await completeManifestMd5(job.sourcePath, job.sourceType, verificationManifest, {
-          signal: this.abortController?.signal,
-          pauseController: this.pauseController,
-          onProgress: (progress) => {
-            job.stageText = `正在核验内容完全一致：${progress.processedFiles}/${progress.totalFiles} · ${progress.currentFile}`;
-            job.progress = progress.percent;
-            this.emitProgressThrottled(job);
-          }
-        });
     } catch (error) {
       if (error instanceof CancelledError || error.code === 'TASK_CANCELLED' || error.code === 'SOURCE_CHANGED') throw error;
       await this.log('warning', `内容完全一致补充核验未完成，继续使用常规重复保护：${error.message}`, job.id);
-      return { manifest, matches: [], verificationIncomplete: false };
+      return { manifest, matches: [], verificationIncomplete: pathVerificationIncomplete };
     }
-
-    const completeCandidates = [];
-    let verificationIncomplete = false;
-    const candidateReadBudget = {
-      remainingFiles: verificationManifest.length,
-      remainingBytes: verificationManifest.reduce((sum, file) => sum + Number(file?.size || 0), 0)
-    };
-    const orderedCandidates = [...partialShapeCandidates].sort((left, right) => {
-      const leftComplete = hasCompleteMd5Manifest(left.manifest) ? 1 : 0;
-      const rightComplete = hasCompleteMd5Manifest(right.manifest) ? 1 : 0;
-      if (leftComplete !== rightComplete) return rightComplete - leftComplete;
-      const md5Count = (record) => (record.manifest || [])
-        .filter((file) => /^[a-f0-9]{32}$/i.test(String(file?.md5 || ''))).length;
-      return md5Count(right) - md5Count(left);
-    });
-    for (const record of orderedCandidates) {
-      if (hasCompleteMd5Manifest(record.manifest)) {
-        completeCandidates.push(record);
-        continue;
-      }
-      const candidatePaths = [];
-      const seenCandidatePaths = new Set();
-      for (const candidatePath of [getOriginalSourcePath(record), String(record.sourcePath || '').trim()].filter(Boolean)) {
-        const candidateKey = normalizeForComparison(candidatePath);
-        if (seenCandidatePaths.has(candidateKey)) continue;
-        seenCandidatePaths.add(candidateKey);
-        candidatePaths.push(candidatePath);
-      }
-      for (const candidatePath of candidatePaths) {
-        if (normalizeForComparison(candidatePath) === normalizeForComparison(job.sourcePath)) continue;
-        try {
-          const result = await verifyManifestMd5AgainstReference(
-            candidatePath,
-            record.sourceType || 'directory',
-            record.manifest,
-            verificationManifest,
-            {
-              signal: this.abortController?.signal,
-              pauseController: this.pauseController,
-              budget: candidateReadBudget
-            }
-          );
-          if (result.budgetExceeded) {
-            verificationIncomplete = true;
-            break;
-          }
-          if (result.matches) {
-            completeCandidates.push({ ...record, manifest: verificationManifest });
-            break;
-          }
-        } catch (error) {
-          if (error instanceof CancelledError || error.code === 'TASK_CANCELLED') throw error;
-          // 旧来源已移动或元数据已变化时继续尝试记录中的其他已知来源。
-        }
-      }
+    if (candidateResult.hashedFiles > 0 && candidateResult.matches.length === 0) {
+      await this.log('info', `内容完全一致候选已提前排除；读取 ${candidateResult.hashedFiles} 个文件后停止完整核验。`, job.id);
     }
-    if (verificationIncomplete) {
+    if (candidateResult.verificationIncomplete) {
       await this.log('warning', '内容完全一致候选核验达到读取预算，未完成的候选已转为人工复核；不会自动跳过。', job.id);
     }
     return {
-      manifest: verificationManifest,
-      matches: findExactProjectMatches(verificationManifest, completeCandidates.filter((record) =>
-        !exclusions.includes(String(record.id))), ''),
-      verificationIncomplete
+      manifest: candidateResult.manifest,
+      matches: findExactProjectMatches(candidateResult.manifest, candidateResult.matches, ''),
+      verificationIncomplete: pathVerificationIncomplete || candidateResult.verificationIncomplete
     };
   }
 
@@ -3050,6 +3648,9 @@ class QueueManager extends EventEmitter {
   }
 
   async exportWarehouseToFile(targetFile) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.exportWarehouseToFile(targetFile));
+    }
     const rawTarget = String(targetFile || '').trim();
     if (!rawTarget) throw new Error('请选择导出文件位置。');
     const targetPath = path.resolve(rawTarget);
@@ -3057,12 +3658,29 @@ class QueueManager extends EventEmitter {
       throw new Error('导出仓库必须保存为 .zip 压缩包。');
     }
     await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    const readTargetIdentity = async () => {
+      try {
+        const stat = await fs.lstat(targetPath, { bigint: true });
+        if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('导出目标必须是普通文件。');
+        return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].map(String).join(':');
+      } catch (error) {
+        if (error.code === 'ENOENT') return null;
+        throw error;
+      }
+    };
+    // The caller has selected this target (including its existing overwrite confirmation).
+    const originalIdentity = await readTargetIdentity();
     await this.store.checkpoint?.(this.config.repositoryDirectory);
 
     const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-warehouse-export-'));
     const exportDir = path.join(tempRoot, 'warehouse');
     await fs.mkdir(exportDir, { recursive: true });
+    let publicationRoot;
+    let published = false;
+    const warnings = [];
     try {
+      publicationRoot = await fs.mkdtemp(path.join(path.dirname(targetPath), '.hamster-export-'));
+      const temporaryZip = path.join(publicationRoot, 'warehouse.zip');
       for (const entry of ['warehouse.sqlite', 'thumbnails']) {
         const sourcePath = path.join(this.config.repositoryDirectory, entry);
         try {
@@ -3077,25 +3695,42 @@ class QueueManager extends EventEmitter {
           errorOnExist: true
         });
       }
-      try {
-        await fs.rm(targetPath, { force: true });
-      } catch {}
       await execFileAsync(this.resolveProgramPath(this.config.sevenZipPath), [
-        'a', '-tzip', targetPath, '*', '-bso0', '-bsp0'
+        'a', '-tzip', temporaryZip, '*', '-bso0', '-bsp0'
       ], {
         cwd: exportDir,
         windowsHide: true,
         maxBuffer: 4 * 1024 * 1024
       });
-      const archiveStat = await fs.stat(targetPath);
+      const archiveStat = await fs.stat(temporaryZip);
       if (archiveStat.size === 0) {
         throw new Error('导出压缩包生成失败，文件为空。');
       }
+      await execFileAsync(this.resolveProgramPath(this.config.sevenZipPath), [
+        't', temporaryZip, '-bso0', '-bsp0'
+      ], { windowsHide: true, maxBuffer: 4 * 1024 * 1024 });
+      if (await readTargetIdentity() !== originalIdentity) {
+        throw new Error('导出目标在操作期间已改变；已有文件已保留，请重新选择目标。');
+      }
+      if (originalIdentity === null) {
+        // Reserve a previously absent name exclusively, including against concurrent creation.
+        await fs.link(temporaryZip, targetPath);
+      } else {
+        // Same-filesystem replacement: failure leaves the old file in place; never delete to retry.
+        await fs.rename(temporaryZip, targetPath);
+      }
+      published = true;
     } finally {
-      await fs.rm(tempRoot, { recursive: true, force: true });
+      for (const ownedRoot of [tempRoot, publicationRoot].filter(Boolean)) {
+        await fs.rm(ownedRoot, { recursive: true, force: true }).catch((error) => {
+          warnings.push(error.message);
+        });
+      }
     }
-    await this.log('warning', `仓库已导出为压缩包：${targetPath}`);
-    return { path: targetPath, state: this.getState() };
+    if (published) {
+      await this.log('warning', `仓库已导出为压缩包：${targetPath}`).catch((error) => warnings.push(error.message));
+    }
+    return { path: targetPath, state: this.getState(), warnings };
   }
 
   async importWarehouseFromArchiveOrDirectory(sourcePath) {
@@ -3103,7 +3738,8 @@ class QueueManager extends EventEmitter {
     const sourceStat = await fs.stat(source);
     let workingDirectory = source;
     let tempRoot = null;
-
+    let result;
+    try {
     if (sourceStat.isFile()) {
       if (!/\.zip$/i.test(source)) {
         throw new Error('外来仓库文件必须是 .zip 压缩包。');
@@ -3142,7 +3778,7 @@ class QueueManager extends EventEmitter {
       tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-warehouse-import-'));
       workingDirectory = path.join(tempRoot, 'snapshot');
       await fs.mkdir(workingDirectory, { recursive: true });
-      for (const entry of ['warehouse.sqlite', 'warehouse.sqlite-wal', 'warehouse.sqlite-shm', 'thumbnails']) {
+      for (const entry of ['warehouse.sqlite', 'warehouse.sqlite-wal', 'warehouse.sqlite-shm']) {
         const sourceEntry = path.join(source, entry);
         try {
           await fs.access(sourceEntry);
@@ -3160,14 +3796,22 @@ class QueueManager extends EventEmitter {
       throw new Error('请选择仓库目录或 .zip 压缩包。');
     }
 
-    try {
-      return await this.importWarehouseFromDirectory(workingDirectory, { importedFrom: source });
+      result = await this.importWarehouseFromDirectory(workingDirectory, { importedFrom: source,
+        thumbnailSourceDirectory: sourceStat.isDirectory() ? source : workingDirectory });
+      return result;
     } finally {
-      if (tempRoot) await fs.rm(tempRoot, { recursive: true, force: true });
+      if (tempRoot) await fs.rm(tempRoot, { recursive: true, force: true }).catch((error) => {
+        if (!result) throw error;
+        result.warnings = [...(result.warnings || []), error.message];
+      });
     }
   }
 
   async importWarehouseFromDirectory(sourceDirectory, options = {}) {
+    if (this.catalogOperationScope.getStore() !== this) {
+      return this.runCatalogOperation(() => this.importWarehouseFromDirectory(sourceDirectory, options));
+    }
+    if (this.running) throw new Error('当前批次执行期间不能导入其他仓库。');
     const source = path.resolve(String(sourceDirectory || '').trim());
     const databasePath = path.join(source, 'warehouse.sqlite');
     try {
@@ -3184,47 +3828,95 @@ class QueueManager extends EventEmitter {
     const importedIds = [];
     const skippedIds = [];
 
-    const sourceThumbnails = path.join(source, 'thumbnails');
-    const targetThumbnails = path.join(this.config.repositoryDirectory, 'thumbnails');
-    try {
-      await fs.access(sourceThumbnails);
-      await fs.cp(sourceThumbnails, targetThumbnails, { recursive: true, force: true });
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-    }
-
+    const additions = [];
     for (const rawRecord of externalCatalog) {
-      const record = normalizeCatalogMetadata(rawRecord);
+      const record = normalizeCatalogMetadata(structuredClone(rawRecord));
       if (currentIds.has(record.id)) {
         skippedIds.push(record.id);
         continue;
       }
-      const relocated = relocateOwnedPaths(record, source, this.config.repositoryDirectory);
-      normalizeThumbnailReferences(relocated, this.config.repositoryDirectory);
+      const relocated = record;
+      relocated.importedFrom = options.importedFrom || source;
       if (relocated.recordType !== 'manual') {
         // 外部仓库的压缩包没有随仓库数据库一起导入，必须保留原始
         // archiveDirectory；删除外部记录时也不会触碰这些外部实体。
         relocated.archiveDirectory = record.archiveDirectory || '';
         relocated.importedFrom = options.importedFrom || source;
       }
-      this.catalog.push(relocated);
+      additions.push(relocated);
       currentIds.add(relocated.id);
       importedIds.push(relocated.id);
     }
 
-    if (importedIds.length > 0) {
-      this.markTermStatisticsDirty();
-      await this.rebuildAllSimilarityRelations();
-      await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
-      await this.log('warning', `已并入外部仓库 ${importedIds.length} 条，跳过 ${skippedIds.length} 条已存在记录。`);
-    } else {
-      await this.log('info', `外部仓库没有可并入的新记录；已存在 ${skippedIds.length} 条。`);
+    let ownedResources;
+    let committed = false;
+    const warnings = [];
+    try {
+      if (additions.length > 0) {
+        const targetThumbnails = path.join(this.config.repositoryDirectory, 'thumbnails');
+        await fs.mkdir(targetThumbnails, { recursive: true });
+        ownedResources = await fs.mkdtemp(path.join(targetThumbnails, 'import-'));
+        const resourceSource = options.thumbnailSourceDirectory || source;
+        const resourceMap = new Map();
+        const importResources = async (value) => {
+          if (!value || typeof value !== 'object') return;
+          for (const [key, entry] of Object.entries(value)) {
+            if (key !== 'thumbnailPath') { await importResources(entry); continue; }
+            if (!entry) continue;
+            let resource;
+            try { resource = resolveThumbnailReference(resourceSource, entry); }
+            catch { value[key] = null; continue; }
+            if (!resourceMap.has(resource)) {
+              let reference = null;
+              try {
+                const stat = await fs.lstat(resource);
+                const resolved = await fs.realpath(resource);
+                const sourceRoot = await fs.realpath(path.join(resourceSource, 'thumbnails'));
+                if (!stat.isFile() || stat.isSymbolicLink() || !isPathInside(sourceRoot, resolved)) {
+                  throw new Error('缩略图引用无效或不属于当前仓库。');
+                }
+                const relative = path.relative(path.join(resourceSource, 'thumbnails'), resource);
+                const target = assertOwnedChildPath(ownedResources, path.join(ownedResources, relative));
+                await fs.mkdir(path.dirname(target), { recursive: true });
+                await fs.copyFile(resource, target, fsConstants.COPYFILE_EXCL);
+                reference = path.relative(targetThumbnails, target).split(path.sep).join('/');
+              } catch (error) {
+                if (error.code !== 'ENOENT') throw error;
+              }
+              resourceMap.set(resource, reference);
+            }
+            value[key] = resourceMap.get(resource);
+          }
+        };
+        await importResources(additions);
+        for (const record of additions) {
+          record.thumbnailOwnerJobIds = recordThumbnailEntries(record).some((entry) => entry.thumbnailPath)
+            ? [path.basename(ownedResources)] : [];
+        }
+        if (![...resourceMap.values()].some(Boolean)) {
+          await fs.rm(ownedResources, { recursive: true, force: true });
+          ownedResources = null;
+        }
+        const candidate = [...structuredClone(this.catalog), ...additions];
+        await this.performSimilarityRebuild({ catalog: candidate, useCatalogSnapshot: true, reportProgress: false });
+        await this.store.saveCatalog(this.config.repositoryDirectory, candidate);
+        committed = true;
+        this.restoreCatalogSnapshot(candidate);
+      }
+    } finally {
+      if (ownedResources && !committed) {
+        await fs.rm(ownedResources, { recursive: true, force: true });
+      }
     }
-    this.emitState();
+    await this.log(importedIds.length ? 'warning' : 'info',
+      `已并入外部仓库 ${importedIds.length} 条，跳过 ${skippedIds.length} 条已存在记录。`)
+      .catch((error) => warnings.push(error.message));
+    try { this.emitState(); } catch (error) { warnings.push(error.message); }
     return {
       state: this.getState(),
       importedCount: importedIds.length,
-      skippedCount: skippedIds.length
+      skippedCount: skippedIds.length,
+      warnings
     };
   }
 
@@ -3272,7 +3964,7 @@ class QueueManager extends EventEmitter {
     await this.store.flushLogs?.();
   }
 
-  async moveCompletedItem(job, destinationRoot) {
+  async moveCompletedItem(job, destinationRoot, options = {}) {
     if (this.services.moveCompletedItem) return this.services.moveCompletedItem(job.sourcePath, destinationRoot, job);
     await fs.mkdir(destinationRoot, { recursive: true });
     const targetPath = assertOwnedChildPath(destinationRoot, path.join(destinationRoot, path.basename(job.sourcePath)));
@@ -3281,6 +3973,9 @@ class QueueManager extends EventEmitter {
       throw new Error(`移动位置已经存在同名项目：${path.basename(targetPath)}`);
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
+    }
+    if (options.archiveVerifiedThisRun !== true) {
+      throw new Error('缺少本次归档最终验收依据；源项目仍保留在原位置。');
     }
     try {
       await fs.rename(job.sourcePath, targetPath);
@@ -3299,51 +3994,77 @@ class QueueManager extends EventEmitter {
         throw error;
       }
     }
-    const incomingPath = `${targetPath}.incoming-${job.id}`;
+    const expectedSnapshot = options.sourceSnapshot;
+    if (!expectedSnapshot?.complete) throw new Error('缺少完整源清单；源项目仍保留在原位置。');
+    const incomingRoot = await fs.mkdtemp(path.join(destinationRoot, '.hamster-incoming-'));
+    const incomingPath = path.join(incomingRoot, path.basename(job.sourcePath));
     try {
       if (job.sourceType === 'directory') {
+        const copyStartedAt = Date.now();
         await fs.cp(job.sourcePath, incomingPath, { recursive: true, errorOnExist: true, force: false });
-        const copied = await inspectPath(incomingPath, 'directory');
-        if (copied.fileCount !== job.fileCount || copied.totalBytes !== job.totalBytes) {
-          throw new Error('跨磁盘移动复核失败，复制后的文件数量或大小不一致。');
-        }
+        performanceTrace.record({ jobId: job.id, stage: 'source-cross-disk-copy',
+          elapsedMs: Date.now() - copyStartedAt, fileCount: job.fileCount, bytes: job.totalBytes });
+        const verificationStartedAt = Date.now();
+        const copied = await scanSourceSnapshot(incomingPath, 'directory');
+        performanceTrace.record({ jobId: job.id, stage: 'source-copy-verification',
+          elapsedMs: Date.now() - verificationStartedAt, fileCount: copied.fileCount, bytes: copied.totalBytes });
+        assertCopiedSourceStructure(expectedSnapshot, copied);
       } else {
+        const copyStartedAt = Date.now();
         await fs.copyFile(job.sourcePath, incomingPath, fsConstants.COPYFILE_EXCL);
-        const copied = await fs.stat(incomingPath);
-        if (copied.size !== job.totalBytes) throw new Error('跨磁盘移动复核失败，视频大小不一致。');
+        performanceTrace.record({ jobId: job.id, stage: 'source-cross-disk-copy',
+          elapsedMs: Date.now() - copyStartedAt, fileCount: 1, bytes: job.totalBytes });
+        const verificationStartedAt = Date.now();
+        const copied = await scanSourceSnapshot(incomingPath, 'video');
+        performanceTrace.record({ jobId: job.id, stage: 'source-copy-verification',
+          elapsedMs: Date.now() - verificationStartedAt, fileCount: 1, bytes: copied.totalBytes });
+        assertCopiedSourceStructure(expectedSnapshot, copied);
       }
-      await fs.rename(incomingPath, targetPath);
+      await validateManifestUnchanged(job.sourcePath, job.sourceType, [], options.signal, undefined, expectedSnapshot);
+      if (await pathExists(targetPath)) throw new Error(`移动位置已经存在同名项目：${path.basename(targetPath)}`);
+      if (job.sourceType === 'directory') await fs.rename(incomingPath, targetPath);
+      else await fs.link(incomingPath, targetPath);
       try {
         await fs.rm(job.sourcePath, { recursive: job.sourceType === 'directory', force: true });
       } catch (cleanupError) {
-        // 目标副本已经完整验收并正式就位，此时不能为了“回滚”而删除唯一完整副本；
+        // Structure checks do not prove byte equality; the verified archive is the recovery source.
         // 返回明确状态，让记录保留两个位置并提示用户手动核对。
         return { path: targetPath, sourceRetained: true, cleanupError: cleanupError.message };
       }
       return { path: targetPath, sourceRetained: false };
-    } catch (error) {
-      await fs.rm(incomingPath, { recursive: true, force: true }).catch(() => {});
-      throw error;
+    } finally {
+      await fs.rm(incomingRoot, { recursive: true, force: true }).catch(() => {});
     }
   }
 
-  async completeSourceDisposition(record, job) {
+  async completeSourceDisposition(record, job, runContext = null) {
+    if (runContext) await this.waitForRunCheckpoint(runContext);
     if (record.completionAction === 'move' || record.completionAction === 'trash') {
+      const evidence = this.archiveVerificationEvidence.get(job);
+      if (!evidence?.verifiedAt || evidence.verifiedAt !== record.verifiedAt ||
+          !isDeepStrictEqual(evidence.archiveFiles, record.archiveFiles) ||
+          (record.skippedFiles || []).length > 0) {
+        throw new Error('缺少本次归档最终验收依据；源项目仍保留在原位置。');
+      }
       if (this.services.validateSourceBeforeDisposition) {
         await this.services.validateSourceBeforeDisposition(job, record);
       } else {
         await validateManifestUnchanged(job.sourcePath, job.sourceType, record.manifest || [], undefined, undefined, record.sourceSnapshot);
       }
     }
+    if (runContext) await this.waitForRunCheckpoint(runContext);
     if (record.completionAction === 'move') {
-      const moveResult = await this.moveCompletedItem(job, record.completionDestination);
+      const moveResult = await this.moveCompletedItem(job, record.completionDestination, {
+        archiveVerifiedThisRun: true, sourceSnapshot: record.sourceSnapshot,
+        signal: runContext?.abortController.signal
+      });
       const movedTo = typeof moveResult === 'string' ? moveResult : moveResult.path;
       const sourceRetained = Boolean(moveResult?.sourceRetained);
       record.sourceDisposition = sourceRetained ? 'moved_source_retained' : 'moved';
       record.movedTo = movedTo;
       record.movedAt = new Date().toISOString();
       if (sourceRetained) {
-        record.sourceActionError = `目标副本已验证，但原位置副本未能删除：${moveResult.cleanupError}`;
+        record.sourceActionError = `移动副本结构已复核，但原位置副本未能删除：${moveResult.cleanupError}`;
         return '已验证入库并复制到完成位置，但原位置副本未能删除，请手动核对';
       }
       delete record.sourceActionError;
@@ -3479,22 +4200,81 @@ class QueueManager extends EventEmitter {
   }
 
   async persistJobs() {
-    await this.store.saveJobs(this.config.repositoryDirectory, this.jobs);
-    await this.refreshAutomationRequests();
+    const operation = this.jobPersistenceTail.catch(() => {}).then(async () => {
+      await this.store.saveJobs(this.config.repositoryDirectory, this.jobs);
+      await this.refreshAutomationRequests();
+    });
+    this.jobPersistenceTail = operation;
+    await operation;
+    this.wakeQueueScheduler();
   }
 
   automationJobSnapshot(job) {
-    return Object.fromEntries([
+    const snapshot = Object.fromEntries([
       'id', 'mcpRequestId', 'applicationTaskId', 'sourcePath', 'displayName', 'processingMode', 'status', 'progress',
       'stageText', 'errorCode', 'errorMessage', 'completedAt', 'archiveDirectory', 'archiveBaseName',
       'sourceDisposition', 'archiveOutputDirectory', 'archiveStagingDirectory',
-      'mcpSourceDisposition', 'mcpProcessedSourceDirectory'
+      'mcpSourceDisposition', 'mcpProcessedSourceDirectory', 'automationStartAuthorized',
+      'automationDuplicatePolicy', 'exactProjectMatches', 'duplicateReviewFingerprint',
+      'duplicateReviewKind', 'duplicateDecisionRevision', 'automationDecisionHistory', 'duplicateMatchEvidence',
+      'duplicateConfirmedManifestFingerprint', 'sourceCatalogRecordId',
+      'taskKind', 'verifiedAt', 'sourceChangeReport', 'sourceDispositionRecovery',
+      'sourceChangeDecisionRevision', 'sourceChangeDecision', 'sourceChangeTargetRecordId', 'businessSkipReason'
     ].map((key) => [key, job?.[key]]));
+    if (job?.status === 'skipped_duplicate') {
+      const match = (job.exactProjectMatches || []).find((candidate) => candidate?.id);
+      if (match) {
+        const record = this.catalog.find((candidate) => candidate.id === match.id);
+        snapshot.existingRecord = { recordId: match.id,
+          archiveState: record?.archiveState || 'unknown',
+          matchReason: match.verification || 'verified_duplicate_rule', sourceActionThisRun: 'none' };
+      }
+    }
+    if (job?.terminalResult) snapshot.terminalResult = job.terminalResult;
+    else if (isTerminalJob(job) && String(job.status).startsWith('completed')) {
+      const record = this.catalog.find((candidate) => candidate.archiveJobId === job.id ||
+        (job.taskKind === 'catalog_refresh' && job.sourceCatalogRecordId === candidate.id));
+      if (record) snapshot.terminalResult = {
+        recordId: record.id,
+        jobId: job.id,
+        mode: record.archiveState === 'uncompressed' ? 'inventory_only' : 'archive',
+        catalogCommitted: true,
+        sourceDisposition: job.sourceDispositionRecovery ? 'unknown' : record.sourceDisposition || 'kept',
+        archiveVerification: record.archiveState === 'uncompressed' ? 'not_applicable'
+          : record.verifiedAt ? 'verified' : 'unknown',
+        archiveState: record.archiveState || 'unknown',
+        action: job.sourceCatalogRecordId || ['catalog_refresh', 'catalog_compress'].includes(job.taskKind)
+          ? 'updated' : 'created',
+        ...(record.archiveDirectory ? { archiveDirectory: record.archiveDirectory } : {}),
+        ...(Array.isArray(record.archiveFiles) ? { archiveFiles: record.archiveFiles.map((file) => file.name || file.path || file) } : {})
+      };
+    }
+    return snapshot;
   }
 
   findAutomationRequest(requestId) {
     return this.automationRequests.find((entry) => entry.requestId === requestId &&
       normalizeForComparison(entry.repositoryDirectory) === normalizeForComparison(this.config.repositoryDirectory)) || null;
+  }
+
+  requestAutomationCancellation(taskId) {
+    this.automationCancellationIntents.add(taskId);
+    for (const job of this.jobs) {
+      if (job.applicationTaskId === taskId) job.automationStartAuthorized = false;
+    }
+  }
+
+  clearAutomationCancellation(taskId) {
+    this.automationCancellationIntents.delete(taskId);
+  }
+
+  async withAutomationLedger(operation) {
+    const previous = this.automationLedgerTail;
+    let release;
+    this.automationLedgerTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try { return await operation(); }
+    finally { release(); }
   }
 
   async recordAutomationRequest({
@@ -3508,13 +4288,33 @@ class QueueManager extends EventEmitter {
     failures = [],
     acceptedAt,
     recoveryRequired = false,
-    asyncError = null
+    asyncError = null,
+    ...metadata
   }) {
+    return this.withAutomationLedger(async () => {
     const now = new Date().toISOString();
     const previous = this.findAutomationRequest(requestId);
+    if (!previous) {
+      const activeCount = this.automationRequests.filter((item) => {
+        const status = taskStatus(item.jobs || [], item);
+        return item.recoveryRequired || !isTerminalTaskStatus(status);
+      }).length;
+      if (activeCount >= 200) {
+        const error = new Error('The active automation task limit has been reached.');
+        error.code = 'ACTIVE_TASK_LIMIT';
+        throw error;
+      }
+    }
     const snapshots = new Map((previous?.jobs || []).map((job) => [job.id, job]));
-    for (const job of jobs) snapshots.set(job.id, this.automationJobSnapshot(job));
+    for (const job of jobs) {
+      const snapshot = this.automationJobSnapshot(job);
+      snapshot.terminalResult = snapshots.get(job.id)?.terminalResult || snapshot.terminalResult;
+      snapshot.existingRecord = snapshots.get(job.id)?.existingRecord || snapshot.existingRecord;
+      snapshots.set(job.id, snapshot);
+    }
     const entry = {
+      ...(previous || {}),
+      ...metadata,
       requestId,
       taskId: taskId || previous?.taskId || requestId,
       fingerprint,
@@ -3529,49 +4329,57 @@ class QueueManager extends EventEmitter {
       jobs: [...snapshots.values()],
       failures: failures.map((failure) => ({ source: failure.source, code: failure.code, message: failure.message })),
       recoveryRequired: recoveryRequired === true,
+      cancellationRequested: this.automationCancellationIntents.has(taskId || previous?.taskId || requestId) ||
+        previous?.cancellationRequested === true || metadata.cancellationRequested === true,
+      cancelFinalized: previous?.cancelFinalized === true || metadata.cancelFinalized === true,
+      cancelled: previous?.cancelled === true || metadata.cancelled === true,
       asyncError: asyncError ? { ...asyncError } : null
     };
-    this.automationRequests = this.automationRequests.filter((item) => item !== previous);
-    this.automationRequests.push(entry);
-    this.automationRequests = this.automationRequests.slice(-200);
-    await this.store.saveAutomationRequests?.(this.automationRequests);
-    return entry;
+    const savedEntry = withTerminalReceipts(this, entry);
+    const next = retainAutomationRequests([...this.automationRequests.filter((item) => item !== previous), savedEntry]);
+    await this.store.saveAutomationRequests?.(next);
+    this.automationRequests = next;
+    return savedEntry;
+    });
   }
 
   async refreshAutomationRequests() {
-    if (!this.automationRequests.length || typeof this.store.saveAutomationRequests !== 'function') return;
-    let changed = false;
-    const repositoryKey = normalizeForComparison(this.config.repositoryDirectory);
-    for (const request of this.automationRequests) {
-      if (normalizeForComparison(request.repositoryDirectory) !== repositoryKey) continue;
-      let requestChanged = false;
-      const currentById = new Map(this.jobs.filter((job) => job.mcpRequestId === request.requestId).map((job) => [job.id, job]));
-      for (let index = 0; index < (request.jobs || []).length; index += 1) {
-        const current = currentById.get(request.jobs[index].id);
-        if (!current) continue;
-        const snapshot = this.automationJobSnapshot(current);
-        if (JSON.stringify(request.jobs[index]) !== JSON.stringify(snapshot)) {
-          request.jobs[index] = snapshot;
-          requestChanged = true;
+    return this.withAutomationLedger(async () => {
+      if (!this.automationRequests.length || typeof this.store.saveAutomationRequests !== 'function') return;
+      let changed = false;
+      const repositoryKey = normalizeForComparison(this.config.repositoryDirectory);
+      const next = this.automationRequests.map((request) => {
+        if (normalizeForComparison(request.repositoryDirectory) !== repositoryKey) return request;
+        const currentById = new Map(this.jobs.filter((job) => job.mcpRequestId === request.requestId)
+          .map((job) => [job.id, job]));
+        const jobs = (request.jobs || []).map((saved) => {
+          const current = currentById.get(saved.id);
+          if (!current) return saved;
+          const snapshot = this.automationJobSnapshot(current);
+          snapshot.terminalResult = saved.terminalResult || snapshot.terminalResult;
+          snapshot.existingRecord = saved.existingRecord || snapshot.existingRecord;
+          return snapshot;
+        });
+        for (const current of currentById.values()) {
+          if (!jobs.some((saved) => saved.id === current.id)) jobs.push(this.automationJobSnapshot(current));
         }
-      }
-      for (const current of currentById.values()) {
-        if (!(request.jobs || []).some((saved) => saved.id === current.id)) {
-          request.jobs ||= [];
-          request.jobs.push(this.automationJobSnapshot(current));
-          requestChanged = true;
-        }
-      }
-      if (requestChanged) {
-        request.updatedAt = new Date().toISOString();
+        const jobIds = jobs.map((job) => job.id);
+        if (JSON.stringify(jobs) === JSON.stringify(request.jobs || []) &&
+            JSON.stringify(jobIds) === JSON.stringify(request.jobIds || [])) return request;
         changed = true;
+        return withTerminalReceipts(this, { ...request, jobs, jobIds, updatedAt: new Date().toISOString() });
+      });
+      if (changed) {
+        await this.store.saveAutomationRequests(next);
+        this.automationRequests = next;
       }
-    }
-    if (changed) await this.store.saveAutomationRequests(this.automationRequests);
+    });
   }
 
   createJob(task) {
     const now = new Date().toISOString();
+    const settings = task.automationRuntimeOptions
+      ? { ...this.config, ...task.automationRuntimeOptions } : this.config;
     const sourceCatalogRecordId = String(task.sourceCatalogRecordId || '');
     this.ensureTermStatistics();
     const normalizedTaskName = normalizeName(task.displayName);
@@ -3617,7 +4425,15 @@ class QueueManager extends EventEmitter {
         ].filter((match, index, items) => items.findIndex((item) => item.id === match.id) === index).slice(0, 20)
       : [];
     const confirmationReasons = [];
-    if (task.taskKind !== 'catalog_refresh' && task.totalBytes > LARGE_TASK_BYTES) confirmationReasons.push('large_task');
+    const volumeSettings = {
+      ...task,
+      archiveVolumeEnabled: settings.archiveVolumeEnabled !== false,
+      archiveVolumeBytes: Number(settings.archiveVolumeBytes ?? LARGE_TASK_BYTES)
+    };
+    const needsVolumeConfirmation = task.taskKind !== 'catalog_refresh' &&
+      task.processingMode !== 'inventory_only' && settings.archiveVolumeConfirmation !== false &&
+      resolveArchiveVolumeBytes(volumeSettings) > 0;
+    if (needsVolumeConfirmation) confirmationReasons.push('large_task');
     if (nameDuplicateMatches.length > 0) confirmationReasons.push('name_match');
     if (similarMatches.some((match) => match.reasons.includes('标题相似'))) confirmationReasons.push('similar_title');
     if (similarMatches.some((match) => match.reasons.includes('视频大小完全一致'))) confirmationReasons.push('same_video_size');
@@ -3630,6 +4446,7 @@ class QueueManager extends EventEmitter {
     return {
       id: crypto.randomUUID(),
       ...task,
+      runBatchId: task.runBatchId || null,
       processingMode: task.processingMode === 'inventory_only'
         ? 'inventory_only'
         : task.processingMode === 'archive_existing' ? 'archive_existing' : 'archive',
@@ -3637,7 +4454,7 @@ class QueueManager extends EventEmitter {
       taskKind,
       duplicatePolicy: task.duplicatePolicy || (taskKind === 'intake' ? 'normal' : 'disabled'),
       sourceCatalogRecordId: sourceCatalogRecordId || null,
-      requiresConfirmation: taskKind !== 'catalog_refresh' && task.totalBytes > LARGE_TASK_BYTES,
+      requiresConfirmation: needsVolumeConfirmation,
       confirmationReasons,
       nameDuplicateMatches,
       similarMatches,
@@ -3654,7 +4471,7 @@ class QueueManager extends EventEmitter {
       progress: 0,
       stageText: blockingConfirmationReasons.length > 0
         ? [
-            task.totalBytes > LARGE_TASK_BYTES ? '超过 10 GiB' : null,
+            needsVolumeConfirmation ? '超过单卷大小' : null,
             similarityNotice || null,
             '等待手动确认'
           ].filter(Boolean).join(' · ')
@@ -3665,19 +4482,21 @@ class QueueManager extends EventEmitter {
                 : taskKind === 'catalog_refresh' ? '等待校对更新'
                   : sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩'
           ].filter(Boolean).join(' · '),
-      archiveBaseName: createConfiguredArchiveName(task.displayName, this.config),
-      archiveFormat: this.config.archiveFormat || '7z',
-      compressionLevel: Number(this.config.compressionLevel ?? 1),
-      archiveVolumeEnabled: this.config.archiveVolumeEnabled !== false,
-      archiveVolumeBytes: Number(this.config.archiveVolumeBytes ?? LARGE_TASK_BYTES),
-      largeFolderSimplification: this.config.largeFolderSimplification === true,
-      largeFolderFileThreshold: Number(this.config.largeFolderFileThreshold ?? DEFAULT_LARGE_FOLDER_FILE_THRESHOLD),
-      largeFolderMd5SampleLimit: Number(this.config.largeFolderMd5SampleLimit ?? DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT),
-      skipTinyMd5Files: this.config.skipTinyMd5Files === true,
-      tinyFileMd5ThresholdBytes: Number(this.config.tinyFileMd5ThresholdBytes ?? DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES),
-      archivePassword: String(this.config.archivePassword || ''),
-      hasPassword: Boolean(this.config.archivePassword),
-      recordArchivePassword: Boolean(this.config.recordArchivePassword),
+      archiveBaseName: createConfiguredArchiveName(task.displayName, settings),
+      archiveFormat: settings.archiveFormat || '7z',
+      compressionLevel: Number(settings.compressionLevel ?? 1),
+      archiveVolumeEnabled: settings.archiveVolumeEnabled !== false,
+      archiveVolumeBytes: Number(settings.archiveVolumeBytes ?? LARGE_TASK_BYTES),
+      archiveVolumeConfirmation: settings.archiveVolumeConfirmation !== false,
+      largeFolderSimplification: settings.largeFolderSimplification === true,
+      largeFolderFileThreshold: Number(settings.largeFolderFileThreshold ?? DEFAULT_LARGE_FOLDER_FILE_THRESHOLD),
+      largeFolderMd5SampleLimit: Number(settings.largeFolderMd5SampleLimit ?? DEFAULT_LARGE_FOLDER_MD5_SAMPLE_LIMIT),
+      skipTinyMd5Files: settings.skipTinyMd5Files === true,
+      tinyFileMd5ThresholdBytes: Number(settings.tinyFileMd5ThresholdBytes ?? DEFAULT_TINY_FILE_MD5_THRESHOLD_BYTES),
+      archivePassword: String(settings.archivePassword || ''),
+      hasPassword: Boolean(settings.archivePassword),
+      recordArchivePassword: Boolean(settings.recordArchivePassword),
+      automationRuntimeOptions: task.automationRuntimeOptions || null,
       archiveFiles: [],
       createdAt: now,
       startedAt: null,
@@ -3687,14 +4506,30 @@ class QueueManager extends EventEmitter {
     };
   }
 
+  async withIntakeAdmission(operation) {
+    if (this.userDataSwitchPending) throw Object.assign(new Error('用户数据切换验证期间不能接收新任务。'), { code: 'USER_DATA_SWITCH_PENDING' });
+    const previous = this.intakeAdmissionTail;
+    let release;
+    this.intakeAdmissionTail = new Promise((resolve) => { release = resolve; });
+    await previous;
+    try { return await operation(); }
+    finally { release(); }
+  }
+
   async scanSource(intakeDirectory = this.config.intakeDirectory, scanToken = '') {
     const runningWhenScanStarted = this.running;
+    return this.withIntakeAdmission(() => this.scanSourceUnlocked(intakeDirectory, scanToken, runningWhenScanStarted));
+  }
+
+  async scanSourceUnlocked(intakeDirectory, scanToken, runningWhenScanStarted) {
     await this.waitForCatalogReady();
+    validateSourceSelection(this.config, intakeDirectory);
+    intakeDirectory = await fs.realpath(intakeDirectory);
     validateSourceSelection(this.config, intakeDirectory);
     await this.log('info', `开始扫描目录：${intakeDirectory}`);
     const result = await scanIntakeDirectory(intakeDirectory, {
-      resolveExistingCandidate: (candidate) => {
-        const records = this.findSameSourceUncompressedRecords(candidate.sourcePath, candidate.sourceType);
+      resolveExistingCandidate: async (candidate) => {
+        const records = await this.findSameSourceUncompressedRecords(candidate.sourcePath, candidate.sourceType);
         const record = records[0];
         return record ? {
           fileCount: Number(record.fileCount) || record.manifest?.length || 0,
@@ -3715,15 +4550,18 @@ class QueueManager extends EventEmitter {
       }
     });
 
-    const existingPaths = new Set(
-      this.jobs
-        .filter((job) => isDuplicateCandidateJob(job) ||
-          ['awaiting_anomaly_confirmation', 'awaiting_trash_safety_confirmation'].includes(job.status))
-        .map((job) => path.resolve(job.sourcePath).toLowerCase())
-    );
-    const added = result.tasks
-      .filter((task) => !existingPaths.has(path.resolve(task.sourcePath).toLowerCase()))
-      .map((task) => deferJobUntilNextRun(this.createJob(task), runningWhenScanStarted || this.running));
+    const existingPaths = new Set(await Promise.all(this.jobs
+      .filter((job) => isDuplicateCandidateJob(job) ||
+        ['awaiting_anomaly_confirmation', 'awaiting_trash_safety_confirmation'].includes(job.status))
+      .map(async (job) => normalizeForComparison(await fs.realpath(job.sourcePath).catch(() => job.sourcePath)))));
+    const added = [];
+    for (const task of result.tasks) {
+      task.sourcePath = await fs.realpath(task.sourcePath).catch(() => task.sourcePath);
+      const sourceKey = normalizeForComparison(task.sourcePath);
+      if (existingPaths.has(sourceKey)) continue;
+      existingPaths.add(sourceKey);
+      added.push(deferJobUntilNextRun(this.createJob(task), runningWhenScanStarted || this.running));
+    }
 
     this.jobs.push(...added);
     this.skippedRootFiles = [
@@ -3750,7 +4588,13 @@ class QueueManager extends EventEmitter {
 
   async addSingle(sourcePath, automation = null) {
     const runningWhenAddStarted = this.running;
+    return this.withIntakeAdmission(() => this.addSingleUnlocked(sourcePath, automation, runningWhenAddStarted));
+  }
+
+  async addSingleUnlocked(sourcePath, automation, runningWhenAddStarted) {
     await this.waitForCatalogReady();
+    validateSourceSelection(this.config, sourcePath);
+    sourcePath = await fs.realpath(sourcePath);
     validateSourceSelection(this.config, sourcePath);
     const stats = await require('node:fs/promises').stat(sourcePath);
     let sourceType;
@@ -3758,10 +4602,23 @@ class QueueManager extends EventEmitter {
     else if (stats.isFile() && isVideoFile(sourcePath)) sourceType = 'video';
     else throw new Error('单项归档当前只支持文件夹或视频文件。');
 
-    const sameSourceRecords = this.findSameSourceUncompressedRecords(sourcePath, sourceType);
+    const rejectDuplicateSource = async () => {
+      const error = new Error('该源路径已经在当前批次、待启动区域或确认列表中。');
+      error.code = 'SOURCE_ALREADY_QUEUED';
+      if (automation) throw error;
+      await this.log('info', `该源路径已在任务列表中，未重复添加：${sourcePath}`);
+      return this.getState();
+    };
+    if (await this.isSourcePathQueued(sourcePath)) return rejectDuplicateSource();
+    const sameSourceRecords = await this.findSameSourceUncompressedRecords(sourcePath, sourceType);
     const targetRecord = sameSourceRecords[0] || null;
     if (targetRecord && this.jobs.some((job) => isDuplicateCandidateJob(job) &&
         (job.sourceCatalogRecordId === targetRecord.id || job.sourceChangeTargetRecordId === targetRecord.id))) {
+      if (automation) {
+        const error = new Error('An active job already owns this catalog item.');
+        error.code = 'CATALOG_RECORD_ALREADY_QUEUED';
+        throw error;
+      }
       return this.getState();
     }
     const summary = targetRecord
@@ -3771,7 +4628,7 @@ class QueueManager extends EventEmitter {
           skippedFiles: [],
           summaryPending: true
         }
-      : await inspectPath(sourcePath, sourceType);
+      : await inspectPath(sourcePath, sourceType, () => {}, { traceStage: 'intake-scan' });
     if (!targetRecord && !automation?.explicit && this.config.smallItemFilter && summary.totalBytes < this.config.minimumTaskBytes) {
       const displayName = path.basename(sourcePath);
       const thresholdMb = Math.round(this.config.minimumTaskBytes / MIB);
@@ -3793,6 +4650,9 @@ class QueueManager extends EventEmitter {
       ...(automation ? {
         mcpRequestId: automation.requestId,
         applicationTaskId: automation.taskId,
+        automationStartAuthorized: automation.startAuthorized !== false,
+        automationDuplicatePolicy: automation.onDuplicate || '',
+        duplicatePolicy: automation.onDuplicate === 'create_new' ? 'disabled' : undefined,
         mcpSourceDisposition: ['keep', 'move', 'trash'].includes(automation.sourceDisposition)
           ? automation.sourceDisposition
           : undefined,
@@ -3801,25 +4661,107 @@ class QueueManager extends EventEmitter {
           : '',
         archiveOutputDirectory: String(automation.archiveOutputDirectory || ''),
         archiveStagingDirectory: String(automation.archiveStagingDirectory || ''),
+        automationRuntimeOptions: automation.automationRuntimeOptions || null,
         processingMode: automation.mode,
         ...(targetRecord ? { taskKind: automation.mode === 'inventory_only' ? 'catalog_refresh' : 'catalog_compress' } : {}),
         intakeModeSelected: true
       } : {})
     }), runningWhenAddStarted || this.running);
+    if (await this.isSourcePathQueued(sourcePath)) return rejectDuplicateSource();
+    // Admission can finish after task cancellation began. Recheck the live
+    // request immediately before making the job visible to the queue scheduler.
+    const owningRequest = automation && this.findAutomationRequest(automation.requestId);
+    if (this.automationCancellationIntents.has(automation?.taskId) ||
+        (owningRequest && owningRequest.taskId === automation.taskId && owningRequest.cancellationRequested === true)) {
+      job.automationStartAuthorized = false;
+    }
     this.jobs.push(job);
     await this.persistJobs();
     await this.log('info', `已添加单项任务：${job.displayName}`, job.id);
     return this.getState();
   }
 
-  async startInventoryOnlyQueue() {
+  refreshVolumeConfirmation(job) {
+    const needsConfirmation = job.processingMode !== 'inventory_only' && job.taskKind !== 'catalog_refresh' &&
+      job.archiveVolumeConfirmation !== false && resolveArchiveVolumeBytes(job) > 0 && !job.confirmedAt;
+    job.confirmationReasons = (job.confirmationReasons || []).filter((reason) => reason !== 'large_task');
+    if (needsConfirmation) job.confirmationReasons.push('large_task');
+    const hasOtherConfirmation = Boolean(job.backupLocationConfirmation) ||
+      job.confirmationReasons.includes('backup_location') ||
+      (job.similarityPreflightBlocking !== false && !job.duplicateConfirmedAt && hasDuplicateConfirmationReason(job));
+    job.requiresConfirmation = needsConfirmation || hasOtherConfirmation;
+    if (!['queued', 'awaiting_confirmation'].includes(job.status)) return;
+    if (job.requiresConfirmation) {
+      job.status = 'awaiting_confirmation';
+      if (!hasOtherConfirmation) job.stageText = '超过单卷大小 · 等待手动确认';
+    } else if (job.status === 'awaiting_confirmation') {
+      job.status = 'queued';
+      job.stageText = !hasSelectedIntakeMode(job) ? '等待选择入库方式'
+        : job.processingMode === 'inventory_only' ? '等待不压缩入库'
+          : job.sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩';
+    }
+  }
+
+  pendingStartCandidates(selectedJobIds, predicate) {
+    const selected = new Set((selectedJobIds || []).map(String).filter(Boolean));
+    const hasSelection = selected.size > 0;
+    return {
+      hasSelection,
+      jobs: this.jobs.filter((job) => (!hasSelection || selected.has(String(job.id))) &&
+        !job.runBatchId &&
+        ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status) &&
+        job.automationStartAuthorized !== false &&
+        predicate(job))
+    };
+  }
+
+  async reportQueueAttention(jobs, message) {
+    await this.log('warning', message);
+    const state = {
+      ...this.getState(),
+      queueStartNotice: message,
+      queueBlockedJobIds: jobs.map((job) => job.id),
+      queueNoticeId: crypto.randomUUID()
+    };
+    this.emit('state', state);
+    return state;
+  }
+
+  async queueStartBlockNotice(selectedJobIds = [], hasSelection = selectedJobIds.length > 0) {
+    if (this.running || this.refreshSubmissionActive) {
+      const active = this.jobs.filter((job) => this.activeRuns.has(job.id));
+      return this.reportQueueAttention(active, active.length > 0
+        ? `当前有 ${active.length} 个任务正在处理，暂时无法启动后续任务；请在归档工作台查看进度。`
+        : '当前批次尚未结束，暂时无法启动后续任务；请在归档工作台查看进度。');
+    }
+    const selected = new Set(selectedJobIds.map(String));
+    const jobs = this.jobs.filter((job) => (!selected.size || selected.has(String(job.id))) &&
+      !isTerminalJob(job) && job.automationStartAuthorized !== false);
+    const safetyJobs = this.jobs.filter((job) => job.status === 'awaiting_trash_safety_confirmation');
+    if (this.safetyHalt || safetyJobs.length > 0) {
+      return this.reportQueueAttention(safetyJobs, '回收站安全警告尚未确认，队列保持停止。');
+    }
+    const manual = jobs.filter((job) => job.status.startsWith('awaiting_'));
+    if (manual.length > 0 && !jobs.some(isRunnableQueuedJob)) {
+      const scope = hasSelection ? '；新项目需勾选后启动' : '';
+      return this.reportQueueAttention(manual,
+        `本次有 ${manual.length} 个项目待手动处理。\n请先确认、继续或取消${scope}。`);
+    }
+    return null;
+  }
+
+  async startInventoryOnlyQueue(selectedJobIds = []) {
     await this.waitForCatalogReady();
-    if (this.running || this.refreshSubmissionActive) throw new Error('队列已经在运行。');
-    const refreshBatchId = this.jobs.find((job) => job.taskBatchId &&
-      ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation', 'awaiting_source_change_confirmation'].includes(job.status))?.taskBatchId;
-    const candidates = this.jobs.filter((job) => (!refreshBatchId || job.taskBatchId === refreshBatchId) && job.taskKind !== 'catalog_compress' &&
-      ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
-    if (candidates.length === 0) throw new Error('任务列表中没有可以直接入库的项目。');
+    if (this.running || this.refreshSubmissionActive) return this.queueStartBlockNotice(selectedJobIds);
+    const selection = this.pendingStartCandidates(selectedJobIds, (job) => job.taskKind !== 'catalog_compress');
+    const candidates = selection.jobs;
+    if (candidates.length === 0) {
+      const blocked = await this.queueStartBlockNotice(selectedJobIds);
+      if (blocked) return blocked;
+      throw new Error(selection.hasSelection
+      ? '当前选择中没有可执行任务。'
+      : '任务列表中没有可以直接入库的项目。');
+    }
     const candidateIds = candidates.map((job) => job.id);
     for (const job of candidates) {
       job.processingMode = 'inventory_only';
@@ -3828,26 +4770,49 @@ class QueueManager extends EventEmitter {
         job.taskKind = 'catalog_refresh';
         job.duplicatePolicy = 'disabled';
       }
+      this.refreshVolumeConfirmation(job);
+      const confirmationText = (job.stageText || '等待手动确认')
+        .replace(/^(?:(?:未压缩直接入库|压缩入库|库内项目压缩) · )+/, '');
       job.stageText = job.status === 'queued'
         ? job.taskKind === 'catalog_refresh' ? '等待校对更新' : '等待不压缩入库'
-        : `未压缩直接入库 · ${job.stageText || '等待手动确认'}`;
+        : `未压缩直接入库 · ${confirmationText}`;
     }
     await this.persistJobs();
+    const blocked = await this.queueStartBlockNotice(candidateIds, selection.hasSelection);
+    if (blocked) return blocked;
     await this.log('warning', `已选择不压缩直接入库，共 ${candidates.length} 个任务；原文件将保留在原位置。`);
     void this.startQueue(candidateIds);
-    return this.getState();
+    const excludedCount = selection.hasSelection ? new Set(selectedJobIds).size - candidates.length : 0;
+    const state = this.getState();
+    return excludedCount > 0
+      ? { ...state, queueStartNotice: `已排除 ${excludedCount} 个不适用于不压缩入库的所选任务。` }
+      : state;
   }
 
-  async startArchiveQueue() {
+  async startArchiveQueue(selectedJobIds = []) {
     await this.waitForCatalogReady();
-    if (this.running || this.refreshSubmissionActive) throw new Error('队列已经在运行。');
-    const refreshJobs = this.jobs.filter((job) => job.taskKind === 'catalog_refresh' &&
+    if (this.running || this.refreshSubmissionActive) return this.queueStartBlockNotice(selectedJobIds);
+    if (!String(this.config.archiveOutputDirectory || '').trim()) {
+      throw Object.assign(new Error('请先选择压缩包存储位置，才能执行压缩入库。'), {
+        code: 'ARCHIVE_OUTPUT_REQUIRED', requiredFields: ['archiveOutputDirectory']
+      });
+    }
+    const selection = this.pendingStartCandidates(selectedJobIds, (job) => job.taskKind !== 'catalog_refresh');
+    const candidates = selection.jobs;
+    const selected = new Set((selectedJobIds || []).map(String));
+    const refreshJobs = this.jobs.filter((job) => job.taskKind === 'catalog_refresh' && !job.runBatchId &&
+      (!selection.hasSelection || selected.has(String(job.id))) &&
       ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation', 'awaiting_source_change_confirmation'].includes(job.status));
-    const candidates = this.jobs.filter((job) => job.taskKind !== 'catalog_refresh' &&
-      ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status));
     if (candidates.length === 0) {
+      const blocked = await this.queueStartBlockNotice(selectedJobIds);
+      if (blocked) return blocked;
+      if (selection.hasSelection) throw new Error('当前选择中没有可执行任务。');
       if (refreshJobs.length > 0) throw new Error('没有可压缩入库的普通任务；“校对更新”任务请使用不压缩入库继续。');
       throw new Error('任务列表中没有可以压缩入库的项目。');
+    }
+    if (process.platform === 'darwin' && candidates.some((job) => job.mcpPreserveSource !== true &&
+        (job.mcpSourceDisposition === 'trash' || (!job.mcpSourceDisposition && this.config.autoTrashCompleted)))) {
+      throw new Error('macOS 版本暂不支持可验证恢复的废纸篓操作，请保留或移动源文件。');
     }
     const candidateIds = candidates.map((job) => job.id);
     for (const job of candidates) {
@@ -3857,18 +4822,33 @@ class QueueManager extends EventEmitter {
         job.duplicatePolicy = 'disabled';
       } else job.processingMode = 'archive';
       job.intakeModeSelected = true;
+      this.refreshVolumeConfirmation(job);
+      const confirmationText = (job.stageText || '等待手动确认')
+        .replace(/^(?:(?:未压缩直接入库|压缩入库|库内项目压缩) · )+/, '');
       job.stageText = job.status === 'queued'
         ? job.sourceCatalogRecordId ? '库内项目压缩 · 等待压缩' : '等待压缩'
-        : `${job.sourceCatalogRecordId ? '库内项目压缩' : '压缩入库'} · ${job.stageText || '等待手动确认'}`;
+        : `${job.sourceCatalogRecordId ? '库内项目压缩' : '压缩入库'} · ${confirmationText}`;
     }
     await this.persistJobs();
+    const blocked = await this.queueStartBlockNotice(candidateIds, selection.hasSelection);
+    if (blocked) return blocked;
     await this.log('info', `已选择压缩入库，共 ${candidates.length} 个任务。`);
     void this.startQueue(candidateIds);
     const state = this.getState();
-    return refreshJobs.length > 0 ? { ...state, archiveStartNotice: '部分“校对更新”任务仅在不压缩入库时有效，本次不会执行。' } : state;
+    const excludedCount = selection.hasSelection ? selected.size - candidates.length : refreshJobs.length;
+    return excludedCount > 0 ? {
+      ...state,
+      queueStartNotice: selection.hasSelection
+        ? `已排除 ${excludedCount} 个不适用于压缩入库的所选任务。`
+        : '部分“校对更新”任务仅在不压缩入库时有效，本次不会执行。'
+    } : state;
   }
 
   async queueCatalogRecordsForCompression(recordIds, options = {}) {
+    return this.withIntakeAdmission(() => this.performQueueCatalogRecordsForCompression(recordIds, options));
+  }
+
+  async performQueueCatalogRecordsForCompression(recordIds, options = {}) {
     const runningWhenAddStarted = this.running;
     const batchId = crypto.randomUUID();
     const ids = [...new Set(recordIds || [])];
@@ -3922,6 +4902,11 @@ class QueueManager extends EventEmitter {
           job.status = 'awaiting_confirmation';
           job.stageText = '备份位置不同，等待逐项确认';
         }
+        if (await this.isSourcePathQueued(sourcePath) || this.jobs.some((candidate) => isDuplicateCandidateJob(candidate) &&
+            catalogRecordIdsForJob(candidate).includes(String(record.id)))) {
+          failures.push({ id: record.id, title: record.title, reason: '已经在任务列表中' });
+          continue;
+        }
         this.jobs.push(job);
         existingCatalogJobs.add(record.id);
         added.push(job);
@@ -3945,15 +4930,15 @@ class QueueManager extends EventEmitter {
     if (this.refreshSubmissionActive) throw new Error('队列正在进行中，请结束后再进行批量更新。');
     this.refreshSubmissionActive = true;
     try {
-      return await this.performQueueCatalogRecordsForRefresh(recordIds);
+      return await this.withIntakeAdmission(() => this.performQueueCatalogRecordsForRefresh(recordIds));
     } finally {
       this.refreshSubmissionActive = false;
     }
   }
 
   async performQueueCatalogRecordsForRefresh(recordIds) {
+    const runningWhenAddStarted = this.running;
     await this.waitForCatalogReady();
-    if (this.running || this.paused) throw new Error('队列正在进行中，请结束后再进行批量更新。');
     const ids = [...new Set(recordIds || [])];
     if (ids.length === 0) throw new Error('请先选择仓库内容。');
     const batchId = crypto.randomUUID();
@@ -3977,7 +4962,7 @@ class QueueManager extends EventEmitter {
       try {
         const stats = await fs.stat(sourcePath);
         if (!stats.isDirectory()) throw new Error('原文件位置不是文件夹');
-        const job = this.createJob({
+        const job = deferJobUntilNextRun(this.createJob({
           sourcePath,
           displayName: record.displayName || path.basename(sourcePath),
           sourceType: 'directory',
@@ -3991,9 +4976,13 @@ class QueueManager extends EventEmitter {
           duplicatePolicy: 'disabled',
           taskBatchId: batchId,
           ignoreScheduleOnce: true,
-          sameSourceRecordIds: this.findSameSourceUncompressedRecords(sourcePath, 'directory').map((item) => item.id)
-        });
-        job.stageText = '等待校对更新';
+          sameSourceRecordIds: (await this.findSameSourceUncompressedRecords(sourcePath, 'directory')).map((item) => item.id)
+        }), runningWhenAddStarted || this.running);
+        if (!job.deferredUntilNextRun) job.stageText = '等待校对更新';
+        if (await this.isSourcePathQueued(sourcePath)) {
+          failures.push({ id: record.id, title: record.title, reason: '相同源路径已经在任务列表中' });
+          continue;
+        }
         this.jobs.push(job);
         activeRecordIds.add(record.id);
         added.push(job);
@@ -4004,13 +4993,18 @@ class QueueManager extends EventEmitter {
     if (added.length === 0 && failures.length === 0) throw new Error('所选内容中没有可更新的未压缩目录项目。');
     await this.persistJobs();
     if (added.length > 0) {
-      await this.log('info', `已建立目录更新批次，共 ${added.length} 项；只执行本批任务。`);
-      this.refreshSubmissionActive = false;
-      void this.startQueue(added.map((job) => job.id));
+      await this.log('info', runningWhenAddStarted || this.running
+        ? `已加入 ${added.length} 个目录更新任务；当前批次结束后可启动。`
+        : `已建立目录更新批次，共 ${added.length} 项；只执行本批任务。`);
+      if (!runningWhenAddStarted && !this.running) {
+        this.refreshSubmissionActive = false;
+        void this.startQueue(added.map((job) => job.id));
+      }
     }
     return {
       state: this.getState(),
       queuedCount: added.length,
+      queuedJobIds: added.map((job) => job.id),
       excludedCount,
       failedCount: failures.length,
       failures
@@ -4021,6 +5015,21 @@ class QueueManager extends EventEmitter {
     const job = this.jobs.find((candidate) => candidate.id === jobId);
     if (!job) throw new Error('没有找到指定任务。');
     return job;
+  }
+
+  async isSourcePathQueued(sourcePath) {
+    const sourceKey = normalizeForComparison(await fs.realpath(sourcePath).catch(() => sourcePath));
+    const activeSources = await Promise.all(this.jobs.filter((job) => isDuplicateCandidateJob(job) && job.sourcePath)
+      .map(async (job) => normalizeForComparison(await fs.realpath(job.sourcePath).catch(() => job.sourcePath))));
+    return activeSources.includes(sourceKey);
+  }
+
+  assertCatalogRecordsNotQueued(recordIds) {
+    const ids = new Set((recordIds || []).filter(Boolean).map(String));
+    if (ids.size === 0) return;
+    const conflict = this.jobs.find((job) => isDuplicateCandidateJob(job) &&
+      catalogRecordIdsForJob(job).some((recordId) => ids.has(recordId)));
+    if (conflict) throw new Error('所选仓库项目已有更新或压缩任务，请先完成或取消该任务。');
   }
 
   async confirmJob(jobId, options = {}) {
@@ -4036,7 +5045,7 @@ class QueueManager extends EventEmitter {
       const needsLargeTaskConfirmation = job.confirmationReasons.includes('large_task') && !job.confirmedAt;
       job.requiresConfirmation = needsLargeTaskConfirmation;
       job.status = needsLargeTaskConfirmation ? 'awaiting_confirmation' : 'queued';
-      job.stageText = needsLargeTaskConfirmation ? '超过 10 GiB · 等待手动确认' : '已确认备份位置，等待库内项目压缩';
+      job.stageText = needsLargeTaskConfirmation ? '超过单卷大小 · 等待手动确认' : '已确认备份位置，等待库内项目压缩';
       await this.persistJobs();
       await this.log('info', `项目“${job.displayName}”已确认备份位置：${job.catalogCompressionBackupLocation}。`, job.id);
       if (options.autoStart !== false && isRunnableQueuedJob(job)) {
@@ -4098,12 +5107,14 @@ class QueueManager extends EventEmitter {
     return this.getState();
   }
 
-  async confirmAllDuplicateJobs() {
-    const jobs = this.jobs.filter((job) =>
+  async confirmAllDuplicateJobs(fixedJobIds = null) {
+    if (this.running) throw new Error('当前批次执行期间不能批量处理重复项。');
+    const selected = Array.isArray(fixedJobIds) ? new Set(fixedJobIds) : null;
+    const jobs = this.jobs.filter((job) => (!selected || selected.has(job.id)) && (
       job.status === 'awaiting_duplicate_confirmation' ||
       (job.similarityPreflightBlocking !== false && job.status === 'awaiting_confirmation' && hasDuplicateConfirmationReason(job)) ||
       (job.status === 'queued' && hasPendingAutomaticDuplicateCheck(job) && !job.exactDuplicateOverrideAt)
-    );
+    ));
     if (jobs.length === 0) return { state: this.getState(), confirmedCount: 0 };
     const now = new Date().toISOString();
     for (const job of jobs) {
@@ -4135,48 +5146,124 @@ class QueueManager extends EventEmitter {
     return { state: this.getState(), confirmedCount: jobs.length };
   }
 
+  async runAnomalyOperation(job, operation) {
+    if (this.anomalyOperations.has(job.id)) throw new Error('该异常归档正在处理中，请等待当前操作完成。');
+    this.anomalyOperations.add(job.id);
+    try {
+      return await operation();
+    } finally {
+      this.anomalyOperations.delete(job.id);
+    }
+  }
+
   async confirmAnomaly(jobId) {
     const job = this.findJob(jobId);
     if (job.status !== 'awaiting_anomaly_confirmation' || !job.pendingCatalogRecord) {
       throw new Error('当前任务没有等待确认的大小异常。');
     }
+    return this.runAnomalyOperation(job, async () => {
     const record = normalizeCatalogMetadata(job.pendingCatalogRecord);
-    const catalogBeforeCommit = structuredClone(this.catalog);
-    const existingIndex = this.catalog.findIndex((candidate) => candidate.id === record.id);
-    this.sameSourcePathIndex = null;
-    if (existingIndex >= 0) this.catalog[existingIndex] = record;
-    else this.catalog.push(record);
-    this.refreshSimilarityForRecord(record);
+    const needsSourceDisposition = ['move_pending', 'trash_pending'].includes(record.sourceDisposition);
+    if (needsSourceDisposition) {
+      const conflict = this.activePathConflict(job, true);
+      if (conflict) throw new Error('源项目或其上级/子级目录正在被其他任务处理，请等待该任务完成后再确认异常归档。');
+      // The check and reservation are synchronous, so the scheduler cannot start an
+      // overlapping source between them.
+      this.sourceReservations.set(job.id, job);
+    }
+    let catalogAccepted = false;
     try {
-      await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
-    } catch (error) {
-      this.restoreCatalogSnapshot(catalogBeforeCommit);
-      throw error;
-    }
-    await this.store.deletePendingManifest(this.config.repositoryDirectory, job.id);
-
-    let status = 'completed';
-    let stageText = '大小异常已人工确认并入库';
-    if (['move_pending', 'trash_pending'].includes(record.sourceDisposition)) {
-      try {
-        stageText = await this.completeSourceDisposition(record, job);
-      } catch (error) {
-        if (['TRASH_NOT_PERFORMED', 'TRASH_VERIFICATION_UNAVAILABLE', 'TRASH_RETENTION_FAILED'].includes(error.code)) {
-          await this.activateTrashSafetyHalt(record, job, error, record.archiveFiles || []);
-          await this.log('error', `回收站安全熔断：${error.message} 自动移入回收站已关闭，后续任务没有启动。`, job.id);
-          return this.getState();
+      await this.runCatalogOperation(async () => {
+        const catalogBeforeCommit = structuredClone(this.catalog);
+        const existingIndex = this.catalog.findIndex((candidate) => candidate.id === record.id);
+        this.sameSourcePathIndex = null;
+        if (existingIndex >= 0) this.catalog[existingIndex] = record;
+        else this.catalog.push(record);
+        const changedRecords = this.refreshSimilarityForRecord(record);
+        try {
+          await this.saveCatalogRecords(changedRecords);
+        } catch (error) {
+          this.restoreCatalogSnapshot(catalogBeforeCommit);
+          throw error;
         }
-        record.sourceDisposition = `${record.completionAction}_failed`;
-        record.sourceActionError = error.message;
-        status = 'completed_cleanup_failed';
-        stageText += '，但源项目后处理失败，原位置已保留';
+      });
+      catalogAccepted = true;
+      await this.store.deletePendingManifest(this.config.repositoryDirectory, job.id);
+
+      let status = 'completed';
+      let stageText = '大小异常已人工确认并入库';
+      if (needsSourceDisposition) {
+        const finalizeAnomalySourceAction = async () => {
+        if (this.stopRequested || this.safetyHalt) {
+          record.sourceDisposition = 'kept';
+          record.sourceActionError = '队列安全停止期间未执行源文件后处理。';
+          stageText = '大小异常已人工确认并入库；源项目保留在原位置';
+          await this.runCatalogOperation(() => this.saveCatalogRecords([record]));
+          return false;
+        }
+        let sourceDispositionCompleted = false;
+        try {
+          await this.updateJob(job, {
+            status: 'moving',
+            stageText: record.completionAction === 'move'
+              ? '正在移动已完成的源项目'
+              : '正在把已完成的源项目移入回收站'
+          });
+          stageText = await this.completeSourceDisposition(record, job);
+          sourceDispositionCompleted = true;
+          await this.runCatalogOperation(() => this.saveCatalogRecords([record]));
+        } catch (error) {
+          if (sourceDispositionCompleted) {
+            const message = `源文件后处理已经执行，但处理结果未能写回仓库：${error.message}。请勿重试归档，并按运行日志核对源文件位置。`;
+            const recovery = {
+              action: record.completionAction,
+              sourceDisposition: record.sourceDisposition,
+              originalSourcePath: job.sourcePath,
+              movedTo: String(record.movedTo || ''),
+              trashedAt: String(record.trashedAt || '')
+            };
+            await this.log('error', message, job.id);
+            await this.log('error', sourceDispositionRecoveryLog(recovery), job.id);
+            delete job.pendingCatalogRecord;
+            await this.updateJob(job, {
+              status: 'completed_cleanup_failed',
+              stageText: '归档已入库，源文件后处理已完成，但仓库状态保存失败；请查看日志且不要重试',
+              progress: 100,
+              completedAt: record.completedAt,
+              errorCode: 'SOURCE_DISPOSITION_COMMIT_FAILED',
+              errorMessage: message,
+              sourceDispositionRecovery: recovery
+            });
+            return true;
+          }
+          if (['TRASH_NOT_PERFORMED', 'TRASH_VERIFICATION_UNAVAILABLE', 'TRASH_RETENTION_FAILED'].includes(error.code)) {
+            await this.activateTrashSafetyHalt(record, job, error, record.archiveFiles || []);
+            await this.log('error', `回收站安全熔断：${error.message} 自动移入回收站已关闭，后续任务没有启动。`, job.id);
+            return true;
+          }
+          record.sourceDisposition = `${record.completionAction}_failed`;
+          record.sourceActionError = error.message;
+          status = 'completed_cleanup_failed';
+          stageText += '，但源项目后处理失败，原位置已保留';
+          await this.runCatalogOperation(() => this.saveCatalogRecords([record]));
+        }
+        return false;
+        };
+        const sourceActionStopped = record.completionAction === 'trash'
+          ? await this.runTrashDisposition(finalizeAnomalySourceAction)
+          : await finalizeAnomalySourceAction();
+        if (sourceActionStopped) return this.getState();
       }
-      await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+      delete job.pendingCatalogRecord;
+      await this.updateJob(job, { status, stageText, progress: 100, completedAt: record.completedAt });
+      await this.log('warning', '用户已核对压缩体积异常，并确认入库。', job.id);
+      return this.getState();
+    } finally {
+      if (needsSourceDisposition) this.sourceReservations.delete(job.id);
+      if (catalogAccepted) this.releaseOutputReservation(job);
+      this.wakeQueueScheduler();
     }
-    delete job.pendingCatalogRecord;
-    await this.updateJob(job, { status, stageText, progress: 100, completedAt: record.completedAt });
-    await this.log('warning', '用户已核对压缩体积异常，并确认入库。', job.id);
-    return this.getState();
+    });
   }
 
   async discardAnomalousArchive(jobId) {
@@ -4184,6 +5271,7 @@ class QueueManager extends EventEmitter {
     if (job.status !== 'awaiting_anomaly_confirmation' || !job.pendingCatalogRecord) {
       throw new Error('当前任务没有可删除的异常成品。');
     }
+    return this.runAnomalyOperation(job, async () => {
     if (!this.services.trashItem) throw new Error('Windows 回收站服务不可用。');
     const record = job.pendingCatalogRecord;
     await quarantineAndTrashArchiveFiles(
@@ -4197,6 +5285,7 @@ class QueueManager extends EventEmitter {
         }
       }
     );
+    this.releaseOutputReservation(job);
     if (record.jobId && !job.sourceCatalogRecordId) {
       const thumbnailPath = assertOwnedChildPath(
         path.join(this.config.repositoryDirectory, 'thumbnails'),
@@ -4221,6 +5310,7 @@ class QueueManager extends EventEmitter {
     });
     await this.log('warning', '用户删除了大小异常成品；源项目未移动、未删除。', job.id);
     return this.getState();
+    });
   }
 
   async activateTrashSafetyHalt(record, job, error, archiveFiles = []) {
@@ -4248,7 +5338,7 @@ class QueueManager extends EventEmitter {
     };
     this.config.pendingTrashSafetyHalt = { ...this.safetyHalt };
     await this.store.saveSettings(this.config);
-    await this.store.saveCatalog(this.config.repositoryDirectory, this.catalog);
+    await this.runCatalogOperation(() => this.saveCatalogRecords([record]));
     await this.updateJob(job, {
       status: 'awaiting_trash_safety_confirmation',
       stageText: sourceStillExists
@@ -4287,11 +5377,26 @@ class QueueManager extends EventEmitter {
 
   async cancelJob(jobId) {
     const job = this.findJob(jobId);
+    if (['awaiting_anomaly_confirmation', 'awaiting_trash_safety_confirmation'].includes(job.status)) {
+      const error = new Error('归档成品正在等待安全核验，请先在桌面处理待确认事项，不能直接取消。');
+      error.code = 'DESKTOP_REVIEW_REQUIRED';
+      throw error;
+    }
+    if (job.status === 'moving') {
+      throw new Error('正在处理源文件，当前阶段不能取消，请等待处理完成。');
+    }
     if (RUNNING_STATUSES.has(job.status)) {
-      await this.pauseController?.resume();
-      this.paused = false;
-      this.abortController?.abort();
+      const run = this.activeRuns.get(job.id);
+      let resumeError = null;
+      try {
+        await run?.pauseController.resume();
+      } catch (error) {
+        resumeError = error;
+      } finally {
+        run?.abortController.abort();
+      }
       job.stageText = '正在安全取消';
+      if (resumeError) await this.log('warning', `恢复暂停进程失败，但取消信号已继续发送：${resumeError.message}`, job.id);
     } else if (['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation', 'awaiting_source_change_confirmation', 'failed'].includes(job.status)) {
       job.status = 'cancelled';
       job.stageText = '已取消';
@@ -4306,16 +5411,26 @@ class QueueManager extends EventEmitter {
   }
 
   async retryJob(jobId) {
+    return this.withIntakeAdmission(() => this.retryJobUnlocked(jobId));
+  }
+
+  async retryJobUnlocked(jobId) {
     if (this.running) throw new Error('请在当前队列结束后重试。');
     const job = this.findJob(jobId);
     if (!['failed', 'cancelled'].includes(job.status)) throw new Error('当前任务不能重试。');
+    const linkedRecordId = job.sourceCatalogRecordId || job.sourceChangeTargetRecordId;
+    if (linkedRecordId && !this.catalog.some((record) => record.id === linkedRecordId)) {
+      throw missingCatalogSourceRecordError();
+    }
     if (!job.applicationTaskId) job.archiveBaseName = createConfiguredArchiveName(job.displayName, this.config);
     job.archiveFiles = [];
     job.progress = 0;
     job.errorCode = null;
     job.errorMessage = null;
     delete job.catalogRecovery;
+    delete job.runBatchId;
     job.exactDuplicateMatches = [];
+    this.refreshVolumeConfirmation(job);
     job.status = job.requiresConfirmation && !job.confirmedAt ? 'awaiting_confirmation' : 'queued';
     job.stageText = job.status === 'queued'
       ? !hasSelectedIntakeMode(job) ? '等待选择入库方式'
@@ -4333,50 +5448,87 @@ class QueueManager extends EventEmitter {
     if (updates.status && !RUNNING_STATUSES.has(updates.status)) this.discardPendingProgress(job.id);
     await this.persistJobs();
     this.emitState();
+    this.wakeQueueScheduler();
+  }
+
+  async waitForRunCheckpoint(runContext) {
+    const signal = runContext.abortController.signal;
+    await runContext.pauseController.waitIfPaused(signal);
+    if (this.stopRequested || signal.aborted) throw new CancelledError();
   }
 
   async pauseCurrent() {
-    if (!this.running || !this.pauseController) throw new Error('当前没有可暂停的任务。');
-    const job = this.jobs.find((candidate) => RUNNING_STATUSES.has(candidate.status));
-    if (!job || !['inventorying', 'compressing', 'verifying'].includes(job.status)) {
-      throw new Error('当前阶段不能暂停，请等待文件移动完成。');
+    if (!this.running || this.activeRuns.size === 0) throw new Error('当前没有可暂停的任务。');
+    if (this.pauseInProgress) throw new Error('暂停操作正在进行中。');
+    if (this.paused) return this.getState();
+    const runs = [...this.activeRuns.values()];
+    if (this.jobs.some((job) => job.status === 'moving')) {
+      throw new Error('当前正在处理已完成的源项目，请等待处理完成后再暂停。');
     }
-    await this.pauseController.pause();
+    this.pauseInProgress = true;
     this.paused = true;
+    this.wakeQueueScheduler();
+    try {
+    const pauseResults = await Promise.allSettled(runs.map((run) => run.pauseController.pause()));
+    const pauseFailure = pauseResults.find((result) => result.status === 'rejected');
+    if (pauseFailure) {
+      const resumeResults = await Promise.allSettled(runs.map((run) => run.pauseController.resume()));
+      const resumeFailure = resumeResults.find((result) => result.status === 'rejected');
+      if (resumeFailure) {
+        this.stopRequested = true;
+        for (const run of runs) run.abortController.abort();
+        await this.log('error', `部分任务暂停失败且无法完整恢复，已取消全部活动任务：${resumeFailure.reason?.message || resumeFailure.reason}`);
+      }
+      this.paused = false;
+      this.wakeQueueScheduler();
+      const error = pauseFailure.reason instanceof Error ? pauseFailure.reason : new Error(String(pauseFailure.reason));
+      throw error;
+    }
     this.schedulePaused = false;
     this.manualPauseScheduleWindowStart = this.scheduleWindow(new Date()).startAt?.getTime() || 0;
-    job.prePauseStageText = job.stageText;
-    job.stageText = `已暂停 · ${job.stageText || ''}`;
+    for (const run of runs) {
+      const job = this.jobs.find((candidate) => candidate.id === run.jobId);
+      if (!job) continue;
+      job.prePauseStageText = job.stageText;
+      job.stageText = `已暂停 · ${job.stageText || ''}`;
+    }
     await this.persistJobs();
-    await this.log('warning', '当前任务已暂停；程序保持打开即可稍后继续。', job.id);
+    await this.log('warning', `当前队列已暂停；${runs.length} 个活动任务会从安全位置继续。`);
     return this.getState();
+    } finally {
+      this.pauseInProgress = false;
+    }
   }
 
   async resumeCurrent() {
-    if (!this.paused || !this.pauseController) return this.getState();
-    const job = this.jobs.find((candidate) => RUNNING_STATUSES.has(candidate.status));
+    if (this.pauseInProgress) throw new Error('暂停操作尚未完成，请稍后继续。');
+    if (!this.paused) return this.getState();
+    const runs = [...this.activeRuns.values()];
     try {
-      await this.pauseController.resume();
+      await Promise.all(runs.map((run) => run.pauseController.resume()));
     } catch (error) {
       this.stopRequested = true;
       this.paused = false;
       this.schedulePaused = false;
-      this.abortController?.abort();
-      await this.log('error', `恢复暂停任务失败，已取消当前任务并停止队列：${error.message}`, job?.id || null);
-      const wrapped = new Error(`恢复任务失败，已安全取消当前任务并停止队列：${error.message}`);
+      for (const run of runs) run.abortController.abort();
+      await this.log('error', `恢复暂停任务失败，已取消活动任务并停止队列：${error.message}`);
+      const wrapped = new Error(`恢复任务失败，已安全取消活动任务并停止队列：${error.message}`);
       wrapped.code = error.code || 'PROCESS_RESUME_FAILED';
       wrapped.cause = error;
       throw wrapped;
     }
     this.paused = false;
     this.schedulePaused = false;
-    if (job) {
+    for (const run of runs) {
+      const job = this.jobs.find((candidate) => candidate.id === run.jobId);
+      if (!job) continue;
       if (job.taskKind === 'catalog_refresh' || job.sourceChangeDecision) job.sourceResumeRevalidationRequested = true;
       job.stageText = job.prePauseStageText || (job.stageText || '').replace(/^已暂停 · /, '');
       delete job.prePauseStageText;
     }
     await this.persistJobs();
-    await this.log('info', '当前任务已继续运行。', job?.id || null);
+    this.wakeQueueScheduler();
+    await this.log('info', '当前队列已继续运行。');
     return this.getState();
   }
 
@@ -4419,20 +5571,25 @@ class QueueManager extends EventEmitter {
 
   async finishNextAndPause() {
     this.pauseAfterCurrent = true;
+    this.pauseAfterCurrentArmed = this.activeRuns.size > 0;
     this.emitState();
-    await this.log('info', this.running ? '当前任务完成后将暂停队列。' : '下一项任务完成后将暂停队列。');
+    await this.log('info', this.running ? '当前活动任务完成后将暂停队列，不再启动新任务。' : '下一批活动任务完成后将暂停队列。');
     if (!this.running) void this.startQueue();
     return this.getState();
   }
 
   async handleScheduleTick(now = new Date()) {
+    if (this.userDataSwitchPending) return this.getState();
     await this.waitForCatalogReady();
     if (!this.config.scheduleEnabled) return this.getState();
     const window = this.scheduleWindow(now);
     const currentPausedJob = this.jobs.find((job) => RUNNING_STATUSES.has(job.status));
     const newScheduleStart = window.active && window.startAt?.getTime() !== this.manualPauseScheduleWindowStart;
     if (window.active) {
-      if (this.running && this.paused && (this.schedulePaused ||
+      if (this.running && this.scheduleWaiting && !this.paused) {
+        this.scheduleWaiting = false;
+        this.wakeQueueScheduler();
+      } else if (this.running && this.paused && (this.schedulePaused ||
           (currentPausedJob?.taskBatchId && currentPausedJob.ignoreScheduleOnce && newScheduleStart))) {
         await this.resumeCurrent();
       } else if (!this.running && this.jobs.some(isRunnableQueuedJob)) {
@@ -4446,8 +5603,10 @@ class QueueManager extends EventEmitter {
         void this.startQueue(jobIds);
       }
     } else if (this.running && !this.paused) {
-      const currentJob = this.jobs.find((job) => RUNNING_STATUSES.has(job.status));
-      if (currentJob?.ignoreScheduleOnce) return this.getState();
+      const activeJobs = [...this.activeRuns.keys()]
+        .map((jobId) => this.jobs.find((job) => job.id === jobId))
+        .filter(Boolean);
+      if (activeJobs.length > 0 && activeJobs.every((job) => job.ignoreScheduleOnce)) return this.getState();
       try {
         await this.pauseCurrent();
         this.schedulePaused = true;
@@ -4460,6 +5619,7 @@ class QueueManager extends EventEmitter {
   }
 
   async removeJobs(jobIds) {
+    if (this.running) throw new Error('当前批次执行期间不能批量移除任务。');
     const ids = new Set(jobIds || []);
     if (ids.size === 0) return this.getState();
     const runningSelected = this.jobs.some((job) => ids.has(job.id) && RUNNING_STATUSES.has(job.status));
@@ -4470,8 +5630,9 @@ class QueueManager extends EventEmitter {
     if (this.jobs.some((job) => ids.has(job.id) && job.status === 'awaiting_trash_safety_confirmation')) {
       throw new Error('回收站安全警告尚未确认，不能直接移除对应任务。');
     }
+    await this.sealAutomationJobsBeforeRemoval(ids);
     for (const jobId of ids) {
-    await this.store.deletePendingManifest(this.config.repositoryDirectory, jobId);
+      await this.store.deletePendingManifest(this.config.repositoryDirectory, jobId);
     }
     const before = this.jobs.length;
     this.jobs = this.jobs.filter((job) => !ids.has(job.id));
@@ -4481,6 +5642,7 @@ class QueueManager extends EventEmitter {
   }
 
   async removePotentialDuplicateJobs() {
+    if (this.running) throw new Error('当前批次执行期间不能处理重复项。');
     const duplicateIds = this.jobs
       .filter((job) => !RUNNING_STATUSES.has(job.status) && job.status !== 'awaiting_anomaly_confirmation')
       .filter((job) => (job.exactDuplicateMatches || []).length === 0 &&
@@ -4495,6 +5657,7 @@ class QueueManager extends EventEmitter {
   }
 
   async removeExactDuplicateJobs() {
+    if (this.running) throw new Error('当前批次执行期间不能处理重复项。');
     const duplicateIds = this.jobs
       .filter((job) => !RUNNING_STATUSES.has(job.status) && job.status !== 'awaiting_anomaly_confirmation')
       .filter((job) => (job.exactDuplicateMatches || []).length > 0 ||
@@ -4506,10 +5669,13 @@ class QueueManager extends EventEmitter {
   }
 
   async clearCompletedJobs() {
+    if (this.running) throw new Error('当前批次执行期间不能清理队列。');
     const ids = this.jobs
-      .filter((job) => String(job.status || '').startsWith('completed'))
+      .filter((job) => (String(job.status || '').startsWith('completed') || job.status === 'skipped_duplicate') &&
+        job.errorCode !== 'SOURCE_DISPOSITION_COMMIT_FAILED')
       .map((job) => job.id);
     if (ids.length === 0) return { state: this.getState(), removedCount: 0 };
+    await this.refreshAutomationRequests();
     for (const jobId of ids) await this.store.deletePendingManifest(this.config.repositoryDirectory, jobId);
     const completedIds = new Set(ids);
     this.jobs = this.jobs.filter((job) => !completedIds.has(job.id));
@@ -4519,10 +5685,12 @@ class QueueManager extends EventEmitter {
   }
 
   async clearCancelledJobs() {
+    if (this.running) throw new Error('当前批次执行期间不能清理队列。');
     const ids = this.jobs
       .filter((job) => job.status === 'cancelled')
       .map((job) => job.id);
     if (ids.length === 0) return { state: this.getState(), removedCount: 0 };
+    await this.refreshAutomationRequests();
     for (const jobId of ids) await this.store.deletePendingManifest(this.config.repositoryDirectory, jobId);
     const cancelledIds = new Set(ids);
     this.jobs = this.jobs.filter((job) => !cancelledIds.has(job.id));
@@ -4532,19 +5700,14 @@ class QueueManager extends EventEmitter {
   }
 
   async clearQueue() {
+    if (this.running) throw new Error('当前批次执行期间不能清理队列；可以取消单个活动任务。');
     this.stopRequested = true;
-    if (this.running) {
-      const idle = new Promise((resolve) => this.once('idle', resolve));
-      try { await this.pauseController?.resume(); } catch { /* 终止进程仍可继续 */ }
-      this.paused = false;
-      this.abortController?.abort();
-      await idle;
-    }
     const protectedStatuses = new Set(['awaiting_anomaly_confirmation', 'awaiting_trash_safety_confirmation']);
     const protectedJobs = this.jobs.filter((job) => protectedStatuses.has(job.status));
     const ids = this.jobs.filter((job) => !protectedStatuses.has(job.status)).map((job) => job.id);
+    await this.sealAutomationJobsBeforeRemoval(new Set(ids));
     for (const jobId of ids) {
-    await this.store.deletePendingManifest(this.config.repositoryDirectory, jobId);
+      await this.store.deletePendingManifest(this.config.repositoryDirectory, jobId);
     }
     this.jobs = protectedJobs;
     await this.persistJobs();
@@ -4555,75 +5718,321 @@ class QueueManager extends EventEmitter {
     return this.getState();
   }
 
+  async sealAutomationJobsBeforeRemoval(ids) {
+    let changed = false;
+    for (const job of this.jobs) {
+      if (!ids.has(job.id) || !job.mcpRequestId || TERMINAL_JOB_STATUSES.has(job.status)) continue;
+      job.status = 'cancelled';
+      job.completedAt = new Date().toISOString();
+      changed = true;
+    }
+    // Both writes must succeed before deleting the only visible job or its manifest.
+    if (changed) await this.persistJobs();
+    else await this.refreshAutomationRequests();
+  }
+
+  wakeQueueScheduler() {
+    if (this.schedulerWake) this.schedulerWake();
+    else this.schedulerWakePending = true;
+  }
+
+  async waitForQueueScheduler({ pollMemory = false } = {}) {
+    if (this.schedulerWakePending) {
+      this.schedulerWakePending = false;
+      return;
+    }
+    let wake;
+    const wakePromise = new Promise((resolve) => { wake = resolve; });
+    this.schedulerWake = wake;
+    const waits = [wakePromise, ...[...this.activeRuns.values()].map((run) => run.promise)];
+    let timer = null;
+    if (pollMemory) waits.push(new Promise((resolve) => { timer = setTimeout(resolve, MEMORY_POLL_INTERVAL_MS); }));
+    try {
+      await Promise.race(waits);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (this.schedulerWake === wake) this.schedulerWake = null;
+    }
+  }
+
+  availableMemoryBytes() {
+    const available = this.services.availableMemoryBytes?.();
+    return Number.isFinite(Number(available)) ? Number(available) : os.freemem();
+  }
+
+  hasMemoryForAnotherRun() {
+    // macOS reports reclaimable cache as used memory. Always allow the first
+    // explicitly started task; retain the guard before starting more in parallel.
+    if (process.platform === 'darwin' && this.activeRuns.size === 0) return true;
+    const required = SYSTEM_MEMORY_RESERVE_BYTES + (this.activeRuns.size + 1) * TASK_MEMORY_RESERVATION_BYTES;
+    return this.availableMemoryBytes() >= required;
+  }
+
+  outputReservationKey(job) {
+    if (job.processingMode === 'inventory_only') return '';
+    const pendingRecord = job.pendingCatalogRecord;
+    const outputDirectory = pendingRecord?.archiveDirectory || job.archiveOutputDirectory || this.config.archiveOutputDirectory;
+    const archiveBaseName = pendingRecord?.archiveBaseName || job.archiveBaseName;
+    return normalizeForComparison(path.join(outputDirectory || '.', archiveBaseName || ''));
+  }
+
+  releaseOutputReservation(job) {
+    const outputKey = this.outputReservationKey(job);
+    if (outputKey) this.outputReservations.delete(outputKey);
+    this.wakeQueueScheduler();
+  }
+
+  jobWriteDirectories(job) {
+    const directories = [];
+    if (job.processingMode !== 'inventory_only') {
+      const output = job.pendingCatalogRecord?.archiveDirectory || job.archiveOutputDirectory || this.config.archiveOutputDirectory;
+      const staging = job.archiveStagingDirectory || (
+        job.archiveOutputDirectory &&
+        normalizeForComparison(job.archiveOutputDirectory) !== normalizeForComparison(this.config.archiveOutputDirectory)
+          ? makeArchiveStagingDirectory(job.archiveOutputDirectory)
+          : this.config.archiveStagingDirectory);
+      if (output) directories.push(output);
+      if (staging) directories.push(staging);
+    }
+    const pendingMove = job.pendingCatalogRecord?.completionAction === 'move';
+    const movesSource = pendingMove || jobChangesSource(job, this.config) &&
+      (job.mcpSourceDisposition === 'move' || (!job.mcpSourceDisposition && this.config.moveCompleted));
+    if (movesSource) {
+      const destination = pendingMove
+        ? job.pendingCatalogRecord.completionDestination
+        : job.mcpProcessedSourceDirectory || this.config.processedSourceDirectory;
+      if (destination) directories.push(destination);
+    }
+    return directories;
+  }
+
+  moveDestinationPath(job) {
+    const pendingMove = job.pendingCatalogRecord?.completionAction === 'move';
+    if (!pendingMove && !jobChangesSource(job, this.config)) return '';
+    const movesSource = pendingMove || job.mcpSourceDisposition === 'move' ||
+      (!job.mcpSourceDisposition && this.config.moveCompleted);
+    if (!movesSource) return '';
+    const directory = pendingMove
+      ? job.pendingCatalogRecord.completionDestination
+      : job.mcpProcessedSourceDirectory || this.config.processedSourceDirectory;
+    return directory ? path.join(directory, path.basename(job.sourcePath)) : '';
+  }
+
+  activePathConflict(job, sourceWillChange = false) {
+    const recordIds = new Set(catalogRecordIdsForJob(job));
+    const conflictsWith = (activeJob, activeSourceReserved = false) => {
+      if (!activeJob || activeJob.id === job.id) return '';
+      if (catalogRecordIdsForJob(activeJob).some((recordId) => recordIds.has(recordId))) return 'catalog';
+      const destination = this.moveDestinationPath(job);
+      const activeDestination = this.moveDestinationPath(activeJob);
+      const canonicalDestination = pathForConflict(destination, true);
+      const canonicalActiveDestination = pathForConflict(activeDestination, true);
+      if (destination && activeDestination && (pathsOverlap(destination, activeDestination) ||
+          (canonicalDestination && canonicalActiveDestination &&
+            pathsOverlap(canonicalDestination, canonicalActiveDestination)))) {
+        return 'move-destination';
+      }
+      const jobSource = pathForConflict(job.sourcePath);
+      const activeSource = pathForConflict(activeJob.sourcePath);
+      const sourceMayChange = sourceWillChange || activeSourceReserved || jobChangesSource(job, this.config) ||
+        jobChangesSource(activeJob, this.config);
+      if (sourceMayChange && (pathsOverlap(job.sourcePath, activeJob.sourcePath) ||
+          !jobSource || !activeSource || pathsOverlap(jobSource, activeSource))) return 'source';
+      const crossWrites = [
+        ...this.jobWriteDirectories(job).map((directory) => [directory, activeJob.sourcePath, activeSource]),
+        ...this.jobWriteDirectories(activeJob).map((directory) => [directory, job.sourcePath, jobSource])
+      ];
+      for (const [directory, sourcePath, canonicalSource] of crossWrites) {
+        if (pathsOverlap(directory, sourcePath)) return 'source-output';
+        const canonicalDirectory = pathForConflict(directory, true);
+        if (canonicalDirectory && canonicalSource && pathsOverlap(canonicalDirectory, canonicalSource)) return 'source-output';
+      }
+      return '';
+    };
+    for (const run of this.activeRuns.values()) {
+      const conflict = conflictsWith(this.jobs.find((candidate) => candidate.id === run.jobId));
+      if (conflict) return conflict;
+    }
+    for (const reservedJob of this.sourceReservations.values()) {
+      const conflict = conflictsWith(reservedJob, true);
+      if (conflict) return conflict;
+    }
+    return '';
+  }
+
+  activeRunConflict(job) {
+    const outputKey = this.outputReservationKey(job);
+    if (outputKey && this.outputReservations.has(outputKey)) return 'output';
+    return this.activePathConflict(job);
+  }
+
+  startActiveRun(job) {
+    const abortController = new AbortController();
+    const pauseController = this.services.createPauseController?.() || new PauseController();
+    const outputKey = this.outputReservationKey(job);
+    const run = { jobId: job.id, abortController, pauseController, outputKey, promise: null };
+    if (outputKey) this.outputReservations.add(outputKey);
+    this.activeRuns.set(job.id, run);
+    run.promise = Promise.resolve()
+      .then(() => this.runOne(job, run))
+      .then(async (runOutcome) => {
+        // A caller may resolve a decision before this completion callback runs.
+        // The run itself ended in a waiting state, so its new queued state is not a stalled run.
+        if (runOutcome && runOutcome !== 'queued') return;
+        if (job.status !== 'queued' || this.stopRequested) return;
+        this.stopRequested = true;
+        await this.updateJob(job, {
+          status: 'failed',
+          stageText: '队列状态异常，已安全停止',
+          progress: 0,
+          errorCode: 'QUEUE_STATE_STALLED',
+          errorMessage: '任务执行结束后仍处于等待状态，为防止重复运行已停止队列。'
+        });
+        await this.log('error', '检测到任务状态没有推进，已停止队列以避免重复执行。', job.id);
+      })
+      .finally(() => {
+        this.activeRuns.delete(job.id);
+        if (outputKey && job.status !== 'awaiting_anomaly_confirmation') this.outputReservations.delete(outputKey);
+        this.memoryWaiting = false;
+        this.emitState();
+        this.wakeQueueScheduler();
+      });
+    this.emitState();
+    return run.promise;
+  }
+
   async startQueue(fixedJobIds = null) {
+    if (this.userDataSwitchPending) throw Object.assign(new Error('用户数据切换验证期间不能启动任务。'), { code: 'USER_DATA_SWITCH_PENDING' });
     if (this.running || this.refreshSubmissionActive) return this.getState();
     if (!Array.isArray(fixedJobIds)) {
-      const batchId = this.jobs.find((job) => isRunnableQueuedJob(job) && job.taskBatchId)?.taskBatchId;
-      if (batchId) fixedJobIds = this.jobs.filter((job) => job.taskBatchId === batchId).map((job) => job.id);
+      const taskBatchId = this.jobs.find((job) => !job.runBatchId && isRunnableQueuedJob(job) && job.taskBatchId)?.taskBatchId;
+      if (taskBatchId) fixedJobIds = this.jobs.filter((job) => !job.runBatchId && job.taskBatchId === taskBatchId).map((job) => job.id);
     }
     if (this.safetyHalt || this.jobs.some((job) => job.status === 'awaiting_trash_safety_confirmation')) {
       await this.log('warning', '回收站安全警告尚未确认，队列保持停止。');
       return this.getState();
     }
     const requestedJobIds = Array.isArray(fixedJobIds) ? new Set(fixedJobIds) : null;
-    const batchJobIds = new Set(this.jobs
-      .filter((job) => requestedJobIds
-        ? requestedJobIds.has(job.id)
-        : ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status) &&
-          hasSelectedIntakeMode(job))
-      .map((job) => job.id));
-    if (batchJobIds.size === 0) return this.getState();
-    for (const job of this.jobs) {
-      if (batchJobIds.has(job.id)) delete job.deferredUntilNextRun;
+    const batchJobs = this.jobs.filter((job) => !job.runBatchId && (requestedJobIds
+      ? requestedJobIds.has(job.id)
+      : ['queued', 'awaiting_confirmation', 'awaiting_duplicate_confirmation'].includes(job.status) && hasSelectedIntakeMode(job)));
+    if (batchJobs.length === 0) return this.getState();
+    if (!batchJobs.some(isRunnableQueuedJob)) {
+      const blocked = await this.queueStartBlockNotice(batchJobs.map((job) => job.id));
+      if (blocked) return blocked;
     }
+    if (process.platform === 'darwin' && batchJobs.some((job) => job.processingMode !== 'inventory_only' &&
+        job.mcpPreserveSource !== true &&
+        (job.mcpSourceDisposition === 'trash' || (!job.mcpSourceDisposition && this.config.autoTrashCompleted)))) {
+      throw new Error('macOS 版本暂不支持可验证恢复的废纸篓操作，请保留或移动源文件。');
+    }
+    const runBatchId = crypto.randomUUID();
+    const batchJobIds = new Set(batchJobs.map((job) => job.id));
+    for (const job of batchJobs) {
+      job.runBatchId = runBatchId;
+      delete job.deferredUntilNextRun;
+    }
+    this.activeBatchId = runBatchId;
     this.running = true;
     this.stopRequested = false;
+    this.memoryWaiting = false;
     await this.persistJobs();
     this.emitState();
-    await this.log('info', '归档队列已启动。');
+    await this.log('info', `归档队列已启动；当前批次 ${batchJobs.length} 项，并发上限 ${normalizeQueueConcurrency(this.config.queueConcurrency)}。`);
 
     try {
       while (!this.stopRequested) {
-        const job = this.jobs.find((candidate) => batchJobIds.has(candidate.id) && isRunnableQueuedJob(candidate));
-        if (!job) break;
-        const scheduleDecision = job.ignoreScheduleOnce
-          ? { allowed: true, remainingMs: 0, estimatedMs: 0 }
-          : this.canStartScheduledJob(job);
-        if (!scheduleDecision.allowed) {
-          this.scheduleWaiting = true;
-          const minutes = Math.max(0, Math.floor(scheduleDecision.remainingMs / 60_000));
-          await this.log('warning', scheduleDecision.remainingMs > 0
-            ? `下一项预计需要 ${Math.ceil(scheduleDecision.estimatedMs / 60_000)} 分钟，剩余 ${minutes} 分钟，本时段不再启动新任务。`
-            : '当前不在定时运行时段；已记录入库方式，队列将在计划开始时间自动运行。');
-          break;
+        if (this.paused) {
+          await this.waitForQueueScheduler();
+          continue;
         }
-        this.scheduleWaiting = false;
-        await this.runOne(job);
-        if (job.status === 'queued' && !this.stopRequested) {
-          this.stopRequested = true;
-          await this.updateJob(job, {
-            status: 'failed',
-            stageText: '队列状态异常，已安全停止',
-            progress: 0,
-            errorCode: 'QUEUE_STATE_STALLED',
-            errorMessage: '任务执行结束后仍处于等待状态，为防止重复运行已停止队列。'
-          });
-          await this.log('error', '检测到任务状态没有推进，已停止队列以避免重复执行。', job.id);
-          break;
+        if (this.pauseAfterCurrent && this.pauseAfterCurrentArmed && this.activeRuns.size === 0) {
+          this.pauseAfterCurrent = false;
+          this.pauseAfterCurrentArmed = false;
+          this.paused = true;
+          await this.log('info', '当前活动任务均已完成，队列现已暂停。');
+          this.emitState();
+          continue;
         }
-        if (this.pauseAfterCurrent) {
-          await this.log('info', '已按要求完成一项，队列现已暂停。');
-          break;
+
+        const concurrency = normalizeQueueConcurrency(this.config.queueConcurrency);
+        let started = false;
+        let scheduleBlocked = false;
+        let conflictBlocked = false;
+        while (!this.stopRequested && !this.paused &&
+            (!this.pauseAfterCurrent || !this.pauseAfterCurrentArmed) && this.activeRuns.size < concurrency) {
+          const candidates = this.jobs.filter((candidate) => batchJobIds.has(candidate.id) && isRunnableQueuedJob(candidate));
+          const job = candidates.find((candidate) => !this.activeRuns.has(candidate.id) && !this.activeRunConflict(candidate));
+          if (!job) {
+            conflictBlocked = candidates.length > 0;
+            break;
+          }
+          const scheduleDecision = job.ignoreScheduleOnce
+            ? { allowed: true, remainingMs: 0, estimatedMs: 0 }
+            : this.canStartScheduledJob(job);
+          if (!scheduleDecision.allowed) {
+            this.scheduleWaiting = true;
+            scheduleBlocked = true;
+            const minutes = Math.max(0, Math.floor(scheduleDecision.remainingMs / 60_000));
+            await this.log('warning', scheduleDecision.remainingMs > 0
+              ? `下一项预计需要 ${Math.ceil(scheduleDecision.estimatedMs / 60_000)} 分钟，剩余 ${minutes} 分钟，本时段不再启动新任务。`
+              : '当前不在定时运行时段；已记录入库方式，队列将在计划开始时间自动运行。');
+            break;
+          }
+          if (!this.hasMemoryForAnotherRun()) {
+            if (!this.memoryWaiting) await this.log('warning', '可用内存不足，暂缓启动其他任务；活动任务继续运行。');
+            this.memoryWaiting = true;
+            this.emitState();
+            break;
+          }
+          this.memoryWaiting = false;
+          this.scheduleWaiting = false;
+          this.startActiveRun(job);
+          started = true;
         }
+        if (this.pauseAfterCurrent && started) this.pauseAfterCurrentArmed = true;
+
+        if (this.activeRuns.size > 0) {
+          await this.waitForQueueScheduler({ pollMemory: this.memoryWaiting });
+          continue;
+        }
+        if (scheduleBlocked) {
+          await this.waitForQueueScheduler();
+          continue;
+        }
+        const remaining = this.jobs.some((job) => batchJobIds.has(job.id) && isRunnableQueuedJob(job));
+        if (remaining && conflictBlocked) {
+          await this.waitForQueueScheduler();
+          continue;
+        }
+        if (remaining && this.memoryWaiting) {
+          await this.waitForQueueScheduler({ pollMemory: true });
+          continue;
+        }
+        if (!started) break;
       }
     } finally {
+      if (this.activeRuns.size > 0) await Promise.allSettled([...this.activeRuns.values()].map((run) => run.promise));
+      for (const job of this.jobs) {
+        if (job.runBatchId === runBatchId && !isTerminalJob(job)) delete job.runBatchId;
+      }
+      await this.persistJobs();
       this.running = false;
-      this.abortController = null;
-      this.pauseController = null;
+      this.activeBatchId = null;
       this.paused = false;
       this.pauseAfterCurrent = false;
+      this.pauseAfterCurrentArmed = false;
+      this.memoryWaiting = false;
+      this.schedulerWake = null;
+      this.schedulerWakePending = false;
       this.emitState();
-      await this.log('info', this.scheduleWaiting ? '队列已进入定时等待。' : '当前可执行任务已经处理完毕。');
+      const manualJobs = this.jobs.filter((job) => batchJobIds.has(job.id) && job.status.startsWith('awaiting_'));
+      if (!this.stopRequested && manualJobs.length > 0 && !this.scheduleWaiting) {
+        await this.reportQueueAttention(manualJobs,
+          `当前批次有 ${manualJobs.length} 个项目待手动处理：\n请到归档工作台确认、继续或取消。`);
+      } else {
+        await this.log('info', this.scheduleWaiting ? '队列已进入定时等待。' : '当前执行批次已经处理完毕。');
+      }
       this.emit('idle');
     }
     return this.getState();
@@ -4633,31 +6042,39 @@ class QueueManager extends EventEmitter {
     if (!this.running) return;
     this.stopRequested = true;
     const idle = new Promise((resolve) => this.once('idle', resolve));
-    try { await this.pauseController?.resume(); } catch { /* 随后强制终止子进程 */ }
+    for (const run of this.activeRuns.values()) {
+      try { await run.pauseController.resume(); } catch { /* 随后终止子进程 */ }
+      run.abortController.abort();
+    }
     this.paused = false;
-    this.abortController?.abort();
+    this.wakeQueueScheduler();
     await idle;
   }
 
-  async prepareExistingSourceOperation(job, referenceRecord, pendingManifest) {
+  async prepareExistingSourceOperation(job, referenceRecord, pendingManifest, runContext) {
     const requiresExistingPreparation = ['catalog_refresh', 'catalog_compress'].includes(job.taskKind) ||
       Boolean(job.sourceChangeDecision);
     if (!requiresExistingPreparation) return { preparedSnapshot: null, reuseManifest: null, difference: null };
+    const originalPath = getOriginalSourcePath(referenceRecord);
+    const samePath = await pathsReferToSameSource(originalPath, job.sourcePath);
     if (!referenceRecord || referenceRecord.archiveState !== 'uncompressed' || referenceRecord.sourceType !== job.sourceType ||
-        normalizeForComparison(getOriginalSourcePath(referenceRecord)) !== normalizeForComparison(job.sourcePath)) {
+        !samePath) {
       throw new Error('原仓库项目或原文件位置已变化，请取消任务后重新操作。');
     }
     const stats = await fs.stat(job.sourcePath);
     if ((job.sourceType === 'directory' && !stats.isDirectory()) || (job.sourceType === 'video' && !stats.isFile())) {
       throw new Error('原文件位置不可用或类型已经变化。请连接对应存储设备，或重新设置原文件位置。');
     }
+    const scanStartedAt = Date.now();
     const snapshot = await scanSourceSnapshot(job.sourcePath, job.sourceType, {
-      signal: this.abortController.signal,
-      pauseController: this.pauseController,
+      signal: runContext.abortController.signal,
+      pauseController: runContext.pauseController,
       onSkippedFile: (item) => {
         job.skippedFiles = [...(job.skippedFiles || []), item].slice(-500);
       }
     });
+    performanceTrace.record({ jobId: job.id, stage: 'source-preparation-scan',
+      elapsedMs: Date.now() - scanStartedAt, fileCount: snapshot.fileCount, bytes: snapshot.totalBytes });
     if (!snapshot.complete) {
       const first = snapshot.errors[0];
       const error = new Error(`目录检查未完成：${first?.relativePath || job.sourcePath}（${first?.code || 'READ_FAILED'}）；原仓库记录未修改。`);
@@ -4670,15 +6087,19 @@ class QueueManager extends EventEmitter {
     job.skippedFiles = [];
     const baseline = recordSourceSnapshot(referenceRecord);
     const difference = compareSourceSnapshots(baseline, snapshot);
+    let confirmationExpired = false;
 
     if (job.sourceChangeDecision) {
       const confirmedSnapshot = pendingManifest?.sourceSnapshot;
       const confirmedDifference = compareSourceSnapshots(confirmedSnapshot, snapshot);
       const confirmationStillValid = confirmedSnapshot?.snapshotId === job.sourceChangeDecision.snapshotId &&
         confirmedDifference.complete && confirmedDifference.comparable && !confirmedDifference.changed &&
+        (!job.sourceChangeDecision.baselineFingerprint ||
+          job.sourceChangeDecision.baselineFingerprint === sourceBaselineFingerprint(referenceRecord)) &&
         (!job.sourceChangeDecision.baselineUpdatedAt || job.sourceChangeDecision.baselineUpdatedAt ===
           (referenceRecord.sourceSnapshotUpdatedAt || referenceRecord.completedAt || referenceRecord.inventoryDate));
       if (!confirmationStillValid) {
+        confirmationExpired = true;
         delete job.sourceChangeDecision;
         delete job.exactDuplicateOverrideAt;
         delete job.duplicateConfirmedManifestFingerprint;
@@ -4693,13 +6114,13 @@ class QueueManager extends EventEmitter {
     }
 
     const decisionConfirmed = Boolean(job.sourceChangeDecision);
-    const needsReview = job.sourceType === 'directory' && (
+    const needsReview = confirmationExpired || job.sourceType === 'directory' && (
       !difference.comparable ||
       (job.taskKind === 'catalog_compress' && difference.changed) ||
       (job.taskKind === 'catalog_refresh' && difference.changed && !difference.onlyAdded)
     );
     if (needsReview && !decisionConfirmed) {
-      const sameSourceRecords = this.findSameSourceUncompressedRecords(job.sourcePath, 'directory')
+      const sameSourceRecords = (await this.findSameSourceUncompressedRecords(job.sourcePath, 'directory'))
         .filter((record) => record.id !== referenceRecord.id);
       const report = sourceChangeReportPayload(job, referenceRecord, snapshot, difference, sameSourceRecords);
       await this.savePendingSourceSnapshot(job.id, snapshot);
@@ -4708,6 +6129,7 @@ class QueueManager extends EventEmitter {
         stageText: difference.comparable ? '目录内容发生变化，等待确认' : '旧清单信息不足，等待确认当前目录',
         progress: 0,
         sourceChangeReport: report,
+        sourceChangeDecisionRevision: report.revision,
         errorCode: null,
         errorMessage: null
       });
@@ -4716,8 +6138,15 @@ class QueueManager extends EventEmitter {
     }
 
     if (job.taskKind === 'catalog_refresh' && difference.comparable && !difference.changed) {
-      referenceRecord.sourceLocationCheckedAt = new Date().toISOString();
-      await this.saveCatalogRecords([referenceRecord]);
+      await this.runCatalogOperation(async () => {
+        if (!this.catalog.includes(referenceRecord)) {
+          const error = new Error('原仓库项目已变化，请重新执行目录更新。');
+          error.code = 'SOURCE_TARGET_CHANGED';
+          throw error;
+        }
+        referenceRecord.sourceLocationCheckedAt = new Date().toISOString();
+        await this.saveCatalogRecords([referenceRecord]);
+      });
       await this.store.deletePendingManifest(this.config.repositoryDirectory, job.id);
       await this.updateJob(job, {
         status: 'completed',
@@ -4738,9 +6167,12 @@ class QueueManager extends EventEmitter {
     };
   }
 
-  async runOne(job) {
-    this.abortController = new AbortController();
-    this.pauseController = this.services.createPauseController?.() || new PauseController();
+  async runOne(job, runContext = null) {
+    runContext ||= {
+      jobId: job.id,
+      abortController: new AbortController(),
+      pauseController: this.services.createPauseController?.() || new PauseController()
+    };
     let compressionStartedAt = 0;
     let compressionFinishedAt = 0;
     let generatedThumbnailDirectory = '';
@@ -4777,21 +6209,31 @@ class QueueManager extends EventEmitter {
         ? this.catalog.findIndex((record) => record.id === job.sourceCatalogRecordId)
         : -1;
       let existingRecord = existingRecordIndex >= 0 ? this.catalog[existingRecordIndex] : null;
-      if (job.sourceCatalogRecordId && !existingRecord) throw new Error('对应的未压缩仓库项目已经不存在。');
+      if (job.sourceCatalogRecordId && !existingRecord) throw missingCatalogSourceRecordError();
       const sourceChangeReference = existingRecord || (job.sourceChangeTargetRecordId
         ? this.catalog.find((record) => record.id === job.sourceChangeTargetRecordId)
         : null);
-      const sourcePreparation = await this.prepareExistingSourceOperation(job, sourceChangeReference, savedPendingManifest);
-      if (!sourcePreparation) return;
+      if (job.sourceChangeTargetRecordId && !sourceChangeReference) throw missingCatalogSourceRecordError();
+      const sourcePreparation = await this.prepareExistingSourceOperation(job, sourceChangeReference, savedPendingManifest, runContext);
+      if (!sourcePreparation) return 'decision_or_no_change';
       existingRecordIndex = job.sourceCatalogRecordId ? this.catalog.findIndex((record) => record.id === job.sourceCatalogRecordId) : -1;
       existingRecord = existingRecordIndex >= 0 ? this.catalog[existingRecordIndex] : null;
       const archiveRunner = inventoryOnly ? runInventoryOnlyJob : (this.services.archiveRunner || runArchiveJob);
       const jobConfig = {
         ...this.config,
+        ...(job.automationRuntimeOptions || {}),
         archiveOutputDirectory: job.archiveOutputDirectory || this.config.archiveOutputDirectory,
-        archiveStagingDirectory: job.archiveStagingDirectory || this.config.archiveStagingDirectory,
-        sevenZipPath: this.resolveProgramPath(this.config.sevenZipPath),
-        ffmpegPath: this.resolveProgramPath(this.config.ffmpegPath),
+        archiveStagingDirectory: job.archiveStagingDirectory || (
+          job.archiveOutputDirectory &&
+          normalizeForComparison(job.archiveOutputDirectory) !== normalizeForComparison(this.config.archiveOutputDirectory)
+            ? makeArchiveStagingDirectory(job.archiveOutputDirectory)
+            : this.config.archiveStagingDirectory),
+        sevenZipPath: this.resolveProgramPath(job.automationRuntimeOptions?.sevenZipPath ?? this.config.sevenZipPath),
+        sevenZipThreads: Math.max(1, Math.floor(
+          Number(this.services.cpuCount?.() || os.cpus().length || 1) /
+          normalizeQueueConcurrency(job.automationRuntimeOptions?.queueConcurrency ?? this.config.queueConcurrency)
+        )),
+        ffmpegPath: this.resolveProgramPath(job.automationRuntimeOptions?.ffmpegPath ?? this.config.ffmpegPath),
         archiveFormat: job.archiveFormat || this.config.archiveFormat || '7z',
         compressionLevel: Number(job.compressionLevel ?? this.config.compressionLevel ?? 1),
         archiveVolumeEnabled: typeof job.archiveVolumeEnabled === 'boolean'
@@ -4820,7 +6262,7 @@ class QueueManager extends EventEmitter {
         preparedSnapshot: sourcePreparation.preparedSnapshot,
         reuseManifest: sourcePreparation.reuseManifest,
         preparedManifestValidated: Boolean(sourcePreparation.preparedSnapshot),
-        pauseController: this.pauseController,
+        pauseController: runContext.pauseController,
         onStage: async (status, stageText) => {
           if (status === 'compressing' && !compressionStartedAt) {
             compressionStartedAt = Date.now();
@@ -4850,13 +6292,16 @@ class QueueManager extends EventEmitter {
           }
         },
         onManifestMetadataReady: async (manifest, directories) => {
-          if (!duplicatePolicyAllowsAutomaticCheck(job) || job.exactDuplicateOverrideAt || !this.config.autoSkipExactDuplicates) return;
+          if (!duplicatePolicyAllowsAutomaticCheck(job) || job.exactDuplicateOverrideAt ||
+              !autoSkipExactDuplicateForJob(job, this.config)) return;
           const snapshotSubject = {
             ...job,
             skippedFiles: [...(job.skippedFiles || []), ...(manifest.skippedFiles || [])]
           };
-          const sameSourceMatches = this.findSameSourceTreeMatches(snapshotSubject, manifest, directories);
+          const sameSourceMatches = await this.findSameSourceTreeMatches(snapshotSubject, manifest, directories, runContext);
           if (sameSourceMatches.length === 0) return;
+          await confirmCurrentSourceSnapshot(job.sourcePath, job.sourceType, manifest, directories,
+            runContext.abortController.signal, runContext.pauseController);
           const skipped = new Error('项目的原始位置与完整目录结构均和仓库记录一致，已按设置自动跳过。');
           skipped.code = 'AUTO_SKIPPED_EXACT_DUPLICATE';
           skipped.projectMatches = sameSourceMatches;
@@ -4865,13 +6310,14 @@ class QueueManager extends EventEmitter {
         },
         onManifestReady: async (manifest) => {
           if (inventoryOnly && job.sourceResumeRevalidationRequested) {
-            await validateManifestUnchanged(job.sourcePath, job.sourceType, manifest, this.abortController.signal, this.pauseController);
+            await validateManifestUnchanged(job.sourcePath, job.sourceType, manifest, runContext.abortController.signal, runContext.pauseController);
             delete job.sourceResumeRevalidationRequested;
           }
           if (!duplicatePolicyAllowsAutomaticCheck(job)) {
             job.automaticDuplicateCheckPending = false;
             return;
           }
+          await this.reserveDuplicateShape(job, manifest, runContext);
           const initialReviewFingerprint = createManifestReviewFingerprint(manifest);
           const legacyReviewConfirmed = Boolean(
             !sourcePreparation.preparedSnapshot && job.exactDuplicateOverrideAt && Array.isArray(preparedManifest) && preparedManifest.length > 0
@@ -4883,11 +6329,15 @@ class QueueManager extends EventEmitter {
           if (legacyReviewConfirmed && !job.duplicateConfirmedManifestFingerprint) {
             job.duplicateConfirmedManifestFingerprint = initialReviewFingerprint;
           }
-          if (job.sourceType === 'video' && this.config.autoSkipExactDuplicates && !reviewConfirmed) {
-            const exactVideoIds = new Set(this.findIndexedExactFileMatches(manifest, duplicateExclusionIds(job))
-              .flatMap((match) => (match.previous || []).map((previous) => previous.archiveId)));
-            const exactVideos = this.catalog.filter((record) => record.sourceType === 'video' && exactVideoIds.has(record.id));
+          if (job.sourceType === 'video' && autoSkipExactDuplicateForJob(job, this.config) && !reviewConfirmed) {
+            const exactVideos = await this.runCatalogOperation(() => {
+              const exactVideoIds = new Set(this.findIndexedExactFileMatches(manifest, duplicateExclusionIds(job))
+                .flatMap((match) => (match.previous || []).map((previous) => previous.archiveId)));
+              return this.catalog.filter((record) => record.sourceType === 'video' && exactVideoIds.has(record.id));
+            });
             if (exactVideos.length > 0) {
+              await confirmCurrentSourceSnapshot(job.sourcePath, job.sourceType, manifest, manifest.directories || [],
+                runContext.abortController.signal, runContext.pauseController);
               const skipped = new Error('项目与仓库中的现有项目完全一致，已按设置自动跳过。');
               skipped.code = 'AUTO_SKIPPED_EXACT_DUPLICATE';
               skipped.projectMatches = exactVideos.map((record) => ({ id: record.id, title: record.title, verification: 'md5' }));
@@ -4896,11 +6346,12 @@ class QueueManager extends EventEmitter {
             }
           }
           let exactVerification;
-          if (!reviewConfirmed && this.config.autoSkipExactDuplicates) {
-            exactVerification = await this.verifyExactProjectMatches(job, manifest);
+          if (!reviewConfirmed && autoSkipExactDuplicateForJob(job, this.config)) {
+            exactVerification = await this.verifyExactProjectMatches(job, manifest, runContext);
           } else if (!reviewConfirmed) {
             const exclusions = duplicateExclusionIds(job);
-            const directCandidates = this.findIndexedProjectCandidates(manifest, 'content', exclusions);
+            const directCandidates = await this.runCatalogOperation(() =>
+              this.findIndexedProjectCandidates(manifest, 'content', exclusions));
             exactVerification = {
               manifest,
               matches: findExactProjectMatches(manifest, directCandidates, ''),
@@ -4920,7 +6371,10 @@ class QueueManager extends EventEmitter {
             reviewFingerprint && job.duplicateConfirmedManifestFingerprint === reviewFingerprint
           );
           const exactProjectMatches = exactVerification.matches;
-          if (this.config.autoSkipExactDuplicates && exactProjectMatches.length > 0) {
+          if (autoSkipExactDuplicateForJob(job, this.config) && exactProjectMatches.length > 0) {
+            await confirmCurrentSourceSnapshot(job.sourcePath, job.sourceType, exactVerification.manifest,
+              exactVerification.manifest.directories || manifest.directories || [],
+              runContext.abortController.signal, runContext.pauseController);
             const skipped = new Error('项目与仓库中的现有项目完全一致，已按设置自动跳过。');
             skipped.code = 'AUTO_SKIPPED_EXACT_DUPLICATE';
             skipped.projectMatches = exactProjectMatches;
@@ -4929,10 +6383,13 @@ class QueueManager extends EventEmitter {
           }
           const similaritySubject = { ...job, id: job.sourceCatalogRecordId || job.id, manifest: reviewManifest };
           const exclusions = duplicateExclusionIds(job);
-          const exactMatches = this.findIndexedExactFileMatches(reviewManifest, exclusions);
+          const { exactMatches, similarityCandidates } = await this.runCatalogOperation(() => ({
+            exactMatches: this.findIndexedExactFileMatches(reviewManifest, exclusions),
+            similarityCandidates: this.getSimilarityCandidates(similaritySubject)
+          }));
           const manifestSimilarMatches = findSimilarProjects(
             similaritySubject,
-            this.getSimilarityCandidates(similaritySubject).filter((record) => !exclusions.includes(String(record.id))),
+            similarityCandidates.filter((record) => !exclusions.includes(String(record.id))),
             this.similarityIgnoreTerms,
             this.similarityStrength
           );
@@ -4965,6 +6422,8 @@ class QueueManager extends EventEmitter {
             review.projectMatches = exactProjectMatches;
             review.similarMatches = combinedSimilarMatches;
             review.verificationIncomplete = requiresVerificationReview;
+            review.matchEvidence = { ...describeProjectMatchEvidence(reviewManifest),
+              verificationIncomplete: exactVerification.verificationIncomplete };
             review.reviewFingerprint = reviewFingerprint;
             review.reviewKind = requiresExactReview || requiresVerificationReview ? 'exact' : 'similarity';
             throw review;
@@ -4977,7 +6436,7 @@ class QueueManager extends EventEmitter {
           job.skippedFiles = [...(job.skippedFiles || []), item].slice(-500);
         },
         onLog: (message) => { void this.log('info', message, job.id, false); }
-      }, this.abortController.signal);
+      }, runContext.abortController.signal);
 
       if (compressionStartedAt) {
         const archiveFinishedAt = Date.now();
@@ -4991,7 +6450,6 @@ class QueueManager extends EventEmitter {
 
       if (this.services.createThumbnails) {
         const thumbnailsStartedAt = Date.now();
-        const mediaTimings = new Map();
         let lastProgressAt = 0;
         job.stageText = '正在生成缩略图并整理入库信息';
         this.emitState();
@@ -5003,39 +6461,37 @@ class QueueManager extends EventEmitter {
         const thumbnailDirectoryExisted = await pathExists(thumbnailDirectory);
         try {
           result.manifest = await this.services.createThumbnails(job, result.manifest, jobConfig, {
-            pauseController: this.pauseController,
-            signal: this.abortController.signal,
-            onTiming: (stage, elapsedMs) => {
-              const timing = mediaTimings.get(stage) || { count: 0, elapsedMs: 0 };
-              timing.count += 1;
-              timing.elapsedMs += elapsedMs;
-              mediaTimings.set(stage, timing);
-            },
+            pauseController: runContext.pauseController,
+            signal: runContext.abortController.signal,
+            onTiming: (stage, elapsedMs) => performanceTrace.record({ jobId: job.id, stage, elapsedMs }),
             onProgress: ({ processed, total, name, frame, frameCount }) => {
               if (Date.now() - lastProgressAt < 200 && processed !== total) return;
               lastProgressAt = Date.now();
               job.stageText = `正在生成缩略图 · 已处理 ${processed}/${total}` +
                 (frame ? ` · 视频抽帧 ${frame}/${frameCount}` : '') + (name ? ` · ${name}` : '');
-              this.emitState();
+              this.emitProgressThrottled(job, 200);
             },
             onLog: (message, level = 'warning') => { void this.log(level, message, job.id, false); }
           });
         } catch (error) {
-          if (error instanceof CancelledError || error.code === 'TASK_CANCELLED' || this.abortController.signal.aborted) {
+          if (error instanceof CancelledError || error.code === 'TASK_CANCELLED' || runContext.abortController.signal.aborted) {
             throw error;
           }
           await this.log('warning', `缩略图生成未完成：${error.message}`, job.id);
         } finally {
           if (!thumbnailDirectoryExisted) generatedThumbnailDirectory = thumbnailDirectory;
-          await this.log('info', `缩略图阶段耗时：${Date.now() - thumbnailsStartedAt} ms · ${JSON.stringify(Object.fromEntries(mediaTimings))}`, job.id, false);
+          performanceTrace.record({ jobId: job.id, stage: 'thumbnail-total', elapsedMs: Date.now() - thumbnailsStartedAt,
+            fileCount: result.manifest?.length || 0 });
         }
       }
 
       const completedAt = new Date().toISOString();
-      if (inventoryOnly && job.sourceResumeRevalidationRequested) {
-        await validateManifestUnchanged(job.sourcePath, job.sourceType, result.manifest, this.abortController.signal, this.pauseController);
+      if (inventoryOnly) {
+        await confirmCurrentSourceSnapshot(job.sourcePath, job.sourceType, result.manifest, result.directories || [],
+          runContext.abortController.signal, runContext.pauseController);
       }
       delete job.sourceResumeRevalidationRequested;
+      await this.waitForRunCheckpoint(runContext);
       if (existingRecord && !this.catalog.includes(existingRecord)) {
         const error = new Error('原仓库项目或原文件位置已变化，请取消任务后重新操作。');
         error.code = 'SOURCE_TARGET_CHANGED';
@@ -5043,7 +6499,7 @@ class QueueManager extends EventEmitter {
       }
       for (const file of result.manifest || []) delete file.sourceMetadataUnchanged;
       const hasSkippedFiles = (result.skippedFiles || job.skippedFiles || []).length > 0;
-      const skipSourceAction = this.stopRequested || this.abortController.signal.aborted || hasSkippedFiles;
+      const sourceActionInitiallyBlocked = this.stopRequested || runContext.abortController.signal.aborted || hasSkippedFiles;
       const shouldRecordPassword = !inventoryOnly && (typeof job.recordArchivePassword === 'boolean'
         ? job.recordArchivePassword
         : Boolean(this.config.recordArchivePassword));
@@ -5052,6 +6508,9 @@ class QueueManager extends EventEmitter {
         : ['keep', 'move', 'trash'].includes(job.mcpSourceDisposition)
           ? job.mcpSourceDisposition
           : this.config.moveCompleted ? 'move' : this.config.autoTrashCompleted ? 'trash' : 'keep';
+      if (process.platform === 'darwin' && completionAction === 'trash') {
+        throw new Error('macOS 版本暂不支持可验证恢复的废纸篓操作，请保留或移动源文件。');
+      }
       const preservedTags = existingRecord?.tags || [];
       const nextTags = inventoryOnly
         ? ['未压缩', ...preservedTags.filter((tag) => tag !== '未压缩')]
@@ -5127,12 +6586,17 @@ class QueueManager extends EventEmitter {
         sourceDisposition: completionAction === 'keep'
           ? 'kept'
           : hasSkippedFiles ? `${completionAction}_skipped_unreadable`
-            : skipSourceAction ? `${completionAction}_skipped_stopping` : `${completionAction}_pending`,
+            : sourceActionInitiallyBlocked ? `${completionAction}_skipped_stopping` : `${completionAction}_pending`,
         completedAt,
         inventoryDate: existingRecord?.inventoryDate || completedAt,
         metadataUpdatedAt: completedAt
       };
       const archivePublication = result.archivePublication || null;
+      if (!inventoryOnly && result.verifiedAt && !hasSkippedFiles) {
+        this.archiveVerificationEvidence.set(job, {
+          verifiedAt: result.verifiedAt, archiveFiles: structuredClone(result.archiveFiles)
+        });
+      }
       delete record.archivePublication;
       normalizeThumbnailReferences(record, this.config.repositoryDirectory, { strict: true });
       const validThumbnails = recordThumbnailEntries(record);
@@ -5161,45 +6625,72 @@ class QueueManager extends EventEmitter {
         });
         await this.log('error', `压缩体积异常：${sizeCheck.reason}；完整性测试已通过，但必须人工确认后才会入库。`, job.id);
         publishedArtifactsFinalized = true;
-        return;
+        return 'archive_anomaly';
       }
       job.stageText = '正在更新相似关系并写入仓库记录';
       this.emitState();
-      // Manifests and media are immutable in this operation. Snapshot only the
-      // relationship fields actually touched, rather than cloning every file.
-      const catalogBeforeCommit = this.catalog.slice();
-      const relationshipsBeforeCommit = new Map();
-      const rememberRelationships = (candidate) => {
-        relationshipsBeforeCommit.set(candidate, Object.fromEntries(
-          ['similarRecords', 'possibleDuplicate', 'similarityVersion'].map((key) =>
-            [key, { present: Object.hasOwn(candidate, key), value: candidate[key] }])
-        ));
-      };
-      try {
-        if (existingRecordIndex >= 0) this.catalog[existingRecordIndex] = record;
-        else this.catalog.push(record);
-        const similarityStartedAt = Date.now();
-        const changedRecords = this.refreshSimilarityForRecord(record, rememberRelationships);
-        const similarityElapsedMs = Date.now() - similarityStartedAt;
-        const saveStartedAt = Date.now();
-        await this.saveCatalogRecords(changedRecords);
-        void this.log('info', `入库阶段耗时：相似关系 ${similarityElapsedMs} ms · 仓库写入 ${Date.now() - saveStartedAt} ms · 更新记录 ${changedRecords.length}`, job.id, false);
-      } catch (error) {
-        for (const [candidate, fields] of relationshipsBeforeCommit) {
-          for (const [key, previous] of Object.entries(fields)) {
-            if (previous.present) candidate[key] = previous.value;
-            else delete candidate[key];
+      await this.runCatalogCommitWhenRunnable(runContext, async () => {
+        // Only this short final commit is serialized. Manifest generation,
+        // compression and thumbnails remain concurrent.
+        // Manifests and media are immutable here; snapshot only relationships.
+        const catalogBeforeCommit = this.catalog.slice();
+        const relationshipsBeforeCommit = new Map();
+        const rememberRelationships = (candidate) => {
+          relationshipsBeforeCommit.set(candidate, Object.fromEntries(
+            ['similarRecords', 'possibleDuplicate', 'similarityVersion'].map((key) =>
+              [key, { present: Object.hasOwn(candidate, key), value: candidate[key] }])
+          ));
+        };
+        try {
+          const currentExistingIndex = job.sourceCatalogRecordId
+            ? this.catalog.findIndex((candidate) => candidate.id === job.sourceCatalogRecordId)
+            : -1;
+          if (job.sourceCatalogRecordId && currentExistingIndex < 0) throw missingCatalogSourceRecordError();
+          if (job.sourceChangeDecision?.baselineFingerprint) {
+            const target = this.catalog.find((item) => item.id ===
+              (job.sourceCatalogRecordId || job.sourceChangeTargetRecordId));
+            if (!target || sourceBaselineFingerprint(target) !== job.sourceChangeDecision.baselineFingerprint) {
+              throw Object.assign(new Error('原仓库项目已变化，请重新执行目录更新。'), { code: 'SOURCE_TARGET_CHANGED' });
+            }
           }
+          if (autoSkipExactDuplicateForJob(job, this.config) && duplicatePolicyAllowsAutomaticCheck(job) &&
+              !job.exactDuplicateOverrideAt) {
+            const latestCandidates = this.findIndexedProjectCandidates(record.manifest, 'content', duplicateExclusionIds(job));
+            const latestMatches = findExactProjectMatches(record.manifest, latestCandidates, '');
+            if (latestMatches.length > 0) {
+              const duplicate = new Error('并发任务已先入库相同内容；本任务未提交，成品将移至恢复目录。请核对后重试或取消。');
+              duplicate.code = 'CONCURRENT_EXACT_DUPLICATE';
+              throw duplicate;
+            }
+          }
+          if (currentExistingIndex >= 0) this.catalog[currentExistingIndex] = record;
+          else this.catalog.push(record);
+          const similarityStartedAt = Date.now();
+          const changedRecords = this.refreshSimilarityForRecord(record, rememberRelationships);
+          const similarityElapsedMs = Date.now() - similarityStartedAt;
+          const saveStartedAt = Date.now();
+          await this.saveCatalogRecords(changedRecords);
+          performanceTrace.record({ jobId: job.id, stage: 'similarity-update', elapsedMs: similarityElapsedMs,
+            candidateCount: changedRecords.length });
+          performanceTrace.record({ jobId: job.id, stage: 'catalog-transaction-total',
+            elapsedMs: Date.now() - saveStartedAt, candidateCount: changedRecords.length });
+        } catch (error) {
+          for (const [candidate, fields] of relationshipsBeforeCommit) {
+            for (const [key, previous] of Object.entries(fields)) {
+              if (previous.present) candidate[key] = previous.value;
+              else delete candidate[key];
+            }
+          }
+          this.restoreCatalogSnapshot(catalogBeforeCommit);
+          const compensation = await this.compensateUncommittedArchive(
+            job,
+            { ...result, archivePublication },
+            generatedThumbnailDirectory
+          );
+          publishedArtifactsFinalized = true;
+          throw this.catalogCommitFailure(error, compensation);
         }
-        this.restoreCatalogSnapshot(catalogBeforeCommit);
-        const compensation = await this.compensateUncommittedArchive(
-          job,
-          { ...result, archivePublication },
-          generatedThumbnailDirectory
-        );
-        publishedArtifactsFinalized = true;
-        throw this.catalogCommitFailure(error, compensation);
-      }
+      });
       publishedArtifactsFinalized = true;
       await this.store.deletePendingManifest(this.config.repositoryDirectory, job.id);
 
@@ -5208,17 +6699,33 @@ class QueueManager extends EventEmitter {
         ? job.sourceChangeDecision?.action === 'new_independent' ? '已新建独立项目（未压缩）'
           : job.taskKind === 'catalog_refresh' ? '目录更新完成' : '已生成完整清单并直接入库（未压缩）'
         : '已验证并入库';
+      let skipSourceAction = sourceActionInitiallyBlocked || this.stopRequested || runContext.abortController.signal.aborted;
+      const finalizeSourceAction = async () => {
+      skipSourceAction ||= this.stopRequested || runContext.abortController.signal.aborted;
       if (completionAction !== 'keep' && !skipSourceAction && !this.safetyHalt) {
         let sourceDispositionCompleted = false;
         try {
-          job.stageText = completionAction === 'move' ? '正在移动已完成的源项目' : '正在把已完成的源项目移入回收站';
-          this.emitState();
-          completionText = await this.completeSourceDisposition(record, job);
+          await this.waitForRunCheckpoint(runContext);
+          await this.updateJob(job, {
+            status: 'moving',
+            stageText: completionAction === 'move'
+              ? '正在移动已完成的源项目'
+              : '正在把已完成的源项目移入回收站'
+          });
+          completionText = await this.completeSourceDisposition(record, job, runContext);
           sourceDispositionCompleted = true;
-          await this.saveCatalogRecords([record]);
+          await this.runCatalogOperation(() => this.saveCatalogRecords([record]));
           await this.log('warning', completionText, job.id);
         } catch (error) {
-          if (sourceDispositionCompleted) {
+          const cancelled = error instanceof CancelledError || error.code === 'TASK_CANCELLED' || runContext.abortController.signal.aborted;
+          if (cancelled && !sourceDispositionCompleted) {
+            skipSourceAction = true;
+            record.sourceDisposition = `${completionAction}_skipped_stopping`;
+            record.sourceActionError = '任务在源文件后处理前已暂停或取消，源项目保持原位。';
+            await this.runCatalogOperation(() => this.saveCatalogRecords([record]));
+            completionText = '已验证入库；任务停止后未执行源文件处理，源项目保留在原位置';
+            await this.log('warning', completionText, job.id);
+          } else if (sourceDispositionCompleted) {
             const persistenceError = new Error(
               `源文件后处理已经执行，但处理结果未能写回仓库：${error.message}。请勿重试归档，并按运行日志核对源文件位置。`
             );
@@ -5232,26 +6739,30 @@ class QueueManager extends EventEmitter {
               trashedAt: String(record.trashedAt || '')
             };
             throw persistenceError;
-          }
-          if (['TRASH_NOT_PERFORMED', 'TRASH_VERIFICATION_UNAVAILABLE', 'TRASH_RETENTION_FAILED'].includes(error.code)) {
+          } else if (['TRASH_NOT_PERFORMED', 'TRASH_VERIFICATION_UNAVAILABLE', 'TRASH_RETENTION_FAILED'].includes(error.code)) {
             await this.activateTrashSafetyHalt(record, job, error, result.archiveFiles);
             await this.log('error', `回收站安全熔断：${error.message} 自动移入回收站已关闭，后续任务没有启动。`, job.id);
-            return;
+            return true;
+          } else {
+            record.sourceDisposition = `${completionAction}_failed`;
+            record.sourceActionError = error.message;
+            await this.runCatalogOperation(() => this.saveCatalogRecords([record]));
+            completionStatus = 'completed_cleanup_failed';
+            completionText = completionAction === 'move'
+              ? '归档成功，但移动源项目失败，原位置已保留'
+              : '归档成功，但移入回收站失败';
+            await this.log('error', completionText + `：${error.message}`, job.id);
           }
-          record.sourceDisposition = `${completionAction}_failed`;
-          record.sourceActionError = error.message;
-          await this.saveCatalogRecords([record]);
-          completionStatus = 'completed_cleanup_failed';
-          completionText = completionAction === 'move'
-            ? '归档成功，但移动源项目失败，原位置已保留'
-            : '归档成功，但移入回收站失败';
-          await this.log('error', completionText + `：${error.message}`, job.id);
         }
       } else if (completionAction !== 'keep' && (skipSourceAction || this.safetyHalt)) {
         if (this.safetyHalt) {
           record.sourceDisposition = 'kept';
           record.sourceActionError = '回收站安全熔断期间未执行源文件后处理。';
-          await this.saveCatalogRecords([record]);
+          await this.runCatalogOperation(() => this.saveCatalogRecords([record]));
+        } else if (!hasSkippedFiles && !String(record.sourceDisposition || '').includes('_skipped_stopping')) {
+          record.sourceDisposition = `${completionAction}_skipped_stopping`;
+          record.sourceActionError = '任务在仓库提交期间停止，源项目保持原位。';
+          await this.runCatalogOperation(() => this.saveCatalogRecords([record]));
         }
         completionText = this.safetyHalt
           ? '已验证入库；因回收站安全熔断，源项目保留在原位置'
@@ -5260,6 +6771,14 @@ class QueueManager extends EventEmitter {
           : '已验证入库；因队列正在停止，源项目已保留';
         await this.log('warning', completionText, job.id);
       }
+      return false;
+      };
+      // Keep source trashing, retention verification and catalog status together.
+      // A second task can enter only after a possible safety halt is visible.
+      const trashSafetyHalted = completionAction === 'trash'
+        ? await this.runTrashDisposition(finalizeSourceAction)
+        : await finalizeSourceAction();
+      if (trashSafetyHalted) return 'trash_safety_halt';
       await this.updateJob(job, {
         status: completionStatus,
         stageText: completionText,
@@ -5277,7 +6796,7 @@ class QueueManager extends EventEmitter {
       if (result?.archivePublication && !publishedArtifactsFinalized) {
         const compensation = await this.compensateUncommittedArchive(job, result, generatedThumbnailDirectory);
         publishedArtifactsFinalized = true;
-        const cancelled = error instanceof CancelledError || error.code === 'TASK_CANCELLED' || this.abortController.signal.aborted;
+        const cancelled = error instanceof CancelledError || error.code === 'TASK_CANCELLED' || runContext.abortController.signal.aborted;
         if (cancelled && !compensation.recoveryRequired) {
           error.catalogRecovery = compensation;
         } else {
@@ -5305,10 +6824,14 @@ class QueueManager extends EventEmitter {
           similarMatches: error.similarMatches || job.similarMatches || [],
           duplicateReviewFingerprint: error.reviewFingerprint || null,
           duplicateReviewKind: error.reviewKind || 'similarity',
+          duplicateMatchEvidence: error.matchEvidence || null,
+          duplicateDecisionRevision: job.duplicateReviewFingerprint === (error.reviewFingerprint || null)
+            ? Number(job.duplicateDecisionRevision) || 1 : (Number(job.duplicateDecisionRevision) || 0) + 1,
           errorCode: null,
           errorMessage: null
         });
         await this.log('warning', error.message, job.id);
+        return 'duplicate_review';
       } else if (error instanceof CancelledError || error.code === 'TASK_CANCELLED') {
         if (this.stopRequested && job.taskBatchId && !error.catalogRecovery?.recoveryRequired && job.processingMode === 'inventory_only') {
           await this.updateJob(job, {
@@ -5331,6 +6854,7 @@ class QueueManager extends EventEmitter {
         await this.store.deletePendingManifest(this.config.repositoryDirectory, job.id);
       } else if (error.code === 'SOURCE_DISPOSITION_COMMIT_FAILED') {
         await this.log('error', error.message, job.id);
+        await this.log('error', sourceDispositionRecoveryLog(error.sourceDispositionRecovery), job.id);
         await this.updateJob(job, {
           status: 'completed_cleanup_failed',
           stageText: '归档已入库，源文件后处理已完成，但仓库状态保存失败；请查看日志且不要重试',
@@ -5350,7 +6874,9 @@ class QueueManager extends EventEmitter {
         if (error.catalogRecovery) await this.log('error', failureLogMessage, job.id);
         await this.updateJob(job, {
           status: 'failed',
-          stageText: diskSafetyError ? '磁盘空间安全停止，等待用户处理' : '处理失败，可重试',
+          stageText: diskSafetyError ? '磁盘空间安全停止，等待用户处理'
+            : error.code === 'CATALOG_SOURCE_RECORD_MISSING' ? '关联仓库记录已删除，请取消并重新接收'
+              : '处理失败，可重试',
           progress: 0,
           errorCode: error.code || 'UNKNOWN_ERROR',
           errorMessage: error.message,
@@ -5359,10 +6885,8 @@ class QueueManager extends EventEmitter {
         if (!error.catalogRecovery) await this.log('error', failureLogMessage, job.id);
       }
     } finally {
-      try { await this.pauseController?.resume(); } catch { /* 子进程已退出时忽略 */ }
-      this.paused = false;
-      this.abortController = null;
-      this.pauseController = null;
+      this.releaseDuplicateShape(job);
+      try { await runContext.pauseController.resume(); } catch { /* 子进程已退出时忽略 */ }
     }
   }
 }

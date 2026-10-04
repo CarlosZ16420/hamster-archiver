@@ -118,12 +118,23 @@ async function main() {
   if (await exists(readmeAssets)) {
     await fs.cp(readmeAssets, path.join(outputRoot, 'README.assets'), { recursive: true });
   }
+  const readmeShowcases = path.join(projectRoot, 'assets', 'readme');
+  const showcaseFiles = ['details-showcase.zh-CN.png', 'details-showcase.en-US.png'];
+  for (const name of showcaseFiles) {
+    const source = path.join(readmeShowcases, name);
+    if (await exists(source)) {
+      const destination = path.join(outputRoot, 'assets', 'readme', name);
+      await fs.mkdir(path.dirname(destination), { recursive: true });
+      await fs.copyFile(source, destination);
+    }
+  }
   await fs.copyFile(path.join(projectRoot, 'LICENSE'), path.join(outputRoot, 'LICENSE'));
   await fs.copyFile(path.join(projectRoot, 'scripts', 'HamsterArchiver-MCP.cmd'), path.join(outputRoot, 'HamsterArchiver-MCP.cmd'));
   await fs.copyFile(path.join(projectRoot, 'scripts', 'hamster.cmd'), path.join(outputRoot, 'hamster.cmd'));
   await fs.cp(path.join(projectRoot, 'integrations'), path.join(outputRoot, 'integrations'), { recursive: true });
   await fs.mkdir(path.join(outputRoot, 'docs'), { recursive: true });
-  for (const name of ['MCP.md', 'CLI.md', 'AI-QUICKSTART.md', 'AI-TROUBLESHOOTING.md']) {
+  for (const name of ['MCP.md', 'CLI.md', 'AI-QUICKSTART.md', 'AI-TROUBLESHOOTING.md',
+    'RELEASE-ACQUISITION.md', 'AI-TASK-RECEIPT-v2.schema.json']) {
     await fs.copyFile(path.join(projectRoot, 'docs', name), path.join(outputRoot, 'docs', name));
   }
   await fs.copyFile(path.join(projectRoot, 'llms.txt'), path.join(outputRoot, 'llms.txt'));
@@ -183,10 +194,12 @@ async function main() {
     'resources/app/src/core/mcp-application-services.js',
     'resources/app/src/core/mcp-user-data-migration-worker.js',
     'resources/app/src/core/application-task-service.js',
+    'resources/app/src/core/queue-manager.js',
     'resources/app/src/core/task-contracts.js',
     'resources/app/src/core/intake-options.js',
     'resources/app/src/core/automation-definitions.js',
     'resources/app/src/core/hamster-cli.js',
+    'resources/app/src/core/cli-request-store.js',
     'resources/app/src/core/integration-manager.js',
     'HamsterArchiver-MCP.cmd',
     'hamster.cmd',
@@ -196,6 +209,8 @@ async function main() {
     'docs/AI-QUICKSTART.md',
     'docs/CLI.md',
     'docs/AI-TROUBLESHOOTING.md',
+    'docs/RELEASE-ACQUISITION.md',
+    'docs/AI-TASK-RECEIPT-v2.schema.json',
     'integrations/codex/hamster-archiver/SKILL.md',
     'integrations/codex/hamster-archiver/agents/openai.yaml',
     'integrations/workbuddy/connector-meta.json',

@@ -31,6 +31,49 @@ test('relationship-only saves preserve file indexes while content changes rebuil
   } finally { db.close(); }
 });
 
+test('catalog updates rebuild only indexes whose inputs changed', () => {
+  const { DatabaseSync } = require('node:sqlite');
+  const { initializeSchema, saveCatalogRecords } = require('../src/core/sqlite-repository');
+  const db = new DatabaseSync(':memory:');
+  try {
+    initializeSchema(db);
+    let record = { id: 'item', title: 'Movie', displayName: 'Movie', tags: ['old'], notes: 'before',
+      sourceType: 'directory', manifest: [{ relativePath: 'movie.mp4', name: 'movie.mp4', size: 123,
+        md5: 'a'.repeat(32), mediaType: 'video' }] };
+    const save = (changes) => { record = { ...record, ...changes }; saveCatalogRecords(db, [record], new Map([['item', 0]])); };
+    save({});
+    db.exec(`CREATE TEMP TABLE index_mutations(name TEXT);
+      CREATE TEMP TRIGGER files_changed AFTER DELETE ON catalog_files BEGIN INSERT INTO index_mutations VALUES('files'); END;
+      CREATE TEMP TRIGGER names_changed AFTER DELETE ON catalog_name_keys BEGIN INSERT INTO index_mutations VALUES('names'); END;
+      CREATE TEMP TRIGGER search_changed AFTER DELETE ON catalog_search_terms BEGIN INSERT INTO index_mutations VALUES('search'); END;
+      CREATE TEMP TRIGGER similarity_changed AFTER DELETE ON catalog_similarity_keys BEGIN INSERT INTO index_mutations VALUES('similarity'); END;
+      CREATE TEMP TRIGGER fingerprint_changed AFTER UPDATE ON catalog_project_fingerprints BEGIN INSERT INTO index_mutations VALUES('fingerprint'); END;`);
+    const changed = () => new Set(db.prepare('SELECT name FROM index_mutations').all().map((row) => row.name));
+    const clear = () => db.exec('DELETE FROM index_mutations');
+    save({ sourceLocationCheckedAt: '2026-09-24' });
+    assert.deepEqual(changed(), new Set()); clear();
+    save({ sourceDisposition: 'moved', movedTo: 'E:/processed', movedAt: '2026-09-24' });
+    assert.deepEqual(changed(), new Set()); clear();
+    save({ similarRecords: [{ id: 'other' }], possibleDuplicate: true });
+    assert.deepEqual(changed(), new Set()); clear();
+    save({ title: 'Another Movie' });
+    assert.deepEqual(changed(), new Set(['names', 'search', 'similarity'])); clear();
+    save({ notes: 'different' });
+    assert.deepEqual(changed(), new Set(['search'])); clear();
+    save({ tags: ['new'] });
+    assert.deepEqual(changed(), new Set(['search'])); clear();
+    save({ manifest: [{ ...record.manifest[0], md5: 'b'.repeat(32) }] });
+    assert.deepEqual(changed(), new Set(['files', 'fingerprint'])); clear();
+    save({ manifest: [{ ...record.manifest[0], relativePath: 'renamed.mp4' }] });
+    assert.deepEqual(changed(), new Set(['files', 'search', 'fingerprint']));
+    assert.equal(db.prepare('SELECT relative_path FROM catalog_files').get().relative_path, 'renamed.mp4');
+    clear();
+    save({ manifest: [{ ...record.manifest[0], extension: '.txt' }] });
+    assert.deepEqual(changed(), new Set(['similarity']));
+    assert.equal(db.prepare('SELECT count(*) AS n FROM catalog_similarity_keys WHERE record_id = ?').get('item').n > 0, true);
+  } finally { db.close(); }
+});
+
 test('JSON state can be atomically created and replaced', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-store-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

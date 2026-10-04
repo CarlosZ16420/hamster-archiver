@@ -13,6 +13,7 @@
 - “仓库工具”下拉菜单最后新增“不展示‘未压缩’标签”选项，偏好会在本机保存，并同时作用于列表与缩略图视图。
 - 批量撤回执行期间，右下角会显示不与返回按钮和 Toast 重叠的旋转等待图标，撤回按钮同时禁用，避免重复提交。
 - 删除仓库项目后再撤回时，会从恢复后的完整仓库快照重建双向相似关系，避免删除期间的旧候选索引导致关系丢失。
+- 未压缩项目仍有待处理或运行中的关联任务时，删除会提示先完成或取消任务；先删除项目再添加同一源目录则按新项目处理。旧任务遇到缺失项目会明确提示重新接收，原文件保持不变。
 
 ### 重复项清理
 
@@ -35,6 +36,7 @@
 - Warehouse Tools gains a final Hide the “Uncompressed” tag option. The local preference applies to both list and thumbnail views.
 - A non-overlapping spinner appears at the lower right during bulk undo, and the undo button is disabled until the operation finishes to prevent repeated submissions.
 - Undoing deleted Warehouse items rebuilds reciprocal similarity relationships from the restored complete Warehouse snapshot, avoiding relationship loss from a stale candidate index.
+- Deleting an uncompressed item with a pending or running dependent task now asks you to complete or cancel that task first. If deletion finishes first, adding the same source creates a new item. An older task with a missing linked item gives a clear resubmission instruction and leaves source files unchanged.
 
 ### Duplicate cleanup
 

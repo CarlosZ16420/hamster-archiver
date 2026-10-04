@@ -2,55 +2,27 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { LARGE_TASK_BYTES, isVideoFile } = require('./constants');
+const { isVideoFile } = require('./constants');
+const { walkSourceMetadata } = require('./source-metadata');
+const { performanceTrace } = require('./performance-trace');
 
-async function inspectPath(sourcePath, sourceType, onProgress = () => {}) {
-  if (sourceType === 'video') {
-    const stats = await fs.stat(sourcePath);
-    return { fileCount: 1, totalBytes: stats.size };
-  }
-
+async function inspectPath(sourcePath, sourceType, onProgress = () => {}, options = {}) {
+  const startedAt = Date.now();
   let fileCount = 0;
   let totalBytes = 0;
   const skippedFiles = [];
-  const pending = [sourcePath];
-
-  while (pending.length > 0) {
-    const current = pending.pop();
-    let directory;
-    try {
-      directory = await fs.opendir(current);
-    } catch (error) {
-      skippedFiles.push({ path: current, reason: error.message, code: error.code || 'READ_FAILED', type: 'directory' });
-      continue;
-    }
-
-    for await (const entry of directory) {
-      const entryPath = path.join(current, entry.name);
-      if (entry.isSymbolicLink()) continue;
-
-      if (entry.isDirectory()) {
-        pending.push(entryPath);
-        continue;
-      }
-
-      if (!entry.isFile()) continue;
-      let stats;
-      try {
-        stats = await fs.stat(entryPath);
-      } catch (error) {
-        skippedFiles.push({ path: entryPath, reason: error.message, code: error.code || 'STAT_FAILED', type: 'file' });
-        continue;
-      }
-      fileCount += 1;
-      totalBytes += stats.size;
-
-      if (fileCount % 250 === 0) {
-        onProgress({ sourcePath, fileCount, totalBytes });
-      }
-    }
+  for await (const entry of walkSourceMetadata(sourcePath, sourceType, {
+    onSkipped: ({ absolutePath, type, error }) => skippedFiles.push({ path: absolutePath,
+      reason: error.message, code: error.code || (type === 'file' ? 'STAT_FAILED' : 'READ_FAILED'), type })
+  })) {
+    if (entry.type !== 'file') continue;
+    fileCount += 1;
+    totalBytes += entry.stats.size;
+    if (sourceType !== 'video' && fileCount % 250 === 0) onProgress({ sourcePath, fileCount, totalBytes });
   }
-
+  if (options.traceStage) performanceTrace.record({ stage: options.traceStage,
+    elapsedMs: Date.now() - startedAt, fileCount, bytes: totalBytes });
+  if (sourceType === 'video') return { fileCount, totalBytes };
   onProgress({ sourcePath, fileCount, totalBytes });
   return { fileCount, totalBytes, skippedFiles };
 }
@@ -113,8 +85,8 @@ async function scanIntakeDirectory(intakeDirectory, options = {}) {
     });
     let summary;
     try {
-      summary = options.resolveExistingCandidate?.(candidate) ||
-        await inspectPath(candidate.sourcePath, candidate.sourceType, onProgress);
+      summary = (await options.resolveExistingCandidate?.(candidate)) ||
+        await inspectPath(candidate.sourcePath, candidate.sourceType, onProgress, { traceStage: 'intake-scan' });
     } catch (error) {
       skippedRootFiles.push({
         path: candidate.sourcePath,
@@ -130,8 +102,7 @@ async function scanIntakeDirectory(intakeDirectory, options = {}) {
     }
     tasks.push({
       ...candidate,
-      ...summary,
-      requiresConfirmation: summary.totalBytes > LARGE_TASK_BYTES
+      ...summary
     });
   }
 

@@ -11,6 +11,14 @@ const MCP_DESKTOP_REQUEST_PATTERN = /^hamster-mcp-launch-\d+-[a-f0-9]{32}\.json$
 const MCP_READY_FILE_PATTERN = /^hamster-mcp-ready-\d+-[a-f0-9]{32}\.json$/i;
 const MCP_DIAGNOSTIC_FILE_PATTERN = /^hamster-mcp-diagnostic-\d+-[a-f0-9]{32}\.json$/i;
 
+function mcpTempDirectory(argv = process.argv, env = process.env) {
+  const arg = argv.find((value) => String(value).startsWith('--mcp-temp-dir='));
+  const explicit = arg ? arg.slice('--mcp-temp-dir='.length)
+    : env.HAMSTER_DEV_USER_DATA_DIR || env.HAMSTER_SMOKE_USER_DATA_DIR
+      ? env.HAMSTER_MCP_TEMP_DIR : '';
+  return explicit && path.isAbsolute(explicit) ? path.resolve(explicit) : os.tmpdir();
+}
+
 function samePath(left, right) {
   const normalize = (value) => path.resolve(value).replaceAll('\\', '/').toLowerCase();
   return normalize(left) === normalize(right);
@@ -28,10 +36,12 @@ function isValidMcpDiagnosticFile(value, tempDirectory = os.tmpdir()) {
   return samePath(path.dirname(resolved), tempDirectory) && MCP_DIAGNOSTIC_FILE_PATTERN.test(path.basename(resolved));
 }
 
-async function createDesktopLaunchRequest({ applicationExecutable, readyFile, diagnosticFile, showUi = false, tempDirectory = os.tmpdir() }) {
+async function createDesktopLaunchRequest({ applicationExecutable, readyFile, diagnosticFile,
+  launchAttemptId = '', showUi = false, tempDirectory = os.tmpdir() }) {
   const resolvedExecutable = path.resolve(applicationExecutable);
   if (!path.isAbsolute(resolvedExecutable) || !isValidMcpReadyFile(readyFile, tempDirectory) ||
-      !isValidMcpDiagnosticFile(diagnosticFile, tempDirectory)) {
+      !isValidMcpDiagnosticFile(diagnosticFile, tempDirectory) ||
+      launchAttemptId && !/^[a-f0-9-]{36}$/i.test(launchAttemptId)) {
     throw new Error('Invalid MCP desktop launch request');
   }
   const requestFile = path.join(
@@ -43,6 +53,7 @@ async function createDesktopLaunchRequest({ applicationExecutable, readyFile, di
     applicationExecutable: resolvedExecutable,
     readyFile: path.resolve(readyFile),
     diagnosticFile: path.resolve(diagnosticFile),
+    ...(launchAttemptId ? { launchAttemptId } : {}),
     showUi: Boolean(showUi),
     createdAt: new Date().toISOString()
   })}\n`, { encoding: 'utf8', flag: 'wx' });
@@ -73,7 +84,9 @@ function takeDesktopLaunchRequest({ applicationExecutable, tempDirectory = os.tm
     return {
       readyFile: path.resolve(request.readyFile),
       diagnosticFile: path.resolve(request.diagnosticFile),
-      showUi: request.showUi === true
+      showUi: request.showUi === true,
+      ...(request.launchAttemptId && /^[a-f0-9-]{36}$/i.test(request.launchAttemptId)
+        ? { launchAttemptId: request.launchAttemptId } : {})
     };
   }
   return null;
@@ -84,5 +97,6 @@ module.exports = {
   createDesktopLaunchRequest,
   isValidMcpDiagnosticFile,
   isValidMcpReadyFile,
+  mcpTempDirectory,
   takeDesktopLaunchRequest
 };

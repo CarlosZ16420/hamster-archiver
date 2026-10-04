@@ -6,7 +6,7 @@ const GIB = 1024 ** 3;
 const MIB = 1024 ** 2;
 const LARGE_TASK_BYTES = 10 * GIB;
 const MIN_ARCHIVE_VOLUME_BYTES = 64 * MIB;
-const MAX_ARCHIVE_VOLUME_BYTES = LARGE_TASK_BYTES;
+const MAX_ARCHIVE_VOLUME_BYTES = 100 * GIB;
 const ARCHIVE_PASSWORD = '';
 const PASSWORD_SCHEME = 'configured-v1';
 

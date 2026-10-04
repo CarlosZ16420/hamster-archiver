@@ -12,7 +12,7 @@ const forbiddenDirectories = new Set([
 ]);
 const allowedDirectories = new Set([
   '.agents', '.git', '.github', 'assets', 'docs', 'integrations', 'node_modules',
-  'README.assets', 'scripts', 'src', 'test', 'tools'
+  'README.assets', 'platforms', 'scripts', 'src', 'test', 'tools'
 ]);
 const runtimeFilePatterns = [
   /^HamsterArchiv(?:e|er)\.exe$/i,
