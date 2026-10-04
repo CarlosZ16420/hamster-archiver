@@ -32,7 +32,7 @@ Downloads keep piling up, your drive is almost full, and organizing everything n
 
 **Your files can live elsewhere while a clear record of their contents and backup locations stays on your computer.**
 
-[![Library overview, cover gallery and search filters](README.assets/仓库-主目录.png)](README.assets/仓库-主目录.png)
+[![Library overview, cover gallery and search filters](assets/readme/library-showcase.en-US.png)](assets/readme/library-showcase.en-US.png)
 
 [![Large-thumbnail library view](README.assets/大缩略图模式.png)](README.assets/大缩略图模式.png)
 
@@ -50,6 +50,8 @@ The app packages files and records them; you or your sync tool handles cloud upl
 Choose Review Updates from an uncompressed folder's details or a selected batch. The task takes one complete snapshot when it runs: additions merge automatically, while modifications, deletions or incomplete older manifests require review. Choose to overwrite the record, create an independent record or skip. Unchanged files reuse existing MD5 fingerprints and previews without extracting video frames again; review updates leave originals untouched. Dropping the same source again leads to review updates or compression.
 
 After submitting a review, check progress and pending decisions in the Archive Workbench. Completion notices distinguish an unchanged folder from an updated Warehouse; manual action, failure and cancellation also receive specific feedback.
+
+The Archive Workbench uses a scrolling list for more than 10 tasks. Returning from the library recalculates its visible height, so existing tasks appear without adding another item.
 
 Finish or cancel a pending review or compression task before deleting its linked uncompressed Warehouse item. If the item is deleted first, adding the same source again starts a new item.
 
@@ -79,7 +81,7 @@ Download `HamsterArchiver-v4.8.0-beta.mac.2-mac-universal.dmg` and its `.sha256`
 
 Mac remains a beta. It includes 7-Zip; video frame extraction is off by default and requires your own FFmpeg configuration. Keep or move originals after archiving; Windows Recycle Bin deletion, restoration and file undo are unavailable. Download a newer DMG and replace the app manually to update.
 
-[![Batch archiving, progress tracking and duplicate review](README.assets/归档工作台-主目录.png)](README.assets/归档工作台-主目录.png)
+[![Batch archiving, progress tracking and duplicate review](assets/readme/archive-showcase.en-US.png)](assets/readme/archive-showcase.en-US.png)
 
 ### Ready for modern local workflows
 

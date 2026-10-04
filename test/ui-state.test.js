@@ -22,6 +22,86 @@ const {
   sourceDispositionPresentation
 } = require('../src/renderer/ui-state');
 
+function createWorkbenchLayoutHarness(count = 15) {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  const workbenchPageId = html.match(/class="nav-button" data-page="([^"]+)">归档工作台/)[1];
+  const pages = [{ id: 'library-page', hidden: false }, { id: workbenchPageId, hidden: true }];
+  const workspace = pages[1];
+  const classes = new Set();
+  const properties = new Map();
+  const frames = [];
+  const rows = Array.from({ length: count }, () => ({
+    getBoundingClientRect: () => ({ height: workspace.hidden ? 0 : 40 })
+  }));
+  const container = {
+    getClientRects: () => workspace.hidden ? [] : [{}],
+    classList: { add: value => classes.add(value), remove: value => classes.delete(value) },
+    style: { setProperty: (name, value) => properties.set(name, value), removeProperty: name => properties.delete(name) }
+  };
+  const buttons = pages.map(page => ({ dataset: { page: page.id }, classList: { toggle() {} } }));
+  const context = vm.createContext({
+    elements: {
+      taskListContainer: container,
+      taskList: { querySelectorAll: () => rows, closest: () => ({
+        tHead: { getBoundingClientRect: () => ({ height: workspace.hidden ? 0 : 30 }) }
+      }) }
+    },
+    document: {
+      querySelector: selector => buttons.find(button => selector.includes(button.dataset.page)),
+      querySelectorAll: selector => selector === '.nav-button' ? buttons : pages
+    },
+    requestAnimationFrame: callback => frames.push(callback),
+    catalogColumns: { cancel() {}, refresh() {} },
+    cancelCatalogMarquee: null,
+    currentState: null,
+    suspendedQueueSimilarityReport: false,
+    scheduleLibraryToolbarButton() {}
+  });
+  vm.runInContext(app.slice(app.indexOf('function updateTaskListHeight('), app.indexOf('function renderLogs(')), context);
+  vm.runInContext(app.slice(app.indexOf('function activatePage('), app.indexOf("document.querySelectorAll('.nav-button').forEach((button)")), context);
+  return { context, workbenchPageId, rows, classes, properties, flush: () => { while (frames.length) frames.shift()(); } };
+}
+
+test('returning to the workbench displays a large queue without adding tasks', () => {
+  const { context, workbenchPageId, rows, classes, properties, flush } = createWorkbenchLayoutHarness();
+  context.updateTaskListHeight();
+  assert.equal(properties.has('--queue-visible-height'), false, 'hidden startup must not store a collapsed height');
+  context.activatePage(workbenchPageId);
+  flush();
+  assert.equal(rows.length, 15);
+  assert.equal(properties.get('--queue-visible-height'), '432px');
+  assert.equal(classes.has('queue-scrollable'), true);
+});
+
+test('background queue updates preserve valid height and page return remeasures changed rows', () => {
+  const { context, workbenchPageId, rows, classes, properties, flush } = createWorkbenchLayoutHarness();
+  context.activatePage(workbenchPageId);
+  flush();
+  context.activatePage('library-page');
+  rows[0].getBoundingClientRect = () => ({ height: 80 });
+  context.updateTaskListHeight();
+  assert.equal(properties.get('--queue-visible-height'), '432px');
+  context.activatePage(workbenchPageId);
+  flush();
+  assert.equal(properties.get('--queue-visible-height'), '472px');
+  assert.equal(classes.has('queue-scrollable'), true);
+});
+
+test('queues with at most ten tasks clear scrolling even while hidden', () => {
+  const { context, workbenchPageId, rows, classes, properties, flush } = createWorkbenchLayoutHarness(11);
+  context.activatePage(workbenchPageId);
+  flush();
+  context.activatePage('library-page');
+  rows.splice(10);
+  context.updateTaskListHeight();
+  assert.equal(classes.has('queue-scrollable'), false);
+  assert.equal(properties.has('--queue-visible-height'), false);
+  rows.splice(0);
+  context.updateTaskListHeight();
+  assert.equal(classes.has('queue-scrollable'), false);
+});
+
 test('directory refresh reports each decision and result once without notifying historical tasks at startup', () => {
   const { directoryRefreshNotices } = require('../src/renderer/ui-state');
   const queued = { id: 'review', taskKind: 'catalog_refresh', status: 'queued', displayName: '测试目录' };
@@ -940,7 +1020,6 @@ test('warehouse controls expose the batch menu, queue viewport and thumbnail ico
   assert.match(batchMenu, /id="refresh-directories-selected"[^>]*>校对更新<\/button>/);
   assert.match(batchMenu, /id="compress-uncompressed-selected"[^>]*>压缩入库<\/button>/);
   assert.doesNotMatch(html, />批量追加标签<\/button>|>批量修改备份位置<\/button>/);
-  assert.match(app, /rows\.length > 10/);
   assert.match(styles, /#task-list-container\.queue-scrollable[^}]*overflow-y:\s*auto/);
   assert.match(styles, /#catalog-grid-view:hover svg[^}]*thumbnail-button-breathe/);
   assert.doesNotMatch(styles, /thumbnail-outline-(?:breathe|ripple)|#catalog-grid-view::(?:before|after)/);

@@ -1764,18 +1764,24 @@ function renderJobs(jobs) {
     row.append(actionCell);
     elements.taskList.append(row);
   }
-  requestAnimationFrame(() => {
-    const rows = [...elements.taskList.querySelectorAll('tr[data-job-id]')];
-    elements.taskListContainer.classList.toggle('queue-scrollable', rows.length > 10);
-    if (rows.length <= 10) {
-      elements.taskListContainer.style.removeProperty('--queue-visible-height');
-      return;
-    }
-    const table = elements.taskList.closest('table');
-    const headerHeight = table?.tHead?.getBoundingClientRect().height || 0;
-    const rowsHeight = rows.slice(0, 10).reduce((height, row) => height + row.getBoundingClientRect().height, 0);
-    elements.taskListContainer.style.setProperty('--queue-visible-height', `${Math.ceil(headerHeight + rowsHeight + 2)}px`);
-  });
+  requestAnimationFrame(updateTaskListHeight);
+}
+
+function updateTaskListHeight() {
+  const rows = [...elements.taskList.querySelectorAll('tr[data-job-id]')];
+  if (rows.length <= 10) {
+    elements.taskListContainer.classList.remove('queue-scrollable');
+    elements.taskListContainer.style.removeProperty('--queue-visible-height');
+    return;
+  }
+  // Hidden pages have no layout boxes. Measure after the workbench is shown.
+  if (elements.taskListContainer.getClientRects().length === 0) return;
+  const table = elements.taskList.closest('table');
+  const headerHeight = table?.tHead?.getBoundingClientRect().height || 0;
+  const rowsHeight = rows.slice(0, 10).reduce((height, row) => height + row.getBoundingClientRect().height, 0);
+  if (rowsHeight <= 0) return;
+  elements.taskListContainer.style.setProperty('--queue-visible-height', `${Math.ceil(headerHeight + rowsHeight + 2)}px`);
+  elements.taskListContainer.classList.add('queue-scrollable');
 }
 
 function renderLogs(logs) {
@@ -3703,6 +3709,7 @@ function activatePage(pageId) {
   if (!button) return;
     document.querySelectorAll('.nav-button').forEach((item) => item.classList.toggle('active', item === button));
     document.querySelectorAll('.app-page').forEach((page) => { page.hidden = page.id !== button.dataset.page; });
+    if (button.dataset.page === 'workbench-page') requestAnimationFrame(updateTaskListHeight);
     if (button.dataset.page === 'library-page' && currentState) {
       if (catalogRefreshDirty || Date.now() - lastCatalogRefreshAt > 10_000) void refreshCatalog();
       requestAnimationFrame(() => {
@@ -3831,6 +3838,7 @@ window.archiveApp.onUpdateProgress((progress) => {
   if (!elements.updateStatusChip || progress?.stage === 'prepared') return;
   elements.updateStatusChip.dataset.state = 'checking';
   if (progress.stage === 'copying') elements.updateStatusLabel.textContent = t('正在读取更新包…');
+  else if (progress.stage === 'fallback') elements.updateStatusLabel.textContent = t('GitHub 连接失败，正在尝试 CNB 镜像…');
   else if (progress.stage === 'verifying') elements.updateStatusLabel.textContent = t('正在校验更新…');
   else if (progress.stage === 'downloading') {
     elements.updateStatusLabel.textContent = t(progress.totalBytes

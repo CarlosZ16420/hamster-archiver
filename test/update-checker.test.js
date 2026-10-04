@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { checkForUpdates, compareVersions, isStableRelease, resolveCnbConfig, UPDATE_PROVIDER_CONFIG } = require('../src/core/update-checker');
+const { checkForUpdates, checkCnbForUpdates, compareVersions, isStableRelease, resolveCnbConfig, UPDATE_PROVIDER_CONFIG } = require('../src/core/update-checker');
 
 test('Mac beta points to manual GitHub downloads without presenting Windows stable as a Mac update', async () => {
   const result = await checkForUpdates({
@@ -332,7 +332,7 @@ test('GitHub success, including already-current, never requests CNB', async () =
   assert.deepEqual(calls, ['https://api.github.com/repos/CarlosZ16420/hamster-archiver/releases/latest']);
 });
 
-test('GitHub timeout, 404, HTTP error and parse failure each fall back to CNB', async (t) => {
+test('main-branch checks fall back to CNB on GitHub timeout, 404, HTTP error and parse failure', async (t) => {
   const failures = {
     timeout: () => { const error = new Error('timed out'); error.name = 'TimeoutError'; throw error; },
     notFound: () => ({ ok: false, status: 404 }),
@@ -344,6 +344,7 @@ test('GitHub timeout, 404, HTTP error and parse failure each fall back to CNB', 
       const calls = [];
       const result = await checkForUpdates({
         currentVersion: '4.6.0',
+        stableBranch: 'main',
         cnb: cnbConfig,
         fetchImpl: async (url) => {
           calls.push(url);
@@ -399,8 +400,9 @@ test('public CNB latest redirect discovers a release and constructs tokenless la
   assert.equal(calls[1].redirect, 'manual');
 });
 
-test('public CNB latest redirect rejects another host or an unrelated path', async () => {
-  for (const location of ['https://evil.example/releases/tag/v4.6.1', '/carlosz16420/hamster-archive/-/issues/v4.6.1']) {
+test('public CNB latest redirect rejects another host, unrelated paths and Beta tags', async () => {
+  for (const location of ['https://evil.example/releases/tag/v4.6.1', '/carlosz16420/hamster-archive/-/issues/v4.6.1',
+    '/carlosz16420/hamster-archive/-/releases/tag/v4.6.1-beta.1']) {
     await assert.rejects(() => checkForUpdates({
       currentVersion: '4.6.0',
       cnb: UPDATE_PROVIDER_CONFIG.cnb,
@@ -409,6 +411,31 @@ test('public CNB latest redirect rejects another host or an unrelated path', asy
         : { ok: false, status: 307, headers: { get: () => location } }
     }), /CNB latest 跳转/);
   }
+});
+
+test('application main-branch checks discover portable and installed updates through the public CNB mirror', async () => {
+  for (const distributionMode of ['portable', 'installed']) {
+    const result = await checkForUpdates({ currentVersion: '4.8.2', stableBranch: 'main', distributionMode,
+      includeHistory: true, environment: {}, fetchImpl: async (url, options) => {
+        if (url.includes('api.github.com')) throw new Error('GitHub offline');
+        assert.equal(options.redirect, 'manual');
+        return { status: 307, headers: { get: () => '/carlosz16420/hamster-archive/-/releases/tag/v4.8.3' } };
+      } });
+    assert.equal(result.provider, 'cnb');
+    assert.equal(result.updateAvailable, true);
+    assert.equal(result.latestVersion, '4.8.3');
+    assert.equal(result.installable, true);
+    assert.equal(result.historyIncomplete, true);
+    assert.equal(result.asset.name, distributionMode === 'portable'
+      ? 'HamsterArchiver-v4.8.3-win-x64.zip' : 'HamsterArchiver-Setup-v4.8.3-win-x64.exe');
+  }
+});
+
+test('CNB fallback preserves the confirmed version and rejects conflicting branch metadata', async () => {
+  await assert.rejects(() => checkCnbForUpdates({ currentVersion: '4.6.0', expectedVersion: '4.6.1', cnb: cnbConfig,
+    fetchImpl: async () => ({ ok: true, json: async () => cnbRelease('4.6.2') }) }), /镜像版本与已确认/);
+  await assert.rejects(() => checkCnbForUpdates({ currentVersion: '4.6.0', cnb: cnbConfig,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ ...cnbRelease(), target_commitish: 'feature/test' }) }) }), /正式版本/);
 });
 
 test('redirect discovery keeps latest usable and marks history unavailable without an authenticated API call', async () => {
