@@ -161,7 +161,7 @@ function releaseFromCnbRedirect(response, adapter) {
   }
   let tag;
   try { tag = decodeURIComponent(target.pathname.slice(prefix.length)); } catch { tag = ''; }
-  if (!/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
+  if (!/^v\d+\.\d+\.\d+$/.test(tag)) {
     throw new Error('CNB latest 跳转缺少有效版本标签');
   }
   const version = tag.slice(1);
@@ -212,7 +212,9 @@ async function fetchLatestRelease(adapter, fetchImpl, timeoutMs, stableBranch = 
       const kind = error.name === 'TimeoutError' || error.name === 'AbortError' ? '请求超时' : `连接失败：${error.message}`;
       throw new Error(`${adapter.label} ${kind}`);
     }
-    throw new Error(`${adapter.label} Release 响应缺少 ${stableBranch} 分支的有效正式版本`);
+    const error = new Error(`${adapter.label} Release 响应缺少 ${stableBranch} 分支的有效正式版本`);
+    error.code = 'UPDATE_STABLE_RELEASE_NOT_FOUND';
+    throw error;
   }
   const requestUrl = adapter.latestApiUrl;
   let response;
@@ -256,7 +258,7 @@ async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeo
       const releases = await response.json();
       if (!Array.isArray(releases)) break;
       for (const item of releases) {
-        if (!isStableRelease(item, stableBranch)) continue;
+        if (!isStableRelease(item, adapter.provider === 'cnb' && !item.target_commitish ? '' : stableBranch)) continue;
         if (compareVersions(item.tag_name, currentVersion) > 0 && compareVersions(item.tag_name, release.tag_name) <= 0) {
           const entry = displayRelease(item, adapter);
           versions.set(entry.version, entry);
@@ -346,30 +348,49 @@ async function checkForUpdates({
   if (typeof fetchImpl !== 'function') throw new Error('当前运行环境不支持联网检查更新。');
   const normalizedDistributionMode = distributionMode === 'mac' ? 'mac' : distributionMode === 'installed' ? 'installed' : 'portable';
   const github = createGithubAdapter();
-  let adapter = github;
   let release;
   let githubFailure;
   try {
     release = await fetchLatestRelease(github, fetchImpl, timeoutMs, stableBranch);
   } catch (error) {
     githubFailure = error;
-    if (stableBranch) throw new Error(`在线更新未找到 ${stableBranch} 分支的正式版本：${githubFailure.message}`);
-    const cnbConfig = resolveCnbConfig(cnb, environment);
-    if (!cnbConfig.configured) {
-      throw new Error(`检查更新失败：${githubFailure.message}；${cnbConfig.reason}`);
+    if (error.code === 'UPDATE_STABLE_RELEASE_NOT_FOUND') {
+      throw new Error(`在线更新未找到 ${stableBranch} 分支的正式版本：${githubFailure.message}`);
     }
-    adapter = createCnbAdapter(cnbConfig);
     try {
-      release = await fetchLatestRelease(adapter, fetchImpl, timeoutMs);
+      return await checkCnbForUpdates({ currentVersion, distributionMode: normalizedDistributionMode,
+        includeHistory, fetchImpl, timeoutMs, cnb, environment, stableBranch });
     } catch (cnbFailure) {
       throw new Error(`检查更新失败：${githubFailure.message}；${cnbFailure.message}`);
     }
   }
   const updateAvailable = compareVersions(release.tag_name, currentVersion) > 0;
   const history = includeHistory && updateAvailable
+    ? await collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter: github, stableBranch })
+    : { releases: [], historyIncomplete: false };
+  return normalizeRelease({ release, adapter: github, currentVersion, distributionMode: normalizedDistributionMode, history });
+}
+
+async function checkCnbForUpdates({ currentVersion, distributionMode = 'portable', includeHistory = false,
+  fetchImpl = globalThis.fetch, timeoutMs = 8_000, cnb = UPDATE_PROVIDER_CONFIG.cnb,
+  environment = process.env, stableBranch = 'main', expectedVersion = '' } = {}) {
+  const config = resolveCnbConfig(cnb, environment);
+  if (!config.configured) throw new Error(config.reason);
+  const adapter = createCnbAdapter(config);
+  const release = await fetchLatestRelease(adapter, fetchImpl, timeoutMs);
+  // The configured mirror only publishes stable releases. Reject conflicting
+  // branch metadata when available; public latest redirects expose only a tag.
+  if (!isStableRelease(release) || (stableBranch && release.target_commitish &&
+      String(release.target_commitish).trim() !== stableBranch)) {
+    throw new Error('CNB Release 响应缺少有效的正式版本');
+  }
+  if (expectedVersion && String(release.tag_name).replace(/^v/i, '') !== String(expectedVersion).replace(/^v/i, '')) {
+    throw new Error('CNB 镜像版本与已确认的更新版本不一致，请重新检查更新。');
+  }
+  const history = includeHistory && compareVersions(release.tag_name, currentVersion) > 0
     ? await collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter, stableBranch })
     : { releases: [], historyIncomplete: false };
-  return normalizeRelease({ release, adapter, currentVersion, distributionMode: normalizedDistributionMode, history });
+  return normalizeRelease({ release, adapter, currentVersion, distributionMode, history });
 }
 
 module.exports = {
@@ -378,6 +399,7 @@ module.exports = {
   RELEASES_URL,
   UPDATE_PROVIDER_CONFIG,
   checkForUpdates,
+  checkCnbForUpdates,
   collectReleaseHistory,
   compareVersions,
   createCnbAdapter,

@@ -32,7 +32,7 @@ const { isValidMcpDiagnosticFile, isValidMcpReadyFile, mcpTempDirectory, takeDes
 // Keep the initial process light enough to create the startup window before
 // parsing the archive, database, media and update implementation.
 let AppStore, QueueManager, generateThumbnails, checkForUpdates, rendererI18n;
-let prepareUpdate, prepareLocalUpdate, prepareInstalledUpdate, prepareLocalInstalledUpdate;
+let prepareOnlineUpdate, prepareLocalUpdate, prepareLocalInstalledUpdate, createUpdateDownloadFetch, fetchUpdateResource;
 let launchUpdate, launchInstalledUpdate, cleanupSuccessfulUpdateRuns;
 let consumeUpdateFailure, readUpdateSuccessNotice, manualUpdateInstructions;
 
@@ -41,9 +41,13 @@ function loadRuntimeModules() {
   ({ QueueManager } = require('./core/queue-manager'));
   ({ createThumbnails: generateThumbnails } = require('./core/thumbnail-service'));
   ({ checkForUpdates } = require('./core/update-checker'));
-  ({ prepareUpdate, prepareLocalUpdate, prepareInstalledUpdate, prepareLocalInstalledUpdate,
+  ({ prepareOnlineUpdate, prepareLocalUpdate, prepareLocalInstalledUpdate,
+    createUpdateDownloadFetch,
     launchUpdate, launchInstalledUpdate, cleanupSuccessfulUpdateRuns,
     consumeUpdateFailure, readUpdateSuccessNotice, manualUpdateInstructions } = require('./core/update-manager'));
+  const downloadFetch = createUpdateDownloadFetch((options) => net.request(options));
+  fetchUpdateResource = (url, options) => options?.redirect === 'manual'
+    ? downloadFetch(url, options) : net.fetch(url, options);
 }
 
 function writeJsonAtomic(filePath, value) {
@@ -1654,7 +1658,7 @@ function registerIpc() {
       distributionMode: process.platform === 'darwin' ? 'mac' : isInstalledDistribution ? 'installed' : 'portable',
       includeHistory: options?.silent !== true,
       stableBranch: 'main',
-      fetchImpl: net.fetch,
+      fetchImpl: fetchUpdateResource,
       timeoutMs: options?.silent === true ? 6_000 : 8_000
     });
     const result = options?.silent === true
@@ -1684,21 +1688,21 @@ function registerIpc() {
     }
     updateInstallInFlight = true;
     try {
-      const prepared = await (isInstalledDistribution ? prepareInstalledUpdate : prepareUpdate)({
+      const prepared = await prepareOnlineUpdate({
         applicationRoot,
         userDataDirectory: queueManager.config.userDataDirectory,
         sevenZipPath: resolveApplicationPath(applicationRoot, queueManager.config.sevenZipPath),
         currentVersion: result.currentVersion,
         release: result,
-        fetchImpl: net.fetch,
+        fetchImpl: fetchUpdateResource,
         onProgress: (progress) => {
           if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:progress', progress);
         }
       });
       const updateState = await (isInstalledDistribution ? promptAndLaunchPreparedInstaller : promptAndLaunchPreparedUpdate)({
-        prepared, version: result.latestVersion, releaseUrl: result.releaseUrl
+        prepared, version: result.latestVersion, releaseUrl: prepared.releaseUrl || result.releaseUrl
       });
-      return { ...result, ...updateState };
+      return { ...prepared.release, ...updateState };
     } catch (error) {
       await appendRuntimeLog('error', `准备版本 ${version} 更新失败：${error.message}`).catch(() => {});
       throw error;

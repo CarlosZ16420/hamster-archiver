@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const { execFile } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const fs = require('node:fs/promises');
@@ -8,13 +9,16 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { promisify } = require('node:util');
+const { Readable } = require('node:stream');
 const {
   APPLY_UPDATE_SCRIPT,
   INSTALL_STAGE_ITEMS_SCRIPT,
   UPDATE_LAUNCHER_SCRIPT,
   consumeUpdateFailure,
+  createUpdateDownloadFetch,
   downloadFile,
   fetchDigestSidecar,
+  fetchWithTrustedRedirects,
   hashFile,
   installedPackageVersion,
   launchInstalledUpdate,
@@ -23,6 +27,9 @@ const {
   manualUpdateInstructions,
   normalizeDigest,
   normalizeVersion,
+  prepareOnlineUpdate,
+  prepareUpdate,
+  prepareInstalledUpdate,
   readUpdateSuccessNotice,
   resolveDownloadTrust,
   resolvePowerShellExecutable,
@@ -243,6 +250,69 @@ test('GitHub and CNB downloads use provider-specific host allowlists, including 
   assert.equal(cnbCalls, 1);
 });
 
+test('Electron update transport exposes manual redirects without following unvalidated hosts', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-electron-update-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const digest = 'a'.repeat(64);
+  const calls = [];
+  const fetchImpl = createUpdateDownloadFetch((options) => {
+    const request = new EventEmitter();
+    calls.push(options);
+    request.abort = () => { request.aborted = true; };
+    request.end = () => queueMicrotask(() => {
+      if (new URL(options.url).hostname === 'github.com') {
+        const target = options.url.includes('unsafe') ? 'https://evil.example/package.zip'
+          : `https://release-assets.githubusercontent.com/${path.basename(options.url)}`;
+        request.emit('redirect', 302, 'GET', target);
+        if (!request.aborted) request.emit('error', new Error('Redirect was cancelled'));
+        return;
+      }
+      const body = options.url.endsWith('.sha256') ? `${digest} *package.zip` : 'verified update';
+      const incoming = Readable.from([Buffer.from(body)]);
+      incoming.statusCode = 200;
+      incoming.headers = { 'content-length': String(Buffer.byteLength(body)), 'x-test': ['one', 'two'] };
+      request.emit('response', incoming);
+    });
+    return request;
+  });
+  assert.equal(await fetchDigestSidecar('https://github.com/package.zip.sha256', fetchImpl), digest);
+  const targetPath = path.join(root, 'package.zip');
+  const progress = [];
+  await downloadFile('https://github.com/package.zip', targetPath, fetchImpl, (value) => progress.push(value));
+  assert.equal(await fs.readFile(targetPath, 'utf8'), 'verified update');
+  assert.equal(progress.at(-1).percentage, 100);
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every(call => call.redirect === 'manual' && call.method === 'GET'));
+  await assert.rejects(() => downloadFile('https://github.com/unsafe.zip', targetPath, fetchImpl), /GitHub HTTPS/);
+  assert.equal(calls.length, 5);
+  assert.ok(calls.every(call => new URL(call.url).hostname !== 'evil.example'));
+});
+
+test('Electron update transport propagates request and response stream failures', async () => {
+  const fetchImpl = createUpdateDownloadFetch(() => {
+    const request = new EventEmitter();
+    request.end = () => queueMicrotask(() => request.emit('error', new Error('connection failed')));
+    return request;
+  });
+  await assert.rejects(() => fetchImpl('https://github.com/package.zip'), /connection failed/);
+  let incoming;
+  const streamingFetch = createUpdateDownloadFetch(() => {
+    const request = new EventEmitter();
+    request.abort = () => request.emit('close');
+    request.end = () => queueMicrotask(() => {
+      incoming = new Readable({ read() {} });
+      incoming.statusCode = 200;
+      incoming.headers = {};
+      request.emit('response', incoming);
+    });
+    return request;
+  });
+  const response = await streamingFetch('https://github.com/package.zip');
+  const text = response.text();
+  incoming.emit('aborted');
+  await assert.rejects(() => text, /下载已中断/);
+});
+
 test('CNB download metadata must match the locally configured source exactly', () => {
   const config = {
     configured: true,
@@ -258,6 +328,161 @@ test('CNB download metadata must match the locally configured source exactly', (
     source: { provider: 'cnb', ...config, releasesUrl: 'https://cnb.test/other/releases' }
   }, config), /不一致/);
   assert.throws(() => resolveDownloadTrust({ provider: 'unknown' }), /不支持的更新来源/);
+});
+
+test('manual Electron requests respect timeout signals before and after response headers', async () => {
+  const controller = new AbortController();
+  controller.abort(new DOMException('request timed out', 'TimeoutError'));
+  const noRequest = createUpdateDownloadFetch(() => { throw new Error('must not start an aborted request'); });
+  await assert.rejects(() => noRequest('https://github.com/package.zip', { signal: controller.signal }), /timed out/);
+  let aborted = false;
+  let incoming;
+  const active = new AbortController();
+  const fetchImpl = createUpdateDownloadFetch(() => {
+    const request = new EventEmitter();
+    request.abort = () => { aborted = true; request.emit('close'); };
+    request.end = () => queueMicrotask(() => {
+      incoming = new Readable({ read() {} });
+      incoming.statusCode = 200;
+      incoming.headers = {};
+      request.emit('response', incoming);
+    });
+    return request;
+  });
+  const response = await fetchImpl('https://github.com/package.zip', { signal: active.signal });
+  const text = response.text();
+  active.abort(new DOMException('body timed out', 'TimeoutError'));
+  await assert.rejects(() => text, /timed out/);
+  assert.equal(aborted, true);
+  await assert.rejects(() => fetchWithTrustedRedirects('https://github.com/package.zip', {},
+    async () => { throw new DOMException('timed out', 'TimeoutError'); },
+    resolveDownloadTrust({ provider: 'github' }), '更新包地址'), { code: 'UPDATE_DOWNLOAD_NETWORK_ERROR' });
+  await assert.rejects(() => fetchWithTrustedRedirects('https://github.com/package.zip', {},
+    async (_url, options) => new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason))),
+    resolveDownloadTrust({ provider: 'github' }), '更新包地址', 5, 5), { code: 'UPDATE_DOWNLOAD_NETWORK_ERROR' });
+});
+
+test('stalled update streams are cancelled and reported as network failures', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-update-stall-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let cancelled = false;
+  await assert.rejects(() => downloadFile('https://github.com/package.zip', path.join(root, 'package.zip'),
+    async () => new Response(new ReadableStream({ cancel() { cancelled = true; } })), () => {},
+    resolveDownloadTrust({ provider: 'github' }), { readTimeoutMs: 5 }), { code: 'UPDATE_DOWNLOAD_NETWORK_ERROR' });
+  assert.equal(cancelled, true);
+});
+
+test('portable and installed preparations switch failed GitHub downloads to the verified same-version CNB package', {
+  skip: process.platform !== 'win32'
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-update-mirror-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const packageRoot = path.join(root, 'package');
+  await fs.mkdir(packageRoot);
+  await fs.writeFile(path.join(packageRoot, 'HamsterArchiver.exe'), 'fictional application');
+  const integrityFiles = await createFileIntegrityEntries(packageRoot, ['HamsterArchiver.exe']);
+  await fs.writeFile(path.join(packageRoot, 'release-manifest.json'), JSON.stringify({
+    schemaVersion: 2, version: '4.8.3', platform: 'win32-x64', integrity: { files: integrityFiles }
+  }));
+  const sevenZipPath = path.resolve(__dirname, '..', 'tools', '7zip', '7z.exe');
+  const archivePath = path.join(root, 'package.zip');
+  await execFileAsync(sevenZipPath, ['a', '-tzip', archivePath, packageRoot], { windowsHide: true });
+  for (const distributionMode of ['portable', 'installed']) {
+    const bytes = distributionMode === 'portable' ? await fs.readFile(archivePath) : Buffer.from('fictional installer');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const name = distributionMode === 'portable' ? 'HamsterArchiver-v4.8.3-win-x64.zip' : 'HamsterArchiver-Setup-v4.8.3-win-x64.exe';
+    const calls = [];
+    const progress = [];
+    const prepared = await prepareOnlineUpdate({
+      applicationRoot: path.join(root, 'application'), userDataDirectory: path.join(root, distributionMode),
+      sevenZipPath, currentVersion: '4.8.2', environment: {},
+      release: { latestVersion: '4.8.3', provider: 'github', distributionMode,
+        releaseNotes: { 'zh-CN': ['已确认的说明。'], 'en-US': ['Confirmed notes.'] },
+        asset: { name, digest: `sha256:${digest}`, downloadUrl: `https://github.com/${name}` } },
+      onProgress: value => progress.push(value), fetchImpl: async (url) => {
+        calls.push(url);
+        if (new URL(url).hostname === 'github.com') return new Response(null, { status: 503 });
+        if (url.endsWith('/releases/latest')) return new Response(null, { status: 307,
+          headers: { location: '/carlosz16420/hamster-archive/-/releases/tag/v4.8.3' } });
+        return new Response(url.endsWith('.sha256') ? `${digest} *${name}` : bytes);
+      }
+    });
+    assert.equal(prepared.provider, 'cnb');
+    assert.equal(prepared.release.provider, 'cnb');
+    assert.equal(prepared.version, '4.8.3');
+    assert.equal(prepared.digest, digest);
+    assert.deepEqual(prepared.releaseNotes['en-US'], ['Confirmed notes.']);
+    assert.equal(calls.filter(url => new URL(url).hostname === 'github.com').length, 1);
+    assert.equal(progress.some(value => value.stage === 'fallback'), true);
+    if (distributionMode === 'portable') await fs.access(path.join(prepared.packageRoot, 'HamsterArchiver.exe'));
+    else assert.equal(await fs.readFile(prepared.installerPath, 'utf8'), 'fictional installer');
+  }
+});
+
+test('update fallback does not bypass checksum, URL trust or local file failures', async () => {
+  for (const error of [new Error('SHA256 校验失败'), new Error('不是受信任的 HTTPS 地址'), Object.assign(new Error('disk full'), { code: 'ENOSPC' })]) {
+    await assert.rejects(() => prepareOnlineUpdate({ release: { provider: 'github' } }, {
+      prepareImpl: async () => { throw error; },
+      checkCnbImpl: () => { throw new Error('CNB must not be consulted'); }
+    }), value => value === error);
+  }
+});
+
+test('both update formats reject conflicting mirror digests before downloading or extracting the package', {
+  skip: process.platform !== 'win32'
+}, async () => {
+  for (const prepare of [prepareUpdate, prepareInstalledUpdate]) {
+    let calls = 0;
+    await assert.rejects(() => prepare({
+      confirmedDigest: 'a'.repeat(64), currentVersion: '4.8.2',
+      release: { latestVersion: '4.8.3', provider: 'github',
+        asset: { name: 'HamsterArchiver-Setup-v4.8.3-win-x64.exe',
+          digestDownloadUrl: 'https://github.com/package.sha256', downloadUrl: 'https://github.com/package' } },
+      fetchImpl: async () => { calls += 1; return new Response(`${'b'.repeat(64)} *package`); }
+    }), /摘要与 GitHub 已确认/);
+    assert.equal(calls, 1);
+  }
+});
+
+test('fallback retains a GitHub sidecar digest when the package download fails', {
+  skip: process.platform !== 'win32'
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-update-sidecar-binding-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const calls = [];
+  await assert.rejects(() => prepareOnlineUpdate({
+    currentVersion: '4.8.2', userDataDirectory: root, environment: {},
+    release: { provider: 'github', latestVersion: '4.8.3', distributionMode: 'installed', asset: {
+      name: 'HamsterArchiver-Setup-v4.8.3-win-x64.exe', downloadUrl: 'https://github.com/installer.exe',
+      digestDownloadUrl: 'https://github.com/installer.exe.sha256'
+    } },
+    fetchImpl: async (url) => {
+      calls.push(url);
+      if (url === 'https://github.com/installer.exe.sha256') return new Response('a'.repeat(64));
+      if (url === 'https://github.com/installer.exe') return new Response(null, { status: 503 });
+      if (url.endsWith('/releases/latest')) return new Response(null, { status: 307,
+        headers: { location: '/carlosz16420/hamster-archive/-/releases/tag/v4.8.3' } });
+      assert.ok(url.endsWith('.sha256'));
+      return new Response('b'.repeat(64));
+    }
+  }), /摘要与 GitHub 已确认/);
+  assert.equal(calls.length, 4);
+  assert.deepEqual(await fs.readdir(path.join(root, 'updates')), []);
+});
+
+test('a mismatched CNB digest is rejected and its prepared files are removed', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-update-mirror-digest-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await assert.rejects(() => prepareOnlineUpdate({
+    currentVersion: '4.8.2', release: { provider: 'github', latestVersion: '4.8.3', asset: { digest: 'a'.repeat(64) } }
+  }, {
+    prepareImpl: async ({ release }) => {
+      if (release.provider === 'github') throw Object.assign(new Error('offline'), { code: 'UPDATE_DOWNLOAD_NETWORK_ERROR' });
+      return { runRoot: root, digest: 'b'.repeat(64) };
+    },
+    checkCnbImpl: async (options) => { assert.equal(options.expectedVersion, '4.8.3'); return { provider: 'cnb' }; }
+  }), /摘要与 GitHub 已确认/);
+  await assert.rejects(() => fs.access(root), /ENOENT/);
 });
 
 test('installed update accepts only a strictly named newer Setup package', () => {

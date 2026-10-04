@@ -6,8 +6,9 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
+const { Readable } = require('node:stream');
 const { verifyFileIntegrityEntries } = require('./tool-integrity');
-const { compareVersions, resolveCnbConfig } = require('./update-checker');
+const { checkCnbForUpdates, compareVersions, resolveCnbConfig } = require('./update-checker');
 const { compactReleaseNotesPayload } = require('./release-notes');
 
 const execFileAsync = promisify(execFile);
@@ -261,6 +262,50 @@ async function readUpdateSuccessNotice({ userDataDirectory, noticeFile, currentV
   };
 }
 
+function createUpdateDownloadFetch(requestImpl) {
+  // Electron net.fetch rejects manual redirects before exposing Location.
+  // Surface net.request's redirect event as a response, then abort that request;
+  // fetchWithTrustedRedirects validates the destination before requesting it.
+  return (url, options = {}) => new Promise((resolve, reject) => {
+    const signal = options.signal;
+    if (signal?.aborted) { reject(signal.reason); return; }
+    const request = requestImpl({ url, method: 'GET', headers: options.headers, redirect: 'manual' });
+    let responseStream;
+    const abort = () => {
+      const error = signal.reason;
+      responseStream?.destroy(error);
+      reject(error);
+      request.abort();
+    };
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    signal?.addEventListener('abort', abort, { once: true });
+    request.once('close', cleanup);
+    request.on('error', (error) => { cleanup(); reject(error); });
+    request.once('redirect', (status, _method, redirectUrl) => {
+      try { resolve(new Response(null, { status, headers: { location: redirectUrl } })); }
+      catch (error) { reject(error); }
+      finally { cleanup(); request.abort(); }
+    });
+    request.once('response', (incoming) => {
+      responseStream = incoming;
+      try {
+        const headers = new Headers();
+        for (const [name, values] of Object.entries(incoming.headers)) {
+          for (const value of Array.isArray(values) ? values : [values]) headers.append(name, value);
+        }
+        incoming.once('aborted', () => incoming.destroy(new Error('更新下载已中断。')));
+        incoming.once('close', () => { if (!incoming.readableEnded) request.abort(); });
+        resolve(new Response(Readable.toWeb(incoming), { status: incoming.statusCode, headers }));
+      } catch (error) {
+        reject(error);
+        request.abort();
+      }
+    });
+    if (signal?.aborted) { abort(); return; }
+    request.end();
+  });
+}
+
 function resolveDownloadTrust(release, providerConfig, environment = process.env) {
   const provider = String(release?.provider || release?.asset?.provider || 'github').toLowerCase();
   if (provider === 'github') return { provider, hosts: GITHUB_DOWNLOAD_HOSTS };
@@ -285,10 +330,22 @@ function validateProviderUrl(url, trust, label) {
   return parsed.href;
 }
 
-async function fetchWithTrustedRedirects(url, options, fetchImpl, trust, label, maxRedirects = 5) {
+function updateDownloadNetworkError(error) {
+  return Object.assign(new Error(error.message, { cause: error }), { code: 'UPDATE_DOWNLOAD_NETWORK_ERROR' });
+}
+
+async function fetchWithTrustedRedirects(url, options, fetchImpl, trust, label, maxRedirects = 5, timeoutMs = 20_000) {
   let currentUrl = validateProviderUrl(url, trust, label);
   for (let redirects = 0; redirects <= maxRedirects; redirects += 1) {
-    const response = await fetchImpl(currentUrl, { ...options, redirect: 'manual' });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(new Error('下载更新超时，请检查网络。')), timeoutMs);
+    let response;
+    try {
+      response = await fetchImpl(currentUrl, { ...options, redirect: 'manual',
+        signal: options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal });
+    } catch (error) {
+      throw updateDownloadNetworkError(error);
+    } finally { clearTimeout(timer); }
     if (![301, 302, 303, 307, 308].includes(response.status)) return response;
     if (redirects === maxRedirects) throw new Error(`${label}重定向次数过多。`);
     const location = response.headers?.get?.('location');
@@ -302,10 +359,12 @@ async function fetchWithTrustedRedirects(url, options, fetchImpl, trust, label, 
 async function fetchDigestSidecar(url, fetchImpl, trust = { provider: 'github', hosts: GITHUB_DOWNLOAD_HOSTS }) {
   if (!url) return '';
   const response = await fetchWithTrustedRedirects(url, {
-    headers: { Accept: 'text/plain', 'User-Agent': 'hamster-archiver-update-manager' }
+    headers: { Accept: 'text/plain', 'User-Agent': 'hamster-archiver-update-manager' },
+    signal: AbortSignal.timeout(30_000)
   }, fetchImpl, trust, 'SHA256 摘要地址');
-  if (!response.ok) throw new Error(`SHA256 摘要下载失败（HTTP ${response.status}）。`);
-  return normalizeDigest(await response.text());
+  if (!response.ok) throw Object.assign(new Error(`SHA256 摘要下载失败（HTTP ${response.status}）。`), { code: 'UPDATE_DOWNLOAD_HTTP_ERROR' });
+  try { return normalizeDigest(await response.text()); }
+  catch (error) { throw updateDownloadNetworkError(error); }
 }
 
 async function hashFile(filePath) {
@@ -314,20 +373,27 @@ async function hashFile(filePath) {
   return hash.digest('hex');
 }
 
-async function downloadFile(url, targetPath, fetchImpl, onProgress = () => {}, trust = { provider: 'github', hosts: GITHUB_DOWNLOAD_HOSTS }) {
+async function downloadFile(url, targetPath, fetchImpl, onProgress = () => {}, trust = { provider: 'github', hosts: GITHUB_DOWNLOAD_HOSTS }, { readTimeoutMs = 30_000 } = {}) {
   const response = await fetchWithTrustedRedirects(url, {
     headers: { Accept: 'application/octet-stream', 'User-Agent': 'hamster-archiver-update-manager' }
   }, fetchImpl, trust, '更新包地址');
-  if (!response.ok) throw new Error(`更新包下载失败（HTTP ${response.status}）。`);
+  if (!response.ok) throw Object.assign(new Error(`更新包下载失败（HTTP ${response.status}）。`), { code: 'UPDATE_DOWNLOAD_HTTP_ERROR' });
   const totalBytes = Number(response.headers.get('content-length')) || 0;
   if (!response.body?.getReader) throw new Error('当前运行环境不支持流式下载更新包。');
   await fsp.mkdir(path.dirname(targetPath), { recursive: true });
   const handle = await fsp.open(targetPath, 'w');
   let downloadedBytes = 0;
+  const reader = response.body.getReader();
   try {
-    const reader = response.body.getReader();
     while (true) {
-      const result = await reader.read();
+      let timer;
+      let result;
+      try {
+        result = await Promise.race([reader.read(), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('下载更新超时，请检查网络。')), readTimeoutMs);
+        })]);
+      } catch (error) { throw updateDownloadNetworkError(error); }
+      finally { clearTimeout(timer); }
       if (result.done) break;
       await handle.write(result.value);
       downloadedBytes += result.value.byteLength;
@@ -335,6 +401,7 @@ async function downloadFile(url, targetPath, fetchImpl, onProgress = () => {}, t
         ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)) : 0 });
     }
   } finally {
+    await reader.cancel().catch(() => {});
     await handle.close();
   }
 }
@@ -390,13 +457,45 @@ async function validateUpdatePackage(packageRoot, currentVersion, expectedVersio
   return { manifest, version, releaseNotes: compactReleaseNotesPayload(manifest.releaseNotes) };
 }
 
-async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath, currentVersion, release, fetchImpl, onProgress = () => {}, providerConfig, environment = process.env }) {
+async function prepareOnlineUpdate(options, { prepareImpl, checkCnbImpl = checkCnbForUpdates } = {}) {
+  const release = options.release;
+  const prepare = prepareImpl || (release?.distributionMode === 'installed' ? prepareInstalledUpdate : prepareUpdate);
+  try { return { ...await prepare(options), release }; }
+  catch (githubError) {
+    if (String(release?.provider || release?.asset?.provider || 'github') !== 'github' ||
+        !['UPDATE_DOWNLOAD_NETWORK_ERROR', 'UPDATE_DOWNLOAD_HTTP_ERROR'].includes(githubError.code)) throw githubError;
+    options.onProgress?.({ stage: 'fallback', provider: 'cnb', percentage: 0 });
+    let prepared;
+    try {
+      const mirrored = await checkCnbImpl({ currentVersion: options.currentVersion,
+        distributionMode: release.distributionMode, expectedVersion: release.latestVersion,
+        fetchImpl: options.fetchImpl, environment: options.environment,
+        cnb: options.cnb, stableBranch: 'main' });
+      const expectedDigest = normalizeDigest(release.asset?.digest) || githubError.updateExpectedDigest;
+      const mirroredRelease = { ...mirrored, releaseNotes: release.releaseNotes || mirrored.releaseNotes };
+      prepared = await prepare({ ...options, providerConfig: resolveCnbConfig(options.cnb, options.environment),
+        confirmedDigest: expectedDigest, release: mirroredRelease });
+      if (expectedDigest && prepared.digest !== expectedDigest) {
+        throw new Error('CNB 更新包摘要与 GitHub 已确认的摘要不一致，已停止更新。');
+      }
+      return { ...prepared, release: mirroredRelease };
+    } catch (cnbError) {
+      if (prepared?.runRoot) await fsp.rm(prepared.runRoot, { recursive: true, force: true }).catch(() => {});
+      throw new Error(`准备更新失败：${githubError.message}；${cnbError.message}`);
+    }
+  }
+}
+
+async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath, currentVersion, release, fetchImpl, onProgress = () => {}, providerConfig, environment = process.env, confirmedDigest = '' }) {
   if (process.platform !== 'win32') throw new Error('自动更新目前仅支持 Windows 便携版。');
   if (!release?.asset?.downloadUrl) throw new Error('这个 Release 没有可用的 Windows 更新包。');
   const trust = resolveDownloadTrust(release, providerConfig, environment);
   const expectedDigest = normalizeDigest(release.asset.digest) ||
     await fetchDigestSidecar(release.asset.digestDownloadUrl, fetchImpl, trust);
   if (!expectedDigest) throw new Error('Release 缺少 SHA256 摘要，已停止更新。');
+  if (confirmedDigest && expectedDigest !== normalizeDigest(confirmedDigest)) {
+    throw new Error('CNB 更新包摘要与 GitHub 已确认的摘要不一致，已停止更新。');
+  }
   const version = String(release.latestVersion || '').replace(/[^0-9A-Za-z.-]/g, '_');
   const runRoot = path.join(path.resolve(userDataDirectory), 'updates', `${version}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`);
   const archivePath = path.join(runRoot, 'package.zip');
@@ -421,9 +520,11 @@ async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath,
       source: 'automatic',
       provider: trust.provider,
       releaseUrl: release.releaseUrl,
+      digest: actualDigest,
       releaseNotes: compactReleaseNotesPayload(release.releaseNotes) || validated.releaseNotes
     };
   } catch (error) {
+    error.updateExpectedDigest = expectedDigest;
     await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
@@ -446,7 +547,7 @@ function validateInstalledPackageVersion(packagePath, currentVersion, expectedVe
   return version;
 }
 
-async function prepareInstalledUpdate({ userDataDirectory, currentVersion, release, fetchImpl, onProgress = () => {}, providerConfig, environment = process.env }) {
+async function prepareInstalledUpdate({ userDataDirectory, currentVersion, release, fetchImpl, onProgress = () => {}, providerConfig, environment = process.env, confirmedDigest = '' }) {
   if (process.platform !== 'win32') throw new Error('安装版自动更新目前仅支持 Windows。');
   if (!release?.asset?.downloadUrl) throw new Error('这个 Release 没有可用的 Windows 安装程序。');
   const version = validateInstalledPackageVersion(release.asset.name, currentVersion, release.latestVersion);
@@ -454,6 +555,9 @@ async function prepareInstalledUpdate({ userDataDirectory, currentVersion, relea
   const expectedDigest = normalizeDigest(release.asset.digest) ||
     await fetchDigestSidecar(release.asset.digestDownloadUrl, fetchImpl, trust);
   if (!expectedDigest) throw new Error('Release 缺少安装程序 SHA256 摘要，已停止更新。');
+  if (confirmedDigest && expectedDigest !== normalizeDigest(confirmedDigest)) {
+    throw new Error('CNB 更新包摘要与 GitHub 已确认的摘要不一致，已停止更新。');
+  }
   const runRoot = path.join(
     path.resolve(userDataDirectory),
     'updates',
@@ -475,9 +579,11 @@ async function prepareInstalledUpdate({ userDataDirectory, currentVersion, relea
       source: 'automatic',
       provider: trust.provider,
       releaseUrl: release.releaseUrl,
+      digest: actualDigest,
       releaseNotes: compactReleaseNotesPayload(release.releaseNotes)
     };
   } catch (error) {
+    error.updateExpectedDigest = expectedDigest;
     await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
@@ -775,11 +881,13 @@ module.exports = {
   normalizeVersion,
   hashFile,
   downloadFile,
+  createUpdateDownloadFetch,
   fetchDigestSidecar,
   fetchWithTrustedRedirects,
   resolveDownloadTrust,
   validateProviderUrl,
   prepareUpdate,
+  prepareOnlineUpdate,
   prepareLocalUpdate,
   prepareInstalledUpdate,
   prepareLocalInstalledUpdate,
