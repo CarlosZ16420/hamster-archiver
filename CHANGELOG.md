@@ -1,5 +1,15 @@
 # Changelog
 
+## 4.8.4 · Windows Stable
+
+### 中文
+
+本次覆盖公开 Windows 正式版 4.8.3 → 4.8.4：修复更新下载跳转，增加保持版本与 SHA-256 的 CNB 网络回退，保护更新退出期间的任务与写入，改善更新成功提示、归档工作台列表和中英文 README。受旧下载故障影响的用户需要手动安装一次新版；资料保持兼容，无需迁移。完整双语说明见 `docs/releases/public-release-notes-v4.8.4.md`。
+
+### English
+
+This release covers public Windows stable 4.8.3 → 4.8.4: fixes update redirects, adds CNB network fallback bound to the same version and SHA-256, protects tasks and writes during update shutdown, and improves success notices, Workbench lists and the bilingual README. Users affected by the old download failure must upgrade manually once. User data remains compatible without migration. See `docs/releases/public-release-notes-v4.8.4.md` for complete bilingual notes.
+
 ## 4.8.3 · Windows Stable
 
 ### 中文
