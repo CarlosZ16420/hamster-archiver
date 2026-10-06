@@ -10,6 +10,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { promisify } = require('node:util');
 const { Readable } = require('node:stream');
+const vm = require('node:vm');
 const {
   APPLY_UPDATE_SCRIPT,
   INSTALL_STAGE_ITEMS_SCRIPT,
@@ -39,6 +40,292 @@ const {
 const { createFileIntegrityEntries } = require('../src/core/tool-integrity');
 
 const execFileAsync = promisify(execFile);
+
+async function createUpdateSuccessHarness({ integrityTest = false } = {}) {
+  const main = await fs.readFile(path.resolve(__dirname, '../src/main.js'), 'utf8');
+  const events = [];
+  const warnings = [];
+  let runScheduled;
+  let finishLoading;
+  let finishDialog;
+  const window = {
+    destroyed: false,
+    isDestroyed() { return this.destroyed; },
+    show() { events.push('show'); },
+    focus() { events.push('focus'); }
+  };
+  const context = vm.createContext({
+    mainWindow: window,
+    queueManager: { config: { language: 'zh-CN' } },
+    appendReleaseNotes: text => text,
+    pendingUpdateSuccess: { fromVersion: '4.8.3', toVersion: '4.8.4', runRoot: 'test-update-root' },
+    isSmokeTest: false,
+    isStartupIntegrityTest: integrityTest,
+    startedAsMcpBackground: false,
+    setImmediate: callback => { runScheduled = callback; },
+    waitForWindowReady: async owner => {
+      assert.equal(owner, window);
+      events.push('wait');
+      await new Promise((resolve, reject) => {
+        finishLoading = error => error ? reject(error) : resolve();
+      });
+    },
+    dialog: { showMessageBox: async owner => {
+      assert.equal(owner, window);
+      events.push('dialog');
+      await new Promise((resolve, reject) => {
+        finishDialog = error => error ? reject(error) : resolve({ response: 0 });
+      });
+    } },
+    fs: { rm: async root => {
+      assert.equal(root, 'test-update-root');
+      events.push('cleanup');
+    } },
+    console: { error: message => warnings.push(message), warn: message => warnings.push(message) }
+  });
+  vm.runInContext(main.slice(main.indexOf('async function showUpdateSuccessDialog('),
+    main.indexOf('async function promptAndLaunchPreparedUpdate(')), context);
+  const scheduledStart = main.indexOf('  if (pendingUpdateSuccess &&');
+  vm.runInContext(main.slice(scheduledStart, main.indexOf('  if (pendingUpdateFailure &&', scheduledStart)), context);
+  runScheduled?.();
+  return {
+    events, warnings, window,
+    finishLoading: error => finishLoading(error),
+    finishDialog: error => finishDialog(error),
+    flush: () => new Promise(resolve => setImmediate(resolve))
+  };
+}
+
+test('update success waits for the visible owner and cleans up only after acknowledgment', async () => {
+  const harness = await createUpdateSuccessHarness();
+  assert.deepEqual(harness.events, ['wait']);
+  harness.finishLoading();
+  await harness.flush();
+  assert.deepEqual(harness.events, ['wait', 'show', 'focus', 'dialog']);
+  harness.finishDialog();
+  await harness.flush();
+  assert.equal(harness.events.at(-1), 'cleanup');
+  assert.deepEqual(harness.warnings, []);
+});
+
+for (const stage of ['loading', 'dialog']) {
+  test(`update success preserves the notice after a ${stage} failure`, async () => {
+    const harness = await createUpdateSuccessHarness();
+    if (stage === 'loading') harness.finishLoading(new Error('load failed'));
+    else {
+      harness.finishLoading();
+      await harness.flush();
+      harness.finishDialog(new Error('dialog failed'));
+    }
+    await harness.flush();
+    assert.equal(harness.events.includes('cleanup'), false);
+    assert.match(harness.warnings[0], /UPDATE_SUCCESS_DIALOG_WARNING/);
+  });
+}
+
+test('update success preserves the notice if its window closes while loading', async () => {
+  const harness = await createUpdateSuccessHarness();
+  harness.window.destroyed = true;
+  harness.finishLoading();
+  await harness.flush();
+  assert.deepEqual(harness.events, ['wait']);
+  assert.match(harness.warnings[0], /UPDATE_SUCCESS_DIALOG_WARNING/);
+});
+
+test('startup integrity verification leaves the success notice for an interactive launch', async () => {
+  const harness = await createUpdateSuccessHarness({ integrityTest: true });
+  assert.deepEqual(harness.events, []);
+});
+
+async function createUpdateRestartHarness() {
+  const main = await fs.readFile(path.resolve(__dirname, '../src/main.js'), 'utf8');
+  let confirm;
+  const events = [];
+  const context = vm.createContext({
+    queueManager: { running: false, config: { language: 'zh-CN' }, log: async () => {} },
+    dialog: { showMessageBox: () => new Promise(resolve => { confirm = resolve; }) },
+    mainWindow: {},
+    releasesUrl: 'https://github.com/CarlosZ16420/hamster-archiver/releases',
+    appendReleaseNotes: text => text,
+    launchUpdate: async () => { events.push('portable-launch'); },
+    launchInstalledUpdate: async () => { events.push('installer-launch'); },
+    showUpdateFailureDialog: async () => {},
+    allowWindowClose: false,
+    updateQuitRequested: false,
+    process: { pid: 1 },
+    console,
+    app: { quit: () => { events.push('quit'); } }
+  });
+  vm.runInContext(main.slice(main.indexOf('async function promptAndLaunchPreparedUpdate('),
+    main.indexOf('async function runLocalPackageUpdate(')), context);
+  return { context, events, main, confirm: response => confirm({ response }) };
+}
+
+function attachUpdateQuitLifecycle({ context, events, main }, { tray = true } = {}) {
+  const handlers = {};
+  Object.assign(context, {
+    mcpTray: tray ? {} : null,
+    clearMcpIdleTimer() {},
+    scheduleTimer: null,
+    shutdownInProgress: false,
+    mcpServer: null,
+    shutdownLogComplete: false,
+    shutdownLogInProgress: false,
+    pendingCatalog: false,
+    appStore: { closeAll() {} }
+  });
+  context.queueManager.hasPendingCatalogOperations = () => context.pendingCatalog;
+  context.queueManager.stopForShutdown = async () => {
+    events.push('queue-drained');
+    context.queueManager.running = false;
+  };
+  context.queueManager.waitForCatalogOperations = async () => {
+    events.push('catalog-drained');
+    context.pendingCatalog = false;
+  };
+  context.queueManager.waitForLogWrites = async () => events.push('logs-drained');
+  context.mainWindow.on = (name, handler) => { handlers[`window:${name}`] = handler; };
+  context.mainWindow.hide = () => events.push('hidden');
+  context.app.on = (name, handler) => { handlers[name] = handler; };
+  context.app.quit = () => {
+    events.push('quit');
+    const event = { prevented: false, preventDefault() { this.prevented = true; } };
+    handlers['before-quit'](event);
+    if (event.prevented) return;
+    handlers['window:close'](event);
+    if (!event.prevented) events.push('exited');
+  };
+  const start = main.indexOf("  mainWindow.on('close', async (event) => {");
+  vm.runInContext(main.slice(start, main.indexOf("  if (process.env.HAMSTER_SMOKE_TEST === '1') {", start)), context);
+  vm.runInContext(main.slice(main.indexOf("app.on('window-all-closed', () => {")), context);
+}
+
+for (const name of ['promptAndLaunchPreparedUpdate', 'promptAndLaunchPreparedInstaller']) {
+  test(`${name} refuses a queue started while update confirmation was open`, async () => {
+    const harness = await createUpdateRestartHarness();
+    const updating = harness.context[name]({ prepared: {}, version: '4.8.3' });
+    harness.context.queueManager.running = true;
+    harness.confirm(0);
+    await assert.rejects(updating, /归档任务运行期间不能更新/);
+    assert.deepEqual(harness.events, []);
+    assert.equal(harness.context.allowWindowClose, false);
+    assert.equal(harness.context.updateQuitRequested, false);
+  });
+
+  test(`${name} keeps normal shutdown protection after launching an updater`, async () => {
+    const harness = await createUpdateRestartHarness();
+    const updating = harness.context[name]({ prepared: {}, version: '4.8.3' });
+    harness.confirm(0);
+    const result = await updating;
+    assert.equal(result.restarting, true);
+    assert.equal(harness.events.length, 2);
+    assert.equal(harness.events[1], 'quit');
+    assert.equal(harness.context.allowWindowClose, false,
+      'a late queue or catalog write must still drain through before-quit');
+    assert.equal(harness.context.updateQuitRequested, true);
+  });
+
+  test(`${name} exits tray mode and drains work started while the launcher was awaiting`, async () => {
+    const harness = await createUpdateRestartHarness();
+    attachUpdateQuitLifecycle(harness);
+    const lateStart = async () => {
+      harness.events.push('launched');
+      harness.context.queueManager.running = true;
+      harness.context.pendingCatalog = true;
+    };
+    harness.context.launchUpdate = lateStart;
+    harness.context.launchInstalledUpdate = lateStart;
+    const updating = harness.context[name]({ prepared: {}, version: '4.8.3' });
+    harness.confirm(0);
+    await updating;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(harness.events.includes('exited'));
+    assert.ok(harness.events.indexOf('queue-drained') < harness.events.indexOf('exited'));
+    assert.ok(harness.events.indexOf('catalog-drained') < harness.events.indexOf('exited'));
+    assert.ok(harness.events.indexOf('logs-drained') < harness.events.indexOf('exited'));
+    assert.equal(harness.events.includes('hidden'), false);
+  });
+
+  test(`${name} exits an idle tray instance without bypassing normal shutdown`, async () => {
+    const harness = await createUpdateRestartHarness();
+    attachUpdateQuitLifecycle(harness);
+    const updating = harness.context[name]({ prepared: {}, version: '4.8.3' });
+    harness.confirm(0);
+    await updating;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(harness.events.includes('logs-drained'));
+    assert.ok(harness.events.includes('exited'));
+    assert.equal(harness.events.includes('hidden'), false);
+  });
+}
+
+// Opt-in real Chromium transport regression; ordinary unit tests do not prepare
+// Electron or access external release servers.
+test('real Electron update transport exposes redirects before reading an asset', {
+  skip: !process.env.HAMSTER_TEST_ELECTRON_PATH,
+  timeout: 45_000
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-update-electron-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const resultPath = path.join(root, 'result.json');
+  const scriptPath = path.join(root, 'transport.cjs');
+  const modulePath = path.resolve(__dirname, '../src/core/update-manager.js');
+  await fs.mkdir(path.join(root, 'electron'));
+  await fs.writeFile(scriptPath, `
+    const assert = require('node:assert/strict');
+    const fs = require('node:fs/promises');
+    const http = require('node:http');
+    const { app, net } = require('electron');
+    const { createUpdateDownloadFetch } = require(${JSON.stringify(modulePath)});
+    app.setPath('userData', ${JSON.stringify(path.join(root, 'electron'))});
+    let server;
+    const deadline = setTimeout(() => app.exit(1), 30_000);
+    app.whenReady().then(async () => {
+      let assetRequests = 0;
+      server = http.createServer((request, response) => {
+        if (request.url === '/redirect') {
+          response.writeHead(302, { Location: '/asset' });
+          response.end();
+        } else if (request.url === '/asset') {
+          assetRequests += 1;
+          response.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+          response.end('verified asset');
+        } else {
+          response.writeHead(404);
+          response.end();
+        }
+      });
+      await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+      const base = 'http://127.0.0.1:' + server.address().port;
+      const fetch = createUpdateDownloadFetch(options => net.request(options));
+      const redirect = await fetch(base + '/redirect', { signal: AbortSignal.timeout(10_000) });
+      assert.equal(redirect.status, 302);
+      assert.equal(new URL(redirect.headers.get('location'), base).href, base + '/asset');
+      assert.equal(assetRequests, 0, 'transport must not follow an unvalidated redirect');
+      const asset = await fetch(base + '/asset', { signal: AbortSignal.timeout(10_000) });
+      assert.equal(asset.status, 200);
+      assert.equal(await asset.text(), 'verified asset');
+      assert.equal(assetRequests, 1);
+      await fs.writeFile(${JSON.stringify(resultPath)}, JSON.stringify({ success: true, assetRequests }));
+    }).catch(async error => {
+      await fs.writeFile(${JSON.stringify(resultPath)}, JSON.stringify({ success: false, error: error.stack }));
+      process.exitCode = 1;
+    }).finally(() => {
+      clearTimeout(deadline);
+      server?.closeAllConnections();
+      server?.close();
+      app.quit();
+    });
+  `, 'utf8');
+  const env = { ...process.env };
+  delete env.ELECTRON_RUN_AS_NODE;
+  await execFileAsync(process.env.HAMSTER_TEST_ELECTRON_PATH, [scriptPath], {
+    env, windowsHide: true, timeout: 40_000, maxBuffer: 1024 * 1024
+  });
+  const result = JSON.parse(await fs.readFile(resultPath, 'utf8'));
+  assert.equal(result.success, true, result.error);
+  assert.equal(result.assetRequests, 1);
+});
 
 test('update digest accepts GitHub SHA256 format and rejects malformed values', () => {
   const digest = 'a'.repeat(64);

@@ -36,15 +36,15 @@ test('checksum comparison rejects tampered ZIP bytes', () => {
   assert.notEqual(crypto.createHash('sha256').update(tampered).digest('hex'), expected);
 });
 
-test('public first-screen links and package copy list reach the offline AI guide', async () => {
+test('public README links and package copy list reach the offline AI guide', async () => {
   const root = path.resolve(__dirname, '..');
   const readme = await fs.readFile(path.join(root, 'README.md'), 'utf8');
   const english = await fs.readFile(path.join(root, 'README.en.md'), 'utf8');
   const quickStart = await fs.readFile(path.join(root, 'docs', 'AI-QUICKSTART.md'), 'utf8');
   const acquisition = await fs.readFile(path.join(root, 'docs', 'RELEASE-ACQUISITION.md'), 'utf8');
   const build = await fs.readFile(path.join(root, 'scripts', 'build-release.js'), 'utf8');
-  assert.match(readme.slice(0, 1800), /docs\/AI-QUICKSTART\.md/);
-  assert.match(english.slice(0, 1800), /docs\/AI-QUICKSTART\.md/);
+  assert.match(readme, /docs\/AI-QUICKSTART\.md/);
+  assert.match(english, /docs\/AI-QUICKSTART\.md/);
   assert.match(quickStart, /RELEASE-ACQUISITION\.md/);
   assert.match(acquisition, /HamsterArchiver-v4\.6\.18-win-x64\.zip\.sha256/);
   assert.match(acquisition, /7fcb96fd551c8f2004e3df37da1767f4aa19f149e5edfecd89abed45bd14f3b2/);

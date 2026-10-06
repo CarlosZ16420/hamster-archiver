@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "4.8.4",
+  "notes": {
+    "zh-CN": [
+      "修复 Windows 更新下载跳转，并提供保持版本与 SHA-256 的 CNB 网络回退。",
+      "保护更新退出期间的任务与写入，改善更新成功提示和归档工作台列表。",
+      "同步中英文 README；旧版自动更新失败时请手动安装一次新版，资料保持兼容。"
+    ],
+    "en-US": [
+      "Fix Windows update redirects and add CNB network fallback bound to the same version and SHA-256.",
+      "Protect tasks and writes during update shutdown, and improve success notices and Workbench lists.",
+      "Synchronize the bilingual README; manually upgrade once if old automatic updates fail. User data remains compatible."
+    ]
+  }
+}

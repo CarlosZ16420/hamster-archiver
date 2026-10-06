@@ -68,6 +68,7 @@ let startupWindow;
 let queueManager;
 let appStore;
 let allowWindowClose = false;
+let updateQuitRequested = false;
 let closePromptOpen = false;
 let shutdownInProgress = false;
 let shutdownLogInProgress = false;
@@ -714,13 +715,19 @@ function appendReleaseNotes(detail, releaseNotes, english) {
 }
 
 async function showUpdateSuccessDialog(notice) {
+  const browserWindow = mainWindow;
+  if (!browserWindow || browserWindow.isDestroyed()) throw new Error('界面在加载完成前已关闭。');
+  await waitForWindowReady(browserWindow);
+  if (browserWindow.isDestroyed()) throw new Error('界面在加载完成前已关闭。');
+  browserWindow.show();
+  browserWindow.focus();
   const english = queueManager?.config?.language === 'en-US';
   const versionDetail = notice.fromVersion
     ? (english
         ? `Previous version: ${notice.fromVersion}\nCurrent version: ${notice.toVersion}`
         : `原版本：${notice.fromVersion}\n当前版本：${notice.toVersion}`)
     : (english ? `Current version: ${notice.toVersion}` : `当前版本：${notice.toVersion}`);
-  await dialog.showMessageBox(mainWindow, {
+  await dialog.showMessageBox(browserWindow, {
     type: 'info',
     title: english ? 'Update complete' : '更新完成',
     message: english
@@ -759,6 +766,11 @@ async function promptAndLaunchPreparedUpdate({
     await queueManager?.log('info', `更新包 ${version} 已校验；用户选择稍后重启。`);
     return { staged: true };
   }
+  if (queueManager?.running) {
+    throw new Error(english
+      ? 'Updates are unavailable while the archive queue is running. Pause or finish the current task first.'
+      : '归档任务运行期间不能更新，请先暂停或完成当前任务。');
+  }
   try {
     await launchUpdate({ prepared, targetPid: process.pid });
   } catch (error) {
@@ -768,7 +780,9 @@ async function promptAndLaunchPreparedUpdate({
     return { staged: true, launchFailed: true, error: error.message };
   }
   await queueManager?.log('warning', `更新包 ${version} 已校验，应用将重启并执行更新。`);
-  allowWindowClose = true;
+  // Work can begin while the download, confirmation or launch is awaiting.
+  // Keep before-quit responsible for draining any late queue/catalog writes.
+  updateQuitRequested = true;
   app.quit();
   return { restarting: true };
 }
@@ -793,6 +807,11 @@ async function promptAndLaunchPreparedInstaller({ prepared, version, releaseUrl 
     await queueManager?.log('info', `安装程序 ${version} 已校验；用户选择稍后安装。`);
     return { staged: true };
   }
+  if (queueManager?.running) {
+    throw new Error(english
+      ? 'Updates are unavailable while the archive queue is running. Pause or finish the current task first.'
+      : '归档任务运行期间不能更新，请先暂停或完成当前任务。');
+  }
   try {
     await launchInstalledUpdate({ prepared });
   } catch (error) {
@@ -802,7 +821,7 @@ async function promptAndLaunchPreparedInstaller({ prepared, version, releaseUrl 
     return { staged: true, launchFailed: true, error: error.message };
   }
   await queueManager?.log('warning', `安装程序 ${version} 已校验，应用将退出并启动安装。`);
-  allowWindowClose = true;
+  updateQuitRequested = true;
   app.quit();
   return { restarting: true, installerStarted: true };
 }
@@ -1055,12 +1074,12 @@ function createWindow() {
   void mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
   mainWindow.on('close', async (event) => {
-    if (mcpTray && !allowWindowClose) {
+    if (mcpTray && !allowWindowClose && !updateQuitRequested) {
       event.preventDefault();
       mainWindow.hide();
       return;
     }
-    if (allowWindowClose) return;
+    if (allowWindowClose || updateQuitRequested) return;
     const catalogOperationPending = Boolean(queueManager?.hasPendingCatalogOperations?.());
     if (!queueManager?.running && catalogOperationPending) {
       event.preventDefault();
@@ -2502,12 +2521,12 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   applicationReady = true;
   if (!startedAsMcpBackground) createWindow();
   else if (pendingWindowShow) createWindow();
-  if (pendingUpdateSuccess && !isSmokeTest && !startedAsMcpBackground) {
+  if (pendingUpdateSuccess && !isSmokeTest && !isStartupIntegrityTest && !startedAsMcpBackground) {
     setImmediate(() => {
       void showUpdateSuccessDialog(pendingUpdateSuccess)
-        .catch((error) => console.error(`UPDATE_SUCCESS_DIALOG_WARNING ${error.message}`))
-        .finally(() => fs.rm(pendingUpdateSuccess.runRoot, { recursive: true, force: true })
-          .catch((error) => console.warn(`UPDATE_SUCCESS_CLEANUP_WARNING ${error.message}`)));
+        .then(() => fs.rm(pendingUpdateSuccess.runRoot, { recursive: true, force: true })
+          .catch((error) => console.warn(`UPDATE_SUCCESS_CLEANUP_WARNING ${error.message}`)))
+        .catch((error) => console.error(`UPDATE_SUCCESS_DIALOG_WARNING ${error.message}`));
     });
   }
   if (pendingUpdateFailure && !isSmokeTest && !startedAsMcpBackground) {
@@ -2642,7 +2661,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
-  if (mcpTray && !allowWindowClose) return;
+  if (mcpTray && !allowWindowClose && !updateQuitRequested) return;
   if (process.platform !== 'darwin') app.quit();
 });
 
