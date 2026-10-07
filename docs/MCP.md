@@ -18,6 +18,8 @@ The server exposes exactly three tools:
 
 Known routine actions should call stable capabilities directly. Intake uses `intake.submit`; observation and continuation use `task.get`, `task.wait`, `task.resolve`, `task.retry`, and `task.cancel`. Search and metadata operations use `catalog.search`, `catalog.details`, and `catalog.add_tags`. Do not make doctor, discovery, description, `intake.plan`, global queue checks, or post-save catalog verification a fixed ritual.
 
+`settings.patch` accepts `archiveStagingAutomatic` (default `true`). When enabled, staging follows the archive output folder. Disable it to preserve or choose a manual staging path; setting only `archiveStagingDirectory` also selects manual mode. Existing custom paths are preserved when loading older settings.
+
 `intake.submit` accepts explicit absolute paths, `archive` or `inventory_only`, optional task-local archive output/staging and source-disposition fields, and `waitMilliseconds` from 0 to 2000 (default 1500). Set `responseVersion:2` for `layout:single|children|ask`, task-local `onDuplicate`, immediate acceptance with `preparing`, and v2 receipts. V2 checks an existing request ID against the original explicit intent before reading today's saved preferences. A matching replay returns the same task; changed intent returns `REQUEST_ID_CONFLICT`. Only the selected task's job IDs are scheduled.
 
 ## Task and error envelopes

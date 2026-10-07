@@ -88,7 +88,9 @@ contextBridge.exposeInMainWorld('archiveApp', {
     ipcRenderer.on('scan:progress', (_event, progress) => callback(progress));
   },
   onUpdateProgress: (callback) => {
-    ipcRenderer.on('update:progress', (_event, progress) => callback(progress));
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on('update:progress', listener);
+    return () => ipcRenderer.removeListener('update:progress', listener);
   },
   onSimilarityRebuildProgress: (callback) => {
     ipcRenderer.on('similarity:rebuild-progress', (_event, progress) => callback(progress));

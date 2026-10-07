@@ -33,6 +33,7 @@ const settingsPatchProperties = {
   language: { type: 'string', enum: ['zh-CN', 'en-US'] },
   intakeDirectory: optionalStringSchema(),
   archiveStagingDirectory: optionalStringSchema(),
+  archiveStagingAutomatic: { type: 'boolean' },
   archiveOutputDirectory: optionalStringSchema(),
   moveCompleted: { type: 'boolean' },
   autoTrashCompleted: { type: 'boolean' },
@@ -424,7 +425,7 @@ function createCapabilityService(manager, services = {}) {
     }
     if (name === 'settings.patch') {
       const keys = Object.keys(input.patch || {});
-      if (!keys.some((key) => ['archiveOutputDirectory', 'archiveStagingDirectory', 'repositoryDirectory', 'moveCompleted', 'autoTrashCompleted', 'processedSourceDirectory', 'archivePassword'].includes(key))) return null;
+      if (!keys.some((key) => ['archiveOutputDirectory', 'archiveStagingDirectory', 'archiveStagingAutomatic', 'repositoryDirectory', 'moveCompleted', 'autoTrashCompleted', 'processedSourceDirectory', 'archivePassword'].includes(key))) return null;
       return { target: keys, impact: 'Changes future archive destinations, source handling, or archive password.', recovery: 'Apply another validated settings patch before starting new work.' };
     }
     if (name === 'queue.confirm') {
@@ -494,6 +495,9 @@ function createCapabilityService(manager, services = {}) {
     if (name === 'settings.get') return { settings: publicSettings(manager.config), intakePreferences: intakePreferences(manager) };
     if (name === 'settings.patch') {
       const patch = { ...(input.patch || {}) };
+      if (Object.hasOwn(patch, 'archiveStagingDirectory') && !Object.hasOwn(patch, 'archiveStagingAutomatic')) {
+        patch.archiveStagingAutomatic = false;
+      }
       for (const key of Object.keys(patch)) if (!settingsPatchKeys.has(key)) throw new Error(`Setting ${key} cannot be written through MCP`);
       const preferenceKeys = ['archiveOutputDirectory', 'moveCompleted', 'autoTrashCompleted', 'processedSourceDirectory'];
       const state = await manager.updateConfig({ ...manager.config, ...patch }, { source: 'mcp', recordIntakePreferences: preferenceKeys.some((key) => Object.hasOwn(patch, key)) });

@@ -77,6 +77,18 @@ function makeArchiveStagingDirectory(archiveOutputDirectory) {
   return output ? `${path.resolve(output)}-staging` : '';
 }
 
+function resolveArchiveStagingPreference(config) {
+  const staging = String(config.archiveStagingDirectory || config.stagingDir || '').trim();
+  const derived = makeArchiveStagingDirectory(config.archiveOutputDirectory || config.libraryDir);
+  const automatic = typeof config.archiveStagingAutomatic === 'boolean'
+    ? config.archiveStagingAutomatic
+    : !staging || normalizeForComparison(staging) === normalizeForComparison(derived);
+  return {
+    archiveStagingAutomatic: automatic,
+    archiveStagingDirectory: automatic ? derived : staging
+  };
+}
+
 function resolveApplicationPath(applicationRoot, configuredPath) {
   const value = String(configuredPath || '').trim();
   if (!value) return '';
@@ -123,6 +135,7 @@ function makeDefaultConfig(workspaceRoot, userDataLayout = {}) {
     userDataDirectory: userDataRoot,
     intakeDirectory: '',
     archiveStagingDirectory: '',
+    archiveStagingAutomatic: true,
     archiveOutputDirectory: '',
     repositoryDirectory: userDataLayout.repositoryDirectory || path.join(userDataRoot, 'warehouse'),
     sevenZipPath: PORTABLE_SEVEN_ZIP_PATH,
@@ -233,6 +246,7 @@ module.exports = {
   PORTABLE_SEVEN_ZIP_PATH,
   rebasePortableUserDataPaths,
   resolveApplicationPath,
+  resolveArchiveStagingPreference,
   validatePathLayout,
   validateSourceSelection,
   validateWindowsFileStem

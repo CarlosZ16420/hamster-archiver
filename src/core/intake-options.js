@@ -35,6 +35,8 @@ function savedIntakePreferences(config = {}) {
       archiveOutputDirectory: path.normalize(marker.archiveOutputDirectory),
       archiveStagingDirectory: path.normalize(marker.archiveOutputDirectory) === path.normalize(config.archiveOutputDirectory || '')
         ? String(config.archiveStagingDirectory || '').trim() : '',
+      archiveStagingAutomatic: path.normalize(marker.archiveOutputDirectory) === path.normalize(config.archiveOutputDirectory || '')
+        ? config.archiveStagingAutomatic : true,
       sourceDisposition: marker.sourceDisposition,
       processedSourceDirectory: marker.sourceDisposition === 'move'
         ? String(marker.processedSourceDirectory || '').trim()
@@ -49,6 +51,7 @@ function savedIntakePreferences(config = {}) {
   return {
     archiveOutputDirectory: path.normalize(archiveOutputDirectory),
     archiveStagingDirectory: String(config.archiveStagingDirectory || '').trim(),
+    archiveStagingAutomatic: config.archiveStagingAutomatic,
     sourceDisposition: move ? 'move' : 'trash',
     processedSourceDirectory: move ? processedSourceDirectory : ''
   };
@@ -99,7 +102,8 @@ function resolveIntakeOptions(explicitInput = {}, savedPreferences = {}) {
     const archiveStagingDirectory = explicitInput.archiveStagingDirectory
       ? absolutePath(explicitInput.archiveStagingDirectory, 'archiveStagingDirectory')
       : savedStaging ? absolutePath(savedStaging, 'archiveStagingDirectory')
-        : makeArchiveStagingDirectory(archiveOutputDirectory);
+        : saved.archiveStagingAutomatic === false && path.normalize(String(saved.archiveOutputDirectory || '')) === archiveOutputDirectory
+          ? '' : makeArchiveStagingDirectory(archiveOutputDirectory);
     return Object.freeze({ responseVersion: 2, mode, layout, onDuplicate, archiveOutputDirectory,
       archiveStagingDirectory, sourceDisposition, processedSourceDirectory });
   }
@@ -129,7 +133,8 @@ function resolveIntakeOptions(explicitInput = {}, savedPreferences = {}) {
     ? absolutePath(explicitInput.archiveStagingDirectory, 'archiveStagingDirectory')
     : savedStaging
       ? absolutePath(savedStaging, 'archiveStagingDirectory')
-      : makeArchiveStagingDirectory(archiveOutputDirectory);
+      : saved.archiveStagingAutomatic === false && path.normalize(String(saved.archiveOutputDirectory || '')) === archiveOutputDirectory
+        ? '' : makeArchiveStagingDirectory(archiveOutputDirectory);
   return Object.freeze({
     mode,
     archiveOutputDirectory,

@@ -1,14 +1,6 @@
 {
   "schemaVersion": 1,
-  "privateSourceCommit": "01232b2581792bbdd265653cd3896e65399b7a04",
-  "exportDigest": "2992edcf8f23c690582a05cbc566173d5817e1db2f3376dda241a8684fe35a77",
-  "exportedAt": "2026-10-06T14:07:51.837Z",
-  "maintenance": {
-    "basePublicCommit": "c2a4163dbc5471ae8430bae92f952903af3d452b",
-    "privateSourceCommit": "31be02c562d193ba8671c6ac7eb0fb22d9173b89",
-    "files": [
-      "src/config/public-snapshot-boundary.json",
-      "scripts/verify-version.js"
-    ]
-  }
+  "privateSourceCommit": "6ecfdc3d01f65da096c51ead940268ff87fdf311",
+  "exportDigest": "9c1f768b6c8176aabdef8367b55e06f747eb2c4d6a234a4644f7ee2200bf3f2f",
+  "exportedAt": "2026-10-07T20:53:48.630Z"
 }

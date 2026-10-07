@@ -6,14 +6,14 @@ const crypto = require('node:crypto');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeImage, net, shell, Tray } = require('electron');
 const { performanceTrace } = require('./core/performance-trace');
 const {
-  makeArchiveStagingDirectory,
   makeDefaultConfig,
   normalizeForComparison,
   normalizePortableProgramPath,
   PORTABLE_FFMPEG_PATH,
   PORTABLE_SEVEN_ZIP_PATH,
   rebasePortableUserDataPaths,
-  resolveApplicationPath
+  resolveApplicationPath,
+  resolveArchiveStagingPreference
 } = require('./core/paths');
 const {
   makeUserDataLayout,
@@ -31,16 +31,17 @@ const { isValidMcpDiagnosticFile, isValidMcpReadyFile, mcpTempDirectory, takeDes
 
 // Keep the initial process light enough to create the startup window before
 // parsing the archive, database, media and update implementation.
-let AppStore, QueueManager, generateThumbnails, checkForUpdates, rendererI18n;
+let AppStore, QueueManager, generateThumbnails, checkForUpdates, selectCheckedRelease, rendererI18n;
 let prepareOnlineUpdate, prepareLocalUpdate, prepareLocalInstalledUpdate, createUpdateDownloadFetch, fetchUpdateResource;
-let launchUpdate, launchInstalledUpdate, cleanupSuccessfulUpdateRuns;
+let launchUpdate, launchInstalledUpdate, launchMacUpdate, prepareLocalMacUpdate, cleanupSuccessfulUpdateRuns;
 let consumeUpdateFailure, readUpdateSuccessNotice, manualUpdateInstructions;
 
 function loadRuntimeModules() {
   ({ AppStore } = require('./core/store'));
   ({ QueueManager } = require('./core/queue-manager'));
   ({ createThumbnails: generateThumbnails } = require('./core/thumbnail-service'));
-  ({ checkForUpdates } = require('./core/update-checker'));
+  ({ checkForUpdates, selectCheckedRelease } = require('./core/update-checker'));
+  ({ launchMacUpdate, prepareLocalMacUpdate } = require('./core/mac-update-manager'));
   ({ prepareOnlineUpdate, prepareLocalUpdate, prepareLocalInstalledUpdate,
     createUpdateDownloadFetch,
     launchUpdate, launchInstalledUpdate, cleanupSuccessfulUpdateRuns,
@@ -65,6 +66,7 @@ const isInstalledDistribution = app.isPackaged && distributionMode === 'installe
 
 let mainWindow;
 let startupWindow;
+let startupWindowReady = false;
 let queueManager;
 let appStore;
 let allowWindowClose = false;
@@ -280,7 +282,7 @@ function showMainWindow() {
   clearMcpIdleTimer();
   if (!applicationReady) {
     pendingWindowShow = true;
-    if (startupWindow && !startupWindow.isDestroyed()) {
+    if (startupWindowReady && startupWindow && !startupWindow.isDestroyed()) {
       startupWindow.show();
       startupWindow.focus();
     }
@@ -311,7 +313,8 @@ async function createStartupWindow() {
   const preferencesPromise = readStartupPreferences();
   const language = defaultInterfaceLanguage();
   startupWindow = new BrowserWindow({
-    show: !isStartupIntegrityTest,
+    // Reveal the first painted frame, so the startup UI appears with the window.
+    show: false,
     width: 460,
     height: 280,
     resizable: false,
@@ -330,10 +333,11 @@ async function createStartupWindow() {
   logStartupTiming('startup-window-created');
   const browserWindow = startupWindow;
   browserWindow.once('ready-to-show', () => {
+    startupWindowReady = true;
     if (!isStartupIntegrityTest && !browserWindow.isDestroyed()) browserWindow.show();
     logStartupTiming('startup-window-ready');
   });
-  // Show the native window immediately; reading preferences must not hold it up.
+  // Create the native window before waiting for saved preferences.
   const preferences = await preferencesPromise;
   if (browserWindow.isDestroyed()) throw new Error('界面在加载完成前已关闭。');
   startupUsesEnglish = preferences.language === 'en-US';
@@ -629,12 +633,13 @@ async function showUpdateFailureDialog({ error, releaseUrl = releasesUrl, runRoo
   const response = await dialog.showMessageBox(mainWindow, {
     type: 'error',
     title: english ? 'Automatic update did not finish' : '自动更新未完成',
-    message: english
+    message: process.platform === 'darwin'
+      ? (english ? 'The Mac update did not finish. Review the error and retained recovery files before trying again.' : 'Mac 更新未完成。请核对失败原因和保留的恢复文件后再尝试。') : english
       ? 'Program files were not replaced. The current version remains usable.'
       : '程序文件没有被替换，当前版本仍可继续使用。',
     detail: english
-      ? `Reason: ${nativeText(error || 'The updater returned no usable result.', true)}\n\nManual update:\n${manualUpdateInstructions('en-US', isInstalledDistribution ? 'installed' : 'portable')}`
-      : `失败原因：${error || '更新助手没有返回可用结果。'}\n\n手动更新方法：\n${manualUpdateInstructions('zh-CN', isInstalledDistribution ? 'installed' : 'portable')}`,
+      ? `Reason: ${nativeText(error || 'The updater returned no usable result.', true)}\n\nManual update:\n${manualUpdateInstructions('en-US', process.platform === 'darwin' ? 'mac' : isInstalledDistribution ? 'installed' : 'portable')}`
+      : `失败原因：${error || '更新助手没有返回可用结果。'}\n\n手动更新方法：\n${manualUpdateInstructions('zh-CN', process.platform === 'darwin' ? 'mac' : isInstalledDistribution ? 'installed' : 'portable')}`,
     buttons,
     defaultId: 0,
     cancelId: buttons.length - 1,
@@ -696,16 +701,10 @@ async function ensureArchiveOutputDirectoryBeforeStart() {
   });
   if (selected.canceled || !selected.filePaths[0]) return false;
   const nextOutputDirectory = selected.filePaths[0];
-  const previousDerivedStaging = makeArchiveStagingDirectory(configuredPath);
-  const currentStaging = String(queueManager.config.archiveStagingDirectory || '').trim();
-  const nextStaging = !currentStaging ||
-      (previousDerivedStaging && normalizeForComparison(currentStaging) === normalizeForComparison(previousDerivedStaging))
-    ? makeArchiveStagingDirectory(nextOutputDirectory)
-    : currentStaging;
   await queueManager.updateConfig({
     ...queueManager.config,
     archiveOutputDirectory: nextOutputDirectory,
-    archiveStagingDirectory: nextStaging
+    ...resolveArchiveStagingPreference({ ...queueManager.config, archiveOutputDirectory: nextOutputDirectory })
   });
   return true;
 }
@@ -772,7 +771,7 @@ async function promptAndLaunchPreparedUpdate({
       : '归档任务运行期间不能更新，请先暂停或完成当前任务。');
   }
   try {
-    await launchUpdate({ prepared, targetPid: process.pid });
+    await (process.platform === 'darwin' ? launchMacUpdate : launchUpdate)({ prepared, targetPid: process.pid });
   } catch (error) {
     console.error(`UPDATE_LAUNCH_FAILED ${error.stack || error.message}`);
     await queueManager?.log('error', `启动更新助手失败：${error.message}`);
@@ -827,12 +826,12 @@ async function promptAndLaunchPreparedInstaller({ prepared, version, releaseUrl 
 }
 
 async function runLocalPackageUpdate(release = null) {
-  if (process.platform === 'darwin') throw new Error('Mac 版请从 GitHub 发布页手动下载新版应用。');
+  const mac = process.platform === 'darwin';
   const english = queueManager?.config?.language === 'en-US';
   if (!app.isPackaged || isSmokeTest) {
     throw new Error(english
-      ? 'Only a packaged Windows app can update from a local release package.'
-      : '只有打包后的 Windows 应用可以从本地发行包更新。');
+      ? 'Only a packaged app can update from a local release package.'
+      : '只有打包后的应用可以从本地发行包更新。');
   }
   if (queueManager.running) {
     throw new Error(english
@@ -840,23 +839,30 @@ async function runLocalPackageUpdate(release = null) {
       : '归档任务运行期间不能更新，请先暂停或完成当前任务。');
   }
   const selection = await dialog.showOpenDialog(mainWindow, {
-    title: isInstalledDistribution
+    title: mac ? (english ? 'Choose a newer Hamster Archiver Mac DMG or ZIP' : '选择新版 Hamster Archiver Mac DMG 或 ZIP 更新包') : isInstalledDistribution
       ? (english ? 'Choose a newer Hamster Archiver installer' : '选择新版 Hamster Archiver 安装程序')
-      : (english ? 'Choose a new Hamster Archiver release ZIP' : '选择新版 Hamster Archiver 压缩包'),
-    defaultPath: isInstalledDistribution ? app.getPath('downloads') : applicationRoot,
+      : (english ? 'Choose a new Hamster Archiver release ZIP or 7z' : '选择新版 Hamster Archiver ZIP 或 7z 压缩包'),
+    defaultPath: mac || isInstalledDistribution ? app.getPath('downloads') : applicationRoot,
     properties: ['openFile'],
     filters: [{
-      name: isInstalledDistribution
+      name: mac ? (english ? 'Hamster Archiver Mac release package' : 'Hamster Archiver Mac 发行包') : isInstalledDistribution
         ? (english ? 'Hamster Archiver installer' : 'Hamster Archiver 安装程序')
-        : (english ? 'Hamster Archiver release ZIP' : 'Hamster Archiver 发行压缩包'),
-      extensions: [isInstalledDistribution ? 'exe' : 'zip']
+        : (english ? 'Hamster Archiver release ZIP or 7z' : 'Hamster Archiver 发行压缩包'),
+      extensions: mac ? ['dmg', 'zip'] : isInstalledDistribution ? ['exe'] : ['zip', '7z']
     }]
   });
   if (selection.canceled || selection.filePaths.length === 0) return { cancelled: true, action: 'manual' };
   const onProgress = (progress) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:progress', progress);
   };
-  const prepared = isInstalledDistribution
+  const prepared = mac ? await prepareLocalMacUpdate({
+      applicationRoot,
+      userDataDirectory: queueManager.config.userDataDirectory,
+      sevenZipPath: resolveApplicationPath(applicationRoot, queueManager.config.sevenZipPath),
+      currentVersion: app.getVersion(),
+      packagePath: selection.filePaths[0],
+      onProgress
+    }) : isInstalledDistribution
     ? await prepareLocalInstalledUpdate({
         userDataDirectory: queueManager.config.userDataDirectory,
         currentVersion: app.getVersion(),
@@ -872,7 +878,7 @@ async function runLocalPackageUpdate(release = null) {
         packagePath: selection.filePaths[0],
         onProgress
       });
-  const updateState = isInstalledDistribution
+  const updateState = !mac && isInstalledDistribution
     ? await promptAndLaunchPreparedInstaller({ prepared, version: prepared.version, releaseUrl: release?.releaseUrl })
     : await promptAndLaunchPreparedUpdate({ prepared, version: prepared.version, releaseUrl: release?.releaseUrl });
   return { currentVersion: app.getVersion(), version: prepared.version, action: 'manual', ...updateState };
@@ -1694,12 +1700,12 @@ function registerIpc() {
 
   handleIpc('app:install-checked-update', async (event, version) => {
     assertTrustedSender(event);
-    if (process.platform === 'darwin') throw new Error('Mac 版请从 GitHub 发布页手动下载新版应用。');
     const english = queueManager?.config?.language === 'en-US';
-    const result = checkedUpdate;
-    if (updateInstallInFlight || !result?.updateAvailable || !result.installable || result.latestVersion !== version) {
+    if (!app.isPackaged || isSmokeTest) throw new Error(english ? 'Only a packaged app can install updates.' : '只有打包后的应用可以安装更新。');
+    if (updateInstallInFlight) {
       throw new Error(english ? 'Please check for updates again.' : '请重新检查更新。');
     }
+    const result = selectCheckedRelease(checkedUpdate, version);
     if (queueManager.running) {
       throw new Error(english
         ? 'Updates are unavailable while the archive queue is running. Pause or finish the current task first.'
@@ -1707,18 +1713,31 @@ function registerIpc() {
     }
     updateInstallInFlight = true;
     try {
+      if (result.rollback) {
+        const confirmation = await dialog.showMessageBox(mainWindow, {
+          type: 'warning', title: english ? 'Confirm Beta rollback' : '确认回退 Beta',
+          message: english ? `Switch from ${result.currentVersion} to ${version}?` : `从 ${result.currentVersion} 回退至 ${version}？`,
+          detail: english
+            ? 'An older Beta may not support the current database or settings and could fail to start or change data. Export your Warehouse and keep a separate backup of the user data area before continuing. This only replaces the application; it does not restore older data.'
+            : '旧 Beta 可能不兼容当前数据库或设置，导致启动失败或数据异常。请先导出仓库并另行备份用户数据区。此次只替换应用，不会把数据恢复到旧版格式。',
+          buttons: english ? ['Cancel', 'I have a backup, continue'] : ['取消', '已备份，继续回退'],
+          defaultId: 0, cancelId: 0, noLink: true
+        });
+        if (confirmation.response !== 1) return { cancelled: true };
+      }
       const prepared = await prepareOnlineUpdate({
         applicationRoot,
         userDataDirectory: queueManager.config.userDataDirectory,
         sevenZipPath: resolveApplicationPath(applicationRoot, queueManager.config.sevenZipPath),
         currentVersion: result.currentVersion,
         release: result,
+        rollbackConfirmed: result.rollback,
         fetchImpl: fetchUpdateResource,
         onProgress: (progress) => {
           if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:progress', progress);
         }
       });
-      const updateState = await (isInstalledDistribution ? promptAndLaunchPreparedInstaller : promptAndLaunchPreparedUpdate)({
+      const updateState = await (process.platform !== 'darwin' && isInstalledDistribution ? promptAndLaunchPreparedInstaller : promptAndLaunchPreparedUpdate)({
         prepared, version: result.latestVersion, releaseUrl: prepared.releaseUrl || result.releaseUrl
       });
       return { ...prepared.release, ...updateState };
@@ -1732,7 +1751,6 @@ function registerIpc() {
 
   handleIpc('app:update-from-package', async (event) => {
     assertTrustedSender(event);
-    if (process.platform === 'darwin') throw new Error('Mac 版请从 GitHub 发布页手动下载新版应用。');
     if (updateInstallInFlight) throw new Error(queueManager?.config?.language === 'en-US' ? 'Please check for updates again.' : '请重新检查更新。');
     updateInstallInFlight = true;
     try {
@@ -2292,9 +2310,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     config.autoTrashCompleted = process.env.HAMSTER_SMOKE_SOURCE_DISPOSITION === 'trash';
     config.moveCompleted = process.env.HAMSTER_SMOKE_SOURCE_DISPOSITION === 'move';
   }
-  if (!config.archiveStagingDirectory) {
-    config.archiveStagingDirectory = makeArchiveStagingDirectory(config.archiveOutputDirectory);
-  }
+  Object.assign(config, resolveArchiveStagingPreference(config));
   for (const directory of [config.repositoryDirectory].filter(Boolean)) {
     await fs.mkdir(directory, { recursive: true });
   }
@@ -2645,6 +2661,12 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     // The migration worker owns recovery. A synchronous error dialog would
     // prevent this controlled instance from acknowledging a normal shutdown.
     console.error(`USER_DATA_STARTUP_VALIDATION_FAILED ${error.stack || error.message}`);
+    allowWindowClose = true;
+    app.quit();
+    return;
+  }
+  if (isStartupIntegrityTest) {
+    console.error(`HAMSTER_STARTUP_INTEGRITY_FAILED ${error.stack || error.message}`);
     allowWindowClose = true;
     app.quit();
     return;

@@ -5,6 +5,7 @@ const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
+const { resolveArchiveStagingPreference } = require('./paths');
 const {
   integrityCheck,
   findCatalogIdsByExactName,
@@ -86,7 +87,10 @@ class AppStore {
       saved = await readJson(this.legacySettingsPath, null);
       this.loadedLegacySettings = Boolean(saved);
     }
-    return { ...defaults, ...(saved || {}) };
+    const config = { ...defaults, ...(saved || {}) };
+    return { ...config, ...resolveArchiveStagingPreference({
+      ...config, archiveStagingAutomatic: saved ? saved.archiveStagingAutomatic : defaults.archiveStagingAutomatic
+    }) };
   }
 
   async saveSettings(settings) {

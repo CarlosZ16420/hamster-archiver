@@ -15,9 +15,12 @@ const integrityPaths = [
   'app/src/core/archive-engine.js', 'app/src/core/queue-manager.js',
   'app/src/core/sqlite-repository.js', 'app/src/core/storage-paths.js',
   'app/src/core/startup-integrity.js', 'app/src/core/tool-integrity.js',
+  'app/src/core/update-checker.js', 'app/src/core/update-manager.js',
+  'app/src/core/mac-update-manager.js', 'app/src/core/mac-update-worker.js',
   'app/src/core/hamster-cli.js', 'app/src/core/mcp-client.js',
   'app/src/renderer/index.html', 'app/src/renderer/app.js',
-  'app/src/renderer/i18n.js', 'app/assets/app-icon.png',
+  'app/src/renderer/i18n.js', 'app/src/renderer/update-dialog.js',
+  'app/src/renderer/styles.css', 'app/assets/app-icon.png',
   'hamster', 'HamsterArchiver-MCP', 'tools/7zip/License.txt',
   'docs/CLI.md', 'docs/MCP.md', 'docs/AI-QUICKSTART.md',
   'docs/AI-TROUBLESHOOTING.md', 'docs/AI-TASK-RECEIPT-v2.schema.json',
@@ -33,16 +36,18 @@ function bundleResourcesPath(context) {
 module.exports = async function afterPack(context) {
   if (context.electronPlatformName !== 'darwin') throw new Error('The macOS pack hook received a different platform.');
   const resources = bundleResourcesPath(context);
+  const version = context.packager.appInfo.version;
   await Promise.all(['hamster', 'HamsterArchiver-MCP', 'tools/7zip/7zz'].map((name) =>
     fs.chmod(path.join(resources, name), 0o755)));
   await fs.writeFile(path.join(resources, 'ai-capabilities.json'),
-    `${JSON.stringify(createAutomationManifest(packageJson.version, {
+    `${JSON.stringify(createAutomationManifest(version, {
       platform: 'darwin-universal',
       launchers: { cli: 'hamster', mcp: 'HamsterArchiver-MCP' }
     }), null, 2)}\n`);
   const summary = JSON.parse(await fs.readFile(path.join(projectRoot, 'docs', 'releases',
-    `release-summary-v${packageJson.version}.json`), 'utf8'));
-  if (summary.version !== packageJson.version || !summary.notes?.['zh-CN']?.length || !summary.notes?.['en-US']?.length) {
+    `release-summary-v${version}.json`), 'utf8'));
+  const releaseNotes = compactReleaseNotesPayload(summary.notes);
+  if (summary.version !== version || !releaseNotes?.['zh-CN']?.length || !releaseNotes?.['en-US']?.length) {
     throw new Error('The macOS package requires a matching bilingual release summary.');
   }
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: projectRoot, encoding: 'utf8' }).trim();
@@ -50,13 +55,14 @@ module.exports = async function afterPack(context) {
     { cwd: projectRoot, encoding: 'utf8' }).trim();
   const manifest = {
     schemaVersion: 2,
-    name: `HamsterArchiver-v${packageJson.version}-mac-universal`,
-    version: packageJson.version,
+    name: `HamsterArchiver-v${version}-mac-universal`,
+    version,
+    sourceVersion: packageJson.version,
     platform: 'darwin-universal',
     distributionMode: 'installed',
     commit,
     builtAt,
-    releaseNotes: compactReleaseNotesPayload(summary.notes),
+    releaseNotes,
     installedUserData: 'Electron userData directory',
     toolchain: { electron: packageJson.devDependencies.electron, sevenZip: sevenZip.version },
     integrity: { algorithm: 'sha256', files: await createFileIntegrityEntries(resources, integrityPaths) }

@@ -106,27 +106,24 @@ async function main() {
   const appDirectory = path.join(outputRoot, 'resources', 'app');
   await fs.mkdir(appDirectory, { recursive: true });
   await fs.cp(path.join(projectRoot, 'src'), path.join(appDirectory, 'src'), { recursive: true });
-  await fs.cp(path.join(projectRoot, 'assets'), path.join(appDirectory, 'assets'), { recursive: true });
+  const assetsRoot = path.join(projectRoot, 'assets');
+  await fs.cp(assetsRoot, path.join(appDirectory, 'assets'), {
+    recursive: true,
+    filter: source => {
+      const relative = path.relative(assetsRoot, source);
+      return relative !== 'readme-icon.png' && relative !== 'readme' &&
+        !relative.startsWith(`readme${path.sep}`);
+    }
+  });
   for (const tool of Object.values(dependencyLock.bundledTools)) {
     for (const relativePath of tool.files) await copyVerifiedFile(relativePath, outputRoot);
   }
-  await fs.copyFile(path.join(projectRoot, 'README.md'), path.join(outputRoot, 'README.md'));
-  if (await exists(path.join(projectRoot, 'README.en.md'))) {
-    await fs.copyFile(path.join(projectRoot, 'README.en.md'), path.join(outputRoot, 'README.en.md'));
-  }
-  const readmeAssets = path.join(projectRoot, 'README.assets');
-  if (await exists(readmeAssets)) {
-    await fs.cp(readmeAssets, path.join(outputRoot, 'README.assets'), { recursive: true });
-  }
-  const readmeShowcases = path.join(projectRoot, 'assets', 'readme');
-  const showcaseFiles = ['details-showcase.zh-CN.png', 'details-showcase.en-US.png'];
-  for (const name of showcaseFiles) {
-    const source = path.join(readmeShowcases, name);
-    if (await exists(source)) {
-      const destination = path.join(outputRoot, 'assets', 'readme', name);
-      await fs.mkdir(path.dirname(destination), { recursive: true });
-      await fs.copyFile(source, destination);
-    }
+  for (const name of ['README.md', 'README.en.md']) {
+    if (!(await exists(path.join(projectRoot, name)))) continue;
+    const readme = await fs.readFile(path.join(projectRoot, name), 'utf8');
+    const onlineReadme = readme.replace(/(["'(])((?:assets\/readme\/|README\.assets\/)[^\s"<>()[\]]+)/g,
+      (_match, prefix, relative) => `${prefix}https://raw.githubusercontent.com/CarlosZ16420/hamster-archiver/v${packageJson.version}/${relative}`);
+    await fs.writeFile(path.join(outputRoot, name), onlineReadme, 'utf8');
   }
   await fs.copyFile(path.join(projectRoot, 'LICENSE'), path.join(outputRoot, 'LICENSE'));
   await fs.copyFile(path.join(projectRoot, 'scripts', 'HamsterArchiver-MCP.cmd'), path.join(outputRoot, 'HamsterArchiver-MCP.cmd'));

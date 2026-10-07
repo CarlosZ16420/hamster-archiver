@@ -442,8 +442,8 @@ function createMcpApplicationServices(context = {}) {
           if (!/^HamsterArchiver-Setup-v\d+\.\d+\.\d+-win-x64\.exe$/i.test(path.basename(resolvedPackagePath))) {
             throw codedError('INVALID_UPDATE_PACKAGE', '安装版只接受严格命名的 Hamster Archiver Setup EXE。');
           }
-        } else if (!/\.zip$/i.test(resolvedPackagePath)) {
-          throw codedError('INVALID_UPDATE_PACKAGE', '便携版只接受 Hamster Archiver 发行 ZIP。');
+        } else if (!/\.(?:zip|7z)$/i.test(resolvedPackagePath)) {
+          throw codedError('INVALID_UPDATE_PACKAGE', '便携版只接受 Hamster Archiver 发行 ZIP 或 7z。');
         }
         updateInstallInFlight = true;
         try {

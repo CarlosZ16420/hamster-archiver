@@ -22,6 +22,7 @@ closeButton.textContent = english ? 'Close' : '关闭';
 closeButton.addEventListener('click', () => window.close());
 
 const messages = {
+  'starting': english ? 'Starting…' : '正在启动…',
   'verify-cache': english ? 'Checking application files…' : '正在检查程序文件…',
   'verify-files': english ? 'Verifying application integrity…' : '正在验证程序完整性…',
   'load-data': english ? 'Loading your warehouse…' : '正在加载仓库…',
@@ -31,10 +32,18 @@ const messages = {
 window.setStartupStatus = (stage, detail = '', percentage = null) => {
   statusElement.textContent = messages[stage] || messages['verify-cache'];
   detailElement.textContent = detail;
-  const showsProgress = stage === 'verify-files' && Number.isFinite(percentage);
-  progressElement.hidden = !showsProgress;
-  if (showsProgress) progressFill.style.width = `${Math.max(0, Math.min(100, percentage))}%`;
   const failed = stage === 'error';
+  const determinate = stage === 'verify-files' && Number.isFinite(percentage);
+  progressElement.hidden = failed;
+  progressElement.dataset.mode = determinate ? 'determinate' : 'indeterminate';
+  if (determinate) {
+    const value = Math.max(0, Math.min(100, percentage));
+    progressFill.style.width = `${value}%`;
+    progressElement.setAttribute('aria-valuenow', String(value));
+  } else {
+    progressFill.style.width = '';
+    progressElement.removeAttribute('aria-valuenow');
+  }
   document.body.dataset.state = failed ? 'error' : 'working';
   closeButton.hidden = !failed;
   if (failed && !detail) {
@@ -43,3 +52,5 @@ window.setStartupStatus = (stage, detail = '', percentage = null) => {
       : '请重新安装或恢复程序文件后再试。';
   }
 };
+
+window.setStartupStatus('starting');

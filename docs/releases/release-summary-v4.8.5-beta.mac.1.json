@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "version": "4.8.5-beta.mac.1",
+  "readmeVersion": "4.8.4",
+  "notes": {
+    "zh-CN": [
+      "Mac Beta 覆盖上次公开 Mac Beta 以来的共享归档、队列、仓库和 CLI/MCP 改进；Windows 正式版规范基线为 4.8.4。",
+      "Mac 可静默检查测试版；用户选择并确认重启后才安装，也支持校验旁车、版本和摘要的手动 DMG 或 .app ZIP。",
+      "这是需用户参与测试的临时签名、未经公证版本；资料保留在用户目录，Mac 废纸篓操作不可用，视频抽帧需自行配置 FFmpeg。"
+    ],
+    "en-US": [
+      "This Mac Beta includes shared archiving, queue, Warehouse, and CLI/MCP improvements since the previous public Mac Beta; the Windows stable specification baseline is 4.8.4.",
+      "Mac can silently check for Betas; installation requires the user to select a version and confirm restart. Manual DMG or .app ZIP updates verify the sidecar, version, and digest.",
+      "This ad-hoc signed, non-notarized release needs user testing. Data remains in the user directory; Mac Trash operations are unavailable, and video frames require separately configured FFmpeg."
+    ]
+  }
+}
