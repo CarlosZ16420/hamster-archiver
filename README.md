@@ -135,3 +135,7 @@ AI 正在帮你使用这个项目？请阅读 [AI 快速上手](docs/AI-QUICKSTA
 - [贡献指南](CONTRIBUTING.md) · [开发指南](docs/DEVELOPMENT.md) · [安全反馈](SECURITY.md) · [MIT License](LICENSE)
 
 Hamster Archiver 原本是我为自己整理收藏写的小工具，也希望它能帮你找回整理的乐趣。感谢 7-Zip、FFmpeg、LinuxDo 社区，以及每一位试用和反馈的朋友。如果它对你有帮助，欢迎点个 Star，或分享你的使用建议。
+
+## 友链
+
+- [LINUX DO](https://linux.do/) — 感谢真诚、友善、团结、专业的 LINUX DO 社区，以及每一位佬友。
