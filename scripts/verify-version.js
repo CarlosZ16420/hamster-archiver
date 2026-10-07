@@ -20,16 +20,6 @@ if (lock.version !== version || lock.packages?.['']?.version !== version) {
 if (!read('CHANGELOG.md').includes(`## ${version}`)) {
   errors.push(`CHANGELOG.md 缺少 ${version} 正式章节`);
 }
-for (const readme of ['README.md', 'README.en.md']) {
-  const content = read(readme);
-  const isMacBeta = /-beta\.mac\.\d+$/.test(version);
-  const expectedAsset = isMacBeta
-    ? `HamsterArchiver-v${version}-mac-universal.dmg`
-    : `HamsterArchiver-v${version}-win-x64/`;
-  if (!content.includes(`version-${version.replace('-', '--')}-`) || !content.includes(expectedAsset)) {
-    errors.push(`${readme} 的版本徽章或发行文件示例未更新为 ${version}`);
-  }
-}
 const releaseNotes = path.join(projectRoot, 'docs', 'releases', `release-notes-v${version}.md`);
 if (!fs.existsSync(releaseNotes)) {
   errors.push(`缺少 docs/releases/release-notes-v${version}.md`);
@@ -42,6 +32,7 @@ if (!fs.existsSync(releaseNotes)) {
   }
 }
 const releaseSummaryPath = path.join(projectRoot, 'docs', 'releases', `release-summary-v${version}.json`);
+let readmeVersion = version;
 if (!fs.existsSync(releaseSummaryPath)) {
   errors.push(`缺少 docs/releases/release-summary-v${version}.json`);
 } else {
@@ -49,6 +40,12 @@ if (!fs.existsSync(releaseSummaryPath)) {
     const releaseSummary = JSON.parse(fs.readFileSync(releaseSummaryPath, 'utf8'));
     if (releaseSummary.schemaVersion !== 1 || releaseSummary.version !== version) {
       errors.push(`release-summary-v${version}.json 的结构版本或产品版本不一致`);
+    }
+    if ('readmeVersion' in releaseSummary) {
+      if (typeof releaseSummary.readmeVersion !== 'string' ||
+          !/^\d+\.\d+\.\d+(?:-beta\.[a-z0-9][a-z0-9.-]*\.\d+)?$/.test(releaseSummary.readmeVersion)) {
+        errors.push(`release-summary-v${version}.json 的 readmeVersion 必须是有效版本号`);
+      } else readmeVersion = releaseSummary.readmeVersion;
     }
     for (const locale of ['zh-CN', 'en-US']) {
       if (!Array.isArray(releaseSummary.notes?.[locale]) || releaseSummary.notes[locale].length === 0) {
@@ -59,6 +56,16 @@ if (!fs.existsSync(releaseSummaryPath)) {
     errors.push(`release-summary-v${version}.json 无法解析：${error.message}`);
   }
 }
+for (const readme of ['README.md', 'README.en.md']) {
+  const content = read(readme);
+  const expectedAsset = /-beta\.mac\.\d+$/.test(readmeVersion)
+    ? `HamsterArchiver-v${readmeVersion}-mac-universal.dmg`
+    : `HamsterArchiver-v${readmeVersion}-win-x64/`;
+  if (!content.includes(`version-${readmeVersion.replace('-', '--')}-`) || !content.includes(expectedAsset)) {
+    errors.push(`${readme} 的版本徽章或发行文件示例未更新为 ${readmeVersion}`);
+  }
+}
+if (readmeVersion !== version) console.log(`README 版本展示按发行摘要暂缓更新：${readmeVersion}（应用 ${version}）`);
 if (process.argv.includes('--tag')) {
   const tag = execFileSync('git', ['describe', '--tags', '--exact-match', 'HEAD'], {
     cwd: projectRoot,
