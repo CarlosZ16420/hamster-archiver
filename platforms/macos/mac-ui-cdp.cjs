@@ -9,7 +9,7 @@ const evidenceDirectory = process.argv[3];
 const fixtureId = process.env.MAC_VALIDATION_FIXTURE_ID;
 const fixtureTitle = 'Mac replacement validation ' + fixtureId;
 const expectedProfileRoot = process.env.MAC_VALIDATION_PROFILE_DATA;
-const debugBase = 'http://127.0.0.1:9222';
+const devToolsPortFile = path.join(expectedProfileRoot || '.', 'DevToolsActivePort');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -18,8 +18,19 @@ function assert(condition, message) {
 async function waitForPage() {
   const deadline = Date.now() + 60_000;
   let lastError;
+  let debugBase;
   while (Date.now() < deadline) {
     try {
+      if (!debugBase) {
+        // Chrome is launched with --remote-debugging-port=0 so the OS assigns a
+        // random local port; the real port is only discoverable from this file
+        // inside the isolated, per-run profile directory, which prevents other
+        // local processes from guessing a fixed, unauthenticated CDP endpoint.
+        assert(fs.existsSync(devToolsPortFile), 'DevTools active port file not written yet.');
+        const port = fs.readFileSync(devToolsPortFile, 'utf8').split('\n')[0].trim();
+        assert(port, 'DevTools active port file was empty.');
+        debugBase = 'http://127.0.0.1:' + port;
+      }
       const response = await fetch(debugBase + '/json/list');
       if (!response.ok) throw new Error('CDP target list returned ' + response.status);
       const targets = await response.json();
