@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.8.5 · Windows Stable
+
+### 中文
+
+本次覆盖公开 Windows 正式版 4.8.4 → 4.8.5：便携包新增 7z 并排除文档图片以减小下载体积；更新器优先校验 7z，仅在缺少附件或旁车返回 404/410 时回退同版本 ZIP，并可选择公开 main 上更高的 Windows 正式版。不压缩入库操作更直接，暂存路径支持自动跟随压缩包位置，启动与队列显示得到改善。Mac Beta 更新属于独立测试通道。
+
+### English
+
+This release covers public Windows stable 4.8.4 → 4.8.5: adds 7z portable packages and excludes documentation images to reduce download size; the updater prefers verified 7z and falls back to the same-version ZIP only when the asset or sidecar is missing (404/410), and users can select a newer Windows stable release from public main. Uncompressed intake is more direct, staging can follow the archive destination, and startup and queue presentation are improved. Mac Beta updates remain a separate testing channel.
+
+## 4.8.5-beta.mac.1 · macOS Beta
+
+### 中文
+
+本 Mac 测试版覆盖上一公开 Mac Beta `4.8.0-beta.mac.2` 之后的共享改进；当前 Windows 正式版规范基线为 4.8.4，Mac Beta 不改变 Windows latest。共享归档和队列更新包括：分卷支持 64 MiB—100 GiB，默认 10 GiB，仅在源总大小超过单卷阈值时分卷；大型分卷确认默认开启，关闭后只解除桌面任务的分卷等待，不启动队列、不确认其他风险，不压缩入库无需该确认。Mac Beta 仍需用户参与测试，首次打开可能受 Gatekeeper 限制，且未经 Apple 公证。完整双语说明见 `docs/releases/public-release-notes-v4.8.5-beta.mac.1.md`。
+
+### English
+
+This Mac Beta covers shared improvements since the previous public Mac Beta, `4.8.0-beta.mac.2`. The current Windows stable specification baseline is 4.8.4, and this Beta does not change Windows latest. Shared archiving and queue updates include split volumes from 64 MiB to 100 GiB, defaulting to 10 GiB, with splitting only when the source total exceeds the per-volume threshold. Large-split confirmation is enabled by default; turning it off releases only split waits for desktop jobs, without starting the queue or approving other risks. Inventory-only intake needs no such confirmation. This Beta needs user testing, may trigger Gatekeeper on first launch, and is not notarized by Apple. See `docs/releases/public-release-notes-v4.8.5-beta.mac.1.md` for complete bilingual notes.
+
 ## 4.8.4 · Windows Stable
 
 ### 中文

@@ -63,6 +63,40 @@ function createWorkbenchLayoutHarness(count = 15) {
   return { context, workbenchPageId, rows, classes, properties, flush: () => { while (frames.length) frames.shift()(); } };
 }
 
+test('uncompressed intake starts the selected scope without a risk dialog or preference write', async () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  for (const suppression of [undefined, false, true]) {
+    for (const selectedIds of [[], ['selected-job']]) {
+      const calls = [];
+      const rendered = [];
+      const notices = [];
+      let click;
+      const state = { queueStartNotice: 'Review pending source changes' };
+      const context = vm.createContext({
+        currentState: { config: { suppressInventoryOnlyRisk: suppression } },
+        selectedJobIds: new Set(selectedIds),
+        window: { archiveApp: {
+          startInventoryOnlyQueue: async ids => { calls.push([...ids]); return state; },
+          saveConfig: () => { throw new Error('Ordinary intake must not save preferences'); }
+        } },
+        document: { querySelector: selector => {
+          assert.equal(selector, '#start-inventory-only', 'Only the ordinary intake button is needed');
+          return { addEventListener: (event, handler) => { assert.equal(event, 'click'); click = handler; } };
+        } },
+        safely: action => action(),
+        render: value => rendered.push(value),
+        showToast: (...args) => notices.push(args)
+      });
+      const start = app.indexOf('async function beginInventoryOnlyQueue(');
+      vm.runInContext(app.slice(start, app.indexOf("document.querySelector('#finish-next')", start)), context);
+      await click();
+      assert.deepEqual(calls.map(ids => Array.from(ids)), [selectedIds]);
+      assert.deepEqual(rendered, [state]);
+      assert.deepEqual(notices, [['Review pending source changes', true]]);
+    }
+  }
+});
+
 test('returning to the workbench displays a large queue without adding tasks', () => {
   const { context, workbenchPageId, rows, classes, properties, flush } = createWorkbenchLayoutHarness();
   context.updateTaskListHeight();
@@ -153,19 +187,63 @@ test('queue similarity projects are sibling panels and an empty queue has no pan
   assert.equal(content.children[1].children[0].text, '仓库中的相似项目');
 });
 
-test('chosen archive output is reflected in the form without resetting unrelated unsaved settings', () => {
+function createArchivePreferenceFormHarness() {
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
   const elements = { archiveOutputDirectory: { value: '' }, archiveStagingDirectory: { value: '' },
+    archiveStagingAutomatic: { checked: true },
     archivePassword: { value: 'unsaved input' } };
-  const context = vm.createContext({ elements, deriveStagingDirectory: (value) => `${value}-staging` });
+  const picker = { disabled: false };
+  const context = vm.createContext({ elements, currentState: { running: false },
+    document: { querySelector: () => picker },
+    deriveStagingDirectory: (value) => value ? `${value}-staging` : '' });
+  vm.runInContext(app.slice(app.indexOf('function updateArchiveStagingControls('), app.indexOf('function updateBackupLocationControl(')), context);
   vm.runInContext(app.slice(app.indexOf('function syncArchiveOutputFields('), app.indexOf('function highlightQueueAttention(')), context);
-  context.syncArchiveOutputFields({ archiveOutputDirectory: '' }, { archiveOutputDirectory: 'chosen-folder', archiveStagingDirectory: 'chosen-staging' });
+  return { context, elements, picker };
+}
+
+test('chosen archive output is reflected in the form without resetting unrelated unsaved settings', () => {
+  const { context, elements } = createArchivePreferenceFormHarness();
+  const chosen = { archiveOutputDirectory: 'chosen-folder', archiveStagingDirectory: 'chosen-staging', archiveStagingAutomatic: false };
+  context.syncArchiveOutputFields({ archiveOutputDirectory: '' }, chosen);
   assert.equal(elements.archiveOutputDirectory.value, 'chosen-folder');
   assert.equal(elements.archiveStagingDirectory.value, 'chosen-staging');
   assert.equal(elements.archivePassword.value, 'unsaved input');
   elements.archiveOutputDirectory.value = 'user editing';
-  context.syncArchiveOutputFields({ archiveOutputDirectory: 'chosen-folder' }, { archiveOutputDirectory: 'chosen-folder' });
+  elements.archiveStagingDirectory.value = 'unsaved staging';
+  elements.archiveStagingAutomatic.checked = true;
+  context.syncArchiveOutputFields(chosen, { ...chosen });
   assert.equal(elements.archiveOutputDirectory.value, 'user editing');
+  assert.equal(elements.archiveStagingDirectory.value, 'unsaved staging');
+  assert.equal(elements.archiveStagingAutomatic.checked, true);
+});
+
+test('MCP manual staging changes update the existing desktop form without an output change', () => {
+  const { context, elements, picker } = createArchivePreferenceFormHarness();
+  const automatic = { archiveOutputDirectory: 'archives', archiveStagingDirectory: 'archives-staging', archiveStagingAutomatic: true };
+  context.syncArchiveOutputFields({ archiveOutputDirectory: '' }, automatic);
+  const manual = { ...automatic, archiveStagingDirectory: 'custom-staging', archiveStagingAutomatic: false };
+  context.syncArchiveOutputFields(automatic, manual);
+  context.updateArchiveStagingControls();
+  assert.equal(elements.archiveStagingAutomatic.checked, false);
+  assert.equal(elements.archiveStagingDirectory.value, 'custom-staging');
+  assert.equal(elements.archiveStagingDirectory.readOnly, false);
+  assert.equal(picker.disabled, false);
+  assert.equal(elements.archivePassword.value, 'unsaved input');
+});
+
+test('choosing an archive output preserves manual empty staging until automatic mode is enabled', () => {
+  const { context, elements, picker } = createArchivePreferenceFormHarness();
+  const manual = { archiveOutputDirectory: '', archiveStagingDirectory: '', archiveStagingAutomatic: false };
+  const chosen = { ...manual, archiveOutputDirectory: 'chosen-folder' };
+  context.syncArchiveOutputFields(manual, chosen);
+  context.updateArchiveStagingControls();
+  assert.equal(elements.archiveStagingDirectory.value, '');
+  assert.equal(elements.archiveStagingAutomatic.checked, false);
+  assert.equal(picker.disabled, false);
+  context.syncArchiveOutputFields(chosen, { ...chosen, archiveStagingAutomatic: true });
+  assert.equal(elements.archiveStagingDirectory.value, 'chosen-folder-staging');
+  assert.equal(elements.archiveStagingDirectory.readOnly, true);
+  assert.equal(picker.disabled, true);
 });
 
 test('completed queue presentation includes duplicate skips while cleanup preserves failed source commits', () => {

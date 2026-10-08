@@ -24,6 +24,7 @@ const {
   isPathInside,
   makeArchiveStagingDirectory,
   normalizeForComparison,
+  resolveArchiveStagingPreference,
   validatePathLayout,
   validateSourceSelection,
   validateWindowsFileStem
@@ -90,6 +91,7 @@ const CONFIG_LOG_LABELS = Object.freeze({
   intakeDirectory: '待处理目录',
   archiveOutputDirectory: '压缩包位置',
   archiveStagingDirectory: '压缩暂存目录',
+  archiveStagingAutomatic: '暂存目录自动跟随压缩包位置',
   processedSourceDirectory: '归档后移动位置',
   moveCompleted: '归档后移动原文件',
   autoTrashCompleted: '归档后移入回收站',
@@ -960,6 +962,7 @@ class QueueManager extends EventEmitter {
       }
       delete normalizedConfig[oldKey];
     }
+    Object.assign(normalizedConfig, resolveArchiveStagingPreference(normalizedConfig));
     this.store = store;
     this.config = {
       language: 'zh-CN',
@@ -3362,25 +3365,17 @@ class QueueManager extends EventEmitter {
     ).trim();
     if (moveCompleted && !processedSourceDirectory) throw new Error('请填写归档后移动位置。');
     const previousRepositoryDirectory = this.config.repositoryDirectory;
-    const previousArchiveOutputDirectory = String(this.config.archiveOutputDirectory || '').trim();
     const archiveOutputDirectory = String(
       config.archiveOutputDirectory ?? this.config.archiveOutputDirectory ?? ''
     ).trim();
-    const hasArchiveOutputDirectory = Object.prototype.hasOwnProperty.call(config, 'archiveOutputDirectory');
     const hasArchiveStagingDirectory = Object.prototype.hasOwnProperty.call(config, 'archiveStagingDirectory');
-    let archiveStagingDirectory = String(
-      config.archiveStagingDirectory ?? this.config.archiveStagingDirectory ?? ''
-    ).trim();
-    if (!hasArchiveStagingDirectory && hasArchiveOutputDirectory) {
-      const previousDerived = makeArchiveStagingDirectory(previousArchiveOutputDirectory);
-      if (!archiveStagingDirectory ||
-          normalizeForComparison(archiveStagingDirectory) === normalizeForComparison(previousDerived)) {
-        archiveStagingDirectory = makeArchiveStagingDirectory(archiveOutputDirectory);
-      }
-    }
-    if (hasArchiveOutputDirectory && archiveOutputDirectory && !archiveStagingDirectory) {
-      archiveStagingDirectory = makeArchiveStagingDirectory(archiveOutputDirectory);
-    }
+    const stagingPreference = resolveArchiveStagingPreference({
+      archiveOutputDirectory,
+      archiveStagingDirectory: config.archiveStagingDirectory ?? this.config.archiveStagingDirectory,
+      // Legacy callers selecting a custom path still opt out without the new flag.
+      archiveStagingAutomatic: config.archiveStagingAutomatic ??
+        (hasArchiveStagingDirectory ? undefined : this.config.archiveStagingAutomatic)
+    });
     this.config = {
       ...this.config,
       ...config,
@@ -3415,7 +3410,7 @@ class QueueManager extends EventEmitter {
       autoTrashCompleted,
       processedSourceDirectory,
       archiveOutputDirectory,
-      archiveStagingDirectory
+      ...stagingPreference
     };
     if (context.recordIntakePreferences !== false) {
       this.config.intakePreferences = {
@@ -4795,6 +4790,11 @@ class QueueManager extends EventEmitter {
     if (!String(this.config.archiveOutputDirectory || '').trim()) {
       throw Object.assign(new Error('请先选择压缩包存储位置，才能执行压缩入库。'), {
         code: 'ARCHIVE_OUTPUT_REQUIRED', requiredFields: ['archiveOutputDirectory']
+      });
+    }
+    if (!String(this.config.archiveStagingDirectory || '').trim()) {
+      throw Object.assign(new Error('请先设置压缩暂存目录，或勾选自动新建暂存文件夹。'), {
+        code: 'ARCHIVE_STAGING_REQUIRED', requiredFields: ['archiveStagingDirectory']
       });
     }
     const selection = this.pendingStartCandidates(selectedJobIds, (job) => job.taskKind !== 'catalog_refresh');

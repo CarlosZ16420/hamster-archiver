@@ -4,10 +4,43 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { checkForUpdates, checkCnbForUpdates, compareVersions, isStableRelease, resolveCnbConfig, UPDATE_PROVIDER_CONFIG } = require('../src/core/update-checker');
 
-test('Mac beta points to manual GitHub downloads without presenting Windows stable as a Mac update', async () => {
+test('portable clients prefer verified 7z and retain ZIP while installed clients keep Setup', async () => {
+  const zip = 'HamsterArchiver-v4.8.5-win-x64.zip';
+  const sevenZip = zip.replace(/\.zip$/, '.7z');
+  const setup = 'HamsterArchiver-Setup-v4.8.5-win-x64.exe';
+  const assets = [zip, sevenZip, setup].map(name => ({ name,
+    browser_download_url: `https://github.com/download/${name}`, digest: `sha256:${'a'.repeat(64)}` }));
+  const check = (distributionMode, selectedAssets) => checkForUpdates({ currentVersion: '4.8.4', distributionMode,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ tag_name: 'v4.8.5', assets: selectedAssets }) }) });
+  const portable = await check('portable', assets);
+  assert.equal(portable.asset.name, sevenZip);
+  assert.equal(portable.asset.fallbackAsset.name, zip);
+  assert.equal((await check('installed', assets)).asset.name, setup);
+  assert.equal((await check('portable', assets.filter(asset => asset.name !== sevenZip))).asset.name, zip);
+  for (const unusable of [{ ...assets[1], digest: '' }, { ...assets[1], browser_download_url: '' }]) {
+    assert.equal((await check('portable', [assets[0], unusable])).asset.name, zip);
+  }
+  const sidecar = { name: `${sevenZip}.sha256`, browser_download_url: `https://github.com/${sevenZip}.sha256` };
+  assert.equal((await check('portable', [assets[0], { ...assets[1], digest: '' }, sidecar])).asset.name, sevenZip);
+});
+
+test('CNB anonymous discovery offers future 7z with ZIP fallback but preserves old ZIP releases', async () => {
+  for (const version of ['4.8.4', '4.8.5']) {
+    const result = await checkCnbForUpdates({ currentVersion: '4.8.3', expectedVersion: version, environment: {},
+      fetchImpl: async () => new Response(null, { status: 307,
+        headers: { location: `/carlosz16420/hamster-archive/-/releases/tag/v${version}` } }) });
+    assert.equal(result.asset.name, `HamsterArchiver-v${version}-win-x64.${version === '4.8.4' ? 'zip' : '7z'}`);
+    if (version === '4.8.5') assert.match(result.asset.fallbackAsset.name, /\.zip$/);
+  }
+});
+
+test('Mac checks the release list but never presents Windows stable as a Mac update', async () => {
   const result = await checkForUpdates({
     currentVersion: '4.8.0-beta.mac.2', distributionMode: 'mac',
-    fetchImpl: () => { throw new Error('Mac manual guidance must not fetch Windows latest'); }
+    fetchImpl: async url => {
+      assert.doesNotMatch(url, /\/latest/);
+      return { ok: true, json: async () => [{ tag_name: 'v4.8.4', target_commitish: 'main' }] };
+    }
   });
   assert.equal(result.distributionMode, 'mac');
   assert.equal(result.latestVersion, null);

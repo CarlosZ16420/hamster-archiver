@@ -5,7 +5,8 @@
 
 ### 收藏的时候很快乐，整理的时候也应该是。
 
-本地资源归档工具，快速为本地文件建立可预览、可搜索、易管理的资源档案，记录存放位置与校验信息，随时压缩存储。
+本地资源归档工具，快速为本地文件建立可预览、可搜索、易管理的资源档案。<br>
+记录存放位置与校验信息，随时压缩存储。
 
 ![Version](https://img.shields.io/badge/version-4.8.4-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
@@ -14,9 +15,9 @@
 
 **[下载 Windows 正式版](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[下载 Mac Beta](https://github.com/CarlosZ16420/hamster-archiver/releases/tag/v4.8.0-beta.mac.2)** · [English](README.en.md) · [反馈问题](https://github.com/CarlosZ16420/hamster-archiver/issues)
 
-</div>
-
 [快速开始](#快速开始) · [功能介绍](#功能介绍) · [常见问题](#常见问题) · [实验性 AI 接入](#实验性-ai-接入) · [文档与贡献](#文档与贡献)
+
+</div>
 
 下载/备份的资源越积越多，硬盘快满了，却一直没整理好？
 
@@ -41,6 +42,8 @@
 
 [![批量归档、进度追踪与重复确认](assets/readme/archive-showcase.zh-CN.png)](assets/readme/archive-showcase.zh-CN.png)
 
+压缩暂存目录默认自动建在压缩包存储点旁，并随存储位置变动；在高级设置中取消勾选后，可手动设置并保留当前暂存路径。
+
 ## 快速开始
 
 ### Windows
@@ -57,7 +60,7 @@
 
 支持 macOS 12 及以上，兼容 Apple Silicon 与 Intel。从 [Mac Beta 下载页](https://github.com/CarlosZ16420/hamster-archiver/releases/tag/v4.8.0-beta.mac.2) 下载 DMG，打开后将应用拖入“应用程序”。本 Beta 未经 Apple 公证；确认信任下载来源后，可在“系统设置 → 隐私与安全性”中选择“仍要打开”。
 
-Mac 版内置 7-Zip，视频抽帧需自行配置 FFmpeg；归档后可保留或移动原文件，不支持 Windows 回收站相关操作。更新时下载新版 DMG 并替换应用。安装细节与平台限制见 [Mac 版指南](platforms/macos/README.md)。
+Mac 版内置 7-Zip，视频抽帧需自行配置 FFmpeg；归档后可保留或移动原文件，不支持 Windows 回收站相关操作。新版更新窗口可选择 Beta 更新或回退，下载校验后自动替换应用；回退前请导出仓库并备份用户资料。已发布的 `4.8.0-beta.mac.2` 尚不含此功能，首次升级仍需手动安装新版。安装细节与平台限制见 [Mac 版指南](platforms/macos/README.md)。
 
 
 
@@ -138,4 +141,4 @@ Hamster Archiver 原本是我为自己整理收藏写的小工具，希望它能
 
 ## 友链
 
-- [LINUX DO](https://linux.do/) 
+- [LINUX DO](https://linux.do/)

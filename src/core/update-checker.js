@@ -2,6 +2,7 @@
 
 const { compactReleaseNotesPayload, selectLocalizedMarkdownSection } = require('./release-notes');
 const UPDATE_PROVIDER_CONFIG = require('../config/update-providers.json');
+const { expectedReleaseAssetNames } = require('./sync-cnb-release-assets');
 
 const RELEASES_URL = 'https://github.com/CarlosZ16420/hamster-archiver/releases';
 const LATEST_RELEASE_API = 'https://api.github.com/repos/CarlosZ16420/hamster-archiver/releases/latest';
@@ -25,6 +26,19 @@ function compareVersions(left, right) {
   if (!a || !b) throw new Error('发行源返回了无法识别的版本号。');
   for (let index = 0; index < 3; index += 1) {
     if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
+  }
+  const prerelease = (value) => String(value).replace(/^v/i, '').split('+')[0].split('-').slice(1).join('-');
+  const ap = prerelease(left), bp = prerelease(right);
+  if (ap === bp) return 0;
+  if (!ap || !bp) return ap ? -1 : 1;
+  const ai = ap.split('.'), bi = bp.split('.');
+  for (let i = 0; i < Math.max(ai.length, bi.length); i += 1) {
+    if (ai[i] === bi[i]) continue;
+    if (ai[i] === undefined || bi[i] === undefined) return ai[i] === undefined ? -1 : 1;
+    const an = /^\d+$/.test(ai[i]), bn = /^\d+$/.test(bi[i]);
+    if (an && bn) return Number(ai[i]) > Number(bi[i]) ? 1 : -1;
+    if (an !== bn) return an ? -1 : 1;
+    return ai[i] > bi[i] ? 1 : -1;
   }
   return 0;
 }
@@ -164,13 +178,8 @@ function releaseFromCnbRedirect(response, adapter) {
   if (!/^v\d+\.\d+\.\d+$/.test(tag)) {
     throw new Error('CNB latest 跳转缺少有效版本标签');
   }
-  const version = tag.slice(1);
-  const names = [
-    `HamsterArchiver-v${version}-win-x64.zip`,
-    `HamsterArchiver-Setup-v${version}-win-x64.exe`
-  ];
   const downloadBase = `${adapter.releasesUrl.replace(/\/$/, '')}/latest/download/`;
-  const assets = names.flatMap(name => [name, `${name}.sha256`]).map(name => ({
+  const assets = expectedReleaseAssetNames(tag).map(name => ({
     name,
     browser_download_url: `${downloadBase}${encodeURIComponent(name)}`,
     size: 0
@@ -243,8 +252,8 @@ async function fetchLatestRelease(adapter, fetchImpl, timeoutMs, stableBranch = 
   return release;
 }
 
-async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter, stableBranch = '' }) {
-  const latest = displayRelease(release, adapter);
+async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter, stableBranch = '', distributionMode = 'portable' }) {
+  const latest = { ...displayRelease(release, adapter), asset: selectReleaseAsset(release, distributionMode, adapter) };
   const versions = new Map([[latest.version, latest]]);
   const signal = AbortSignal.timeout(timeoutMs);
   let complete = false;
@@ -261,7 +270,7 @@ async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeo
         if (!isStableRelease(item, adapter.provider === 'cnb' && !item.target_commitish ? '' : stableBranch)) continue;
         if (compareVersions(item.tag_name, currentVersion) > 0 && compareVersions(item.tag_name, release.tag_name) <= 0) {
           const entry = displayRelease(item, adapter);
-          versions.set(entry.version, entry);
+          versions.set(entry.version, { ...entry, rollback: false, asset: selectReleaseAsset(item, distributionMode, adapter) });
         }
       }
       if (releases.length < 100) { complete = true; break; }
@@ -271,28 +280,90 @@ async function collectReleaseHistory({ release, currentVersion, fetchImpl, timeo
 }
 
 function selectReleaseAsset(release, distributionMode, adapter) {
-  if (distributionMode === 'mac') return null;
   const latestVersion = String(release.tag_name || '').replace(/^v/i, '');
   const assets = Array.isArray(release.assets) ? release.assets : [];
-  const expectedAssetName = (distributionMode === 'installed'
-    ? `HamsterArchiver-Setup-v${latestVersion}-win-x64.exe`
-    : `HamsterArchiver-v${latestVersion}-win-x64.zip`).toLowerCase();
-  const archiveAsset = assets.find((asset) => String(asset.name || '').toLowerCase() === expectedAssetName);
-  const archiveName = String(archiveAsset?.name || '').toLowerCase();
-  const digestAsset = archiveAsset && assets.find((asset) => {
-    const name = String(asset.name || '').toLowerCase();
-    return name === `${archiveName}.sha256` || name === `${archiveName}.sha256.txt`;
-  });
-  const downloadUrl = archiveAsset?.browser_download_url || archiveAsset?.brower_download_url || '';
-  const digestDownloadUrl = digestAsset?.browser_download_url || digestAsset?.brower_download_url || '';
-  return archiveAsset ? {
-    name: String(archiveAsset.name || ''),
-    downloadUrl: String(downloadUrl),
-    size: Number(archiveAsset.size) || 0,
-    digest: normalizeAssetDigest(archiveAsset, adapter.provider),
-    digestDownloadUrl: String(digestDownloadUrl),
-    provider: adapter.provider
-  } : null;
+  const select = (expectedAssetName) => {
+    expectedAssetName = expectedAssetName.toLowerCase();
+    const archiveAsset = assets.find((asset) => String(asset.name || '').toLowerCase() === expectedAssetName);
+    const archiveName = String(archiveAsset?.name || '').toLowerCase();
+    const digestAsset = archiveAsset && assets.find((asset) => {
+      const name = String(asset.name || '').toLowerCase();
+      return name === `${archiveName}.sha256` || name === `${archiveName}.sha256.txt`;
+    });
+    const downloadUrl = archiveAsset?.browser_download_url || archiveAsset?.brower_download_url || '';
+    const digestDownloadUrl = digestAsset?.browser_download_url || digestAsset?.brower_download_url || '';
+    return archiveAsset ? {
+      name: String(archiveAsset.name || ''),
+      downloadUrl: String(downloadUrl),
+      size: Number(archiveAsset.size) || 0,
+      digest: normalizeAssetDigest(archiveAsset, adapter.provider),
+      digestDownloadUrl: String(digestDownloadUrl),
+      provider: adapter.provider
+    } : null;
+  };
+  if (distributionMode === 'mac') return select(`HamsterArchiver-v${latestVersion}-mac-universal.dmg`);
+  if (distributionMode === 'installed') return select(`HamsterArchiver-Setup-v${latestVersion}-win-x64.exe`);
+  const zip = select(`HamsterArchiver-v${latestVersion}-win-x64.zip`);
+  const sevenZip = select(`HamsterArchiver-v${latestVersion}-win-x64.7z`);
+  if (sevenZip?.downloadUrl && (/^(?:sha256:)?[a-f0-9]{64}$/i.test(sevenZip.digest) || sevenZip.digestDownloadUrl)) {
+    return zip?.downloadUrl ? { ...sevenZip, fallbackAsset: zip } : sevenZip;
+  }
+  return zip;
+}
+
+function isMacRelease(release) {
+  return Boolean(release && !release.draft && (
+    (release.prerelease === true && /^v\d+\.\d+\.\d+-beta\.mac\.\d+$/.test(release.tag_name || '')) ||
+    isStableRelease(release, 'main')));
+}
+
+async function checkMacForUpdates({ currentVersion, fetchImpl, timeoutMs, includeHistory }) {
+  const adapter = createGithubAdapter();
+  const versions = new Map();
+  let complete = false;
+  const signal = AbortSignal.timeout(timeoutMs);
+  for (let page = 1; page <= 10; page += 1) {
+    try {
+      const response = await fetchImpl(adapter.historyUrl(page), { headers: adapter.headers, signal });
+      if (!response.ok) throw new Error(`GitHub 更新检查失败（HTTP ${response.status}）`);
+      const releases = await response.json();
+      if (!Array.isArray(releases)) throw new Error('GitHub Release 响应解析失败。');
+      for (const release of releases) {
+        if (!isMacRelease(release)) continue;
+        const asset = selectReleaseAsset(release, 'mac', adapter);
+        // A Windows release or incomplete Mac upload must never be offered.
+        if (!asset?.downloadUrl || (!asset.digestDownloadUrl && !/^sha256:[a-f0-9]{64}$/i.test(asset.digest))) continue;
+        versions.set(release.tag_name, release);
+      }
+      if (releases.length < 100) { complete = true; break; }
+    } catch (error) {
+      if (!versions.size) throw error;
+      break;
+    }
+  }
+  const releases = [...versions.values()].sort((a, b) => compareVersions(b.tag_name, a.tag_name));
+  if (!releases.length) return { currentVersion, latestVersion: null, updateAvailable: false,
+    distributionMode: 'mac', releaseUrl: RELEASES_URL, releaseNotes: '', releases: [],
+    historyIncomplete: !complete, installable: false, asset: null, provider: 'github' };
+  const history = { releases: includeHistory ? releases.map(release => ({
+    ...displayRelease(release, adapter), rollback: compareVersions(release.tag_name, currentVersion) < 0,
+    asset: selectReleaseAsset(release, 'mac', adapter)
+  })) : [], historyIncomplete: !complete };
+  return normalizeRelease({ release: releases[0], adapter, currentVersion, distributionMode: 'mac', history });
+}
+
+function selectCheckedRelease(checked, version) {
+  if (!checked || typeof version !== 'string') throw new Error('请重新检查更新。');
+  const entry = checked.releases?.find(release => release.version === version);
+  if (version !== checked.latestVersion && !entry) throw new Error('请重新检查更新。');
+  const selected = version === checked.latestVersion ? checked : { ...checked,
+    latestVersion: version, asset: entry.asset, releaseUrl: entry.releaseUrl,
+    releaseNotes: Object.fromEntries(Object.entries(entry.notes || {}).map(([locale, notes]) => [locale, notes.text])) };
+  const direction = compareVersions(version, checked.currentVersion);
+  if (!selected.asset?.downloadUrl || direction === 0 || (checked.distributionMode !== 'mac' && direction < 0)) {
+    throw new Error('请选择可安装的其他版本。');
+  }
+  return { ...selected, installable: true, rollback: direction < 0 };
 }
 
 function normalizeRelease({ release, adapter, currentVersion, distributionMode, history }) {
@@ -331,21 +402,8 @@ async function checkForUpdates({
   environment = process.env,
   stableBranch = ''
 } = {}) {
-  if (distributionMode === 'mac') return {
-    currentVersion,
-    latestVersion: null,
-    updateAvailable: false,
-    releaseUrl: RELEASES_URL,
-    releaseNotes: '',
-    releases: [],
-    historyIncomplete: false,
-    distributionMode: 'mac',
-    installable: false,
-    asset: null,
-    provider: 'github',
-    source: null
-  };
   if (typeof fetchImpl !== 'function') throw new Error('当前运行环境不支持联网检查更新。');
+  if (distributionMode === 'mac') return checkMacForUpdates({ currentVersion, fetchImpl, timeoutMs, includeHistory });
   const normalizedDistributionMode = distributionMode === 'mac' ? 'mac' : distributionMode === 'installed' ? 'installed' : 'portable';
   const github = createGithubAdapter();
   let release;
@@ -366,7 +424,7 @@ async function checkForUpdates({
   }
   const updateAvailable = compareVersions(release.tag_name, currentVersion) > 0;
   const history = includeHistory && updateAvailable
-    ? await collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter: github, stableBranch })
+    ? await collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter: github, stableBranch, distributionMode: normalizedDistributionMode })
     : { releases: [], historyIncomplete: false };
   return normalizeRelease({ release, adapter: github, currentVersion, distributionMode: normalizedDistributionMode, history });
 }
@@ -388,7 +446,7 @@ async function checkCnbForUpdates({ currentVersion, distributionMode = 'portable
     throw new Error('CNB 镜像版本与已确认的更新版本不一致，请重新检查更新。');
   }
   const history = includeHistory && compareVersions(release.tag_name, currentVersion) > 0
-    ? await collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter, stableBranch })
+    ? await collectReleaseHistory({ release, currentVersion, fetchImpl, timeoutMs, adapter, stableBranch, distributionMode })
     : { releases: [], historyIncomplete: false };
   return normalizeRelease({ release, adapter, currentVersion, distributionMode, history });
 }
@@ -406,6 +464,8 @@ module.exports = {
   createGithubAdapter,
   displayRelease,
   isStableRelease,
+  isMacRelease,
+  selectCheckedRelease,
   normalizeRelease,
   releaseFromCnbRedirect,
   resolveCnbConfig,

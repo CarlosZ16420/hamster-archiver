@@ -221,7 +221,10 @@
                 </div>
                 <div class="advanced-paths">
                   <label class="path-field advanced-path-field"><span>用户数据区</span><div><input id="user-data-path" type="text" spellcheck="false" readonly><button id="select-user-data" type="button">切换</button></div><small>切换时保留旧目录，确认后重启应用生效</small></label>
-                  <label class="path-field advanced-path-field"><span>压缩暂存目录</span><div><input id="archive-staging-directory" type="text"><button data-pick="archive-staging-directory" type="button">选择</button></div><small>默认在压缩包存储点同目录下新建 staging 文件夹</small></label>
+                  <div class="advanced-path-field">
+                    <label class="path-field"><span>压缩暂存目录</span><div><input id="archive-staging-directory" type="text"><button data-pick="archive-staging-directory" type="button">选择</button></div></label>
+                    <label class="check-row staging-automatic-toggle"><input id="archive-staging-automatic" type="checkbox" checked><span><strong>在压缩包存储点旁自动新建暂存文件夹</strong><small>随存储位置变化；取消勾选后可手动设置，并保留当前路径</small></span></label>
+                  </div>
                 </div>
                 <details id="ai-integrations" class="experimental-settings">
                   <summary><strong>实验功能 · AI 助手接入</strong><span>默认关闭</span></summary>
@@ -580,15 +583,6 @@
       <div class="dialog-heading"><div><p class="step">批量整理</p><h2>修改备份位置</h2></div><button id="close-bulk-backup" class="dialog-close" type="button" aria-label="关闭">×</button></div>
       <label class="editor-field"><span>备份位置</span><input id="bulk-backup-input" type="text" maxlength="200" required placeholder="例如：百度网盘 / 家庭备份盘 A"></label>
       <div class="dialog-actions"><button id="cancel-bulk-backup" class="button ghost" type="button">取消</button><button class="button primary" type="submit">修改</button></div>
-    </form>
-  </dialog>
-
-  <dialog id="inventory-only-risk-dialog" class="manual-dialog compact-dialog risk-confirm-dialog">
-    <form id="inventory-only-risk-form">
-      <div class="dialog-heading"><div><p class="step">未压缩入库 / CAUTION</p><h2>确认不压缩直接入库</h2></div><button id="close-inventory-only-risk" class="dialog-close" type="button" aria-label="关闭">×</button></div>
-      <p class="dialog-help">本次入库将不会执行压缩，可能导致用户备份时出现遗漏，请确认风险。</p>
-      <label class="remember-risk-option"><input id="suppress-inventory-only-risk" type="checkbox"><span>不再提示</span></label>
-      <div class="dialog-actions"><button id="cancel-inventory-only-risk" class="button ghost" type="button">取消</button><button class="button warning" type="submit">确认并直接入库</button></div>
     </form>
   </dialog>
 

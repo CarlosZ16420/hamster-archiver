@@ -484,7 +484,7 @@ async function prepareGithubBundle(config, githubClient) {
   const expectedNames = expectedReleaseAssetNames(config.tag);
   const selected = expectedNames.map(name => (release.assets || []).find(asset => asset.name === name));
   if (selected.some(asset => !asset || !asset.browser_download_url || !asset.size)) {
-    throw new Error(`GitHub ${config.tag} must contain the exact four non-empty release attachments before CNB synchronization.`);
+    throw new Error(`GitHub ${config.tag} must contain the exact ${expectedReleaseAssetNames(config.tag).length} non-empty release attachments before CNB synchronization.`);
   }
   const tempRoot = await fsp.mkdtemp(path.join(os.tmpdir(), `hamster-cnb-${config.tag}-`));
   try {

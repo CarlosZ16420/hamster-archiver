@@ -44,7 +44,7 @@ async function findAppBundle(outputDirectory) {
   throw new Error('electron-builder did not create the expected macOS app bundle.');
 }
 
-async function smokeApp(bundle, outputDirectory, commit) {
+async function smokeApp(bundle, outputDirectory, commit, version = packageJson.version) {
   const executable = path.join(bundle, 'Contents', 'MacOS', 'Hamster Archiver');
   const resources = path.join(bundle, 'Contents', 'Resources');
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-mac-smoke-'));
@@ -93,11 +93,11 @@ async function smokeApp(bundle, outputDirectory, commit) {
       throw new Error(`The packaged Mac app did not complete the real archive and renderer check: ${smokeOutput.slice(-4000)}`);
     }
     const result = JSON.parse(await fs.readFile(resultFile, 'utf8'));
-    if (result.ok !== true || result.stage !== 'complete' || result.version !== packageJson.version) {
+    if (result.ok !== true || result.stage !== 'complete' || result.version !== version) {
       throw new Error(`The macOS app did not complete its isolated startup check: ${JSON.stringify(result)}`);
     }
     await fs.writeFile(path.join(outputDirectory, 'smoke-result.json'), `${JSON.stringify({
-      ok: true, stage: result.stage, version: result.version, commit,
+      ok: true, stage: result.stage, version: result.version, sourceVersion: packageJson.version, commit,
       integrity: true, archive: true
     }, null, 2)}\n`);
   } finally {
@@ -105,23 +105,41 @@ async function smokeApp(bundle, outputDirectory, commit) {
   }
 }
 
+function buildOptions(args) {
+  const options = { smoke: false, version: packageJson.version, commit: '' };
+  for (let index = 0; index < args.length; index++) {
+    if (args[index] === '--smoke') options.smoke = true;
+    else if (['--version', '--source-commit'].includes(args[index]) && args[index + 1]) {
+      options[args[index] === '--version' ? 'version' : 'commit'] = args[++index];
+    } else throw new Error('Use --smoke [--version X.Y.Z-beta.mac.N] [--source-commit FULL_SHA].');
+  }
+  if (options.version !== packageJson.version &&
+      (!/^\d+\.\d+\.\d+-beta\.mac\.[1-9]\d*$/.test(options.version) ||
+      options.version.split('-')[0] !== packageJson.version.split('-')[0])) {
+    throw new Error('The independent Mac Beta version must use the frozen source base version.');
+  }
+  if (options.commit && !/^[a-f0-9]{40}$/.test(options.commit)) throw new Error('Use the full source commit SHA.');
+  return options;
+}
+
 async function main() {
   if (process.platform !== 'darwin') throw new Error('A macOS runner is required to build a Mac release.');
-  if (process.argv.slice(2).some((value) => value !== '--smoke')) throw new Error('Unknown macOS build argument.');
+  const options = buildOptions(process.argv.slice(2));
   if (run('git', ['status', '--porcelain'], { stdio: ['ignore', 'pipe', 'inherit'] }).trim()) {
     throw new Error('The macOS package must be built from a clean committed source tree.');
   }
   const commit = run('git', ['rev-parse', 'HEAD'], { stdio: ['ignore', 'pipe', 'inherit'] }).trim();
+  if (options.commit && commit !== options.commit) throw new Error('Mac build source differs from the requested exact candidate.');
   const layout = makeLocalLayout(projectRoot);
-  const outputDirectory = path.join(layout.buildRoot, 'macos', `v${packageJson.version}-${commit.slice(0, 12)}`);
+  const outputDirectory = path.join(layout.buildRoot, 'macos', `v${options.version}-${commit.slice(0, 12)}`);
   const cacheDirectory = path.join(layout.root, 'development', 'mac-tool-cache');
   for (const target of [outputDirectory, cacheDirectory]) assertPathInsideLocalRoot(target, layout.root);
   await fs.mkdir(outputDirectory, { recursive: true });
   const tools = await prepareTools(cacheDirectory);
   const icon = await createMacIcon(path.join(outputDirectory, 'icon'));
-  const artifactName = `HamsterArchiver-v${packageJson.version}-mac-universal.\${ext}`;
+  const artifactName = `HamsterArchiver-v${options.version}-mac-universal.\${ext}`;
   const artifacts = await build({
-    targets: Platform.MAC.createTarget('dmg', Arch.universal),
+    targets: Platform.MAC.createTarget(['dmg', 'zip'], Arch.universal),
     publish: 'never',
     config: {
       appId: 'com.carlosz.hamsterarchiver',
@@ -131,7 +149,8 @@ async function main() {
       npmRebuild: false,
       directories: { output: outputDirectory },
       files: ['package.json', 'src/**/*', 'assets/app-icon.png', 'assets/app-icon.ico'],
-      extraMetadata: { productName: 'Hamster Archiver', distributionMode: 'installed' },
+      extraMetadata: { version: options.version, sourceVersion: packageJson.version,
+        productName: 'Hamster Archiver', distributionMode: 'installed' },
       extraResources: [
         { from: tools.binary, to: 'tools/7zip/7zz' },
         { from: tools.license, to: 'tools/7zip/License.txt' },
@@ -149,7 +168,7 @@ async function main() {
       ],
       afterPack,
       mac: {
-        target: ['dmg'],
+        target: ['dmg', 'zip'],
         icon,
         category: 'public.app-category.utilities',
         identity: '-',
@@ -163,18 +182,33 @@ async function main() {
   const bundle = await findAppBundle(outputDirectory);
   const resources = path.join(bundle, 'Contents', 'Resources');
   const manifest = await readAndVerifyReleaseManifest(resources);
-  if (manifest.commit !== commit || manifest.platform !== 'darwin-universal') {
+  if (manifest.commit !== commit || manifest.version !== options.version ||
+      manifest.sourceVersion !== packageJson.version || manifest.platform !== 'darwin-universal') {
     throw new Error('The packaged source identity is not the requested macOS commit.');
   }
   run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', bundle]);
-  if (process.argv.includes('--smoke')) await smokeApp(bundle, outputDirectory, commit);
+  if (options.smoke) await smokeApp(bundle, outputDirectory, commit, options.version);
   const dmg = artifacts.filter((file) => file.endsWith('.dmg'));
   if (dmg.length !== 1) throw new Error(`Expected exactly one universal DMG, received ${dmg.length}.`);
   run('hdiutil', ['verify', dmg[0]]);
-  const digest = await hashFile(dmg[0]);
-  await fs.writeFile(`${dmg[0]}.sha256`, `${digest} *${path.basename(dmg[0])}\n`, 'ascii');
-  console.log(JSON.stringify({ commit, version: packageJson.version, dmg: dmg[0], sha256: digest,
-    signed: 'ad-hoc', notarized: false, smoke: process.argv.includes('--smoke') }, null, 2));
+  const zip = artifacts.filter((file) => file.endsWith('.zip'));
+  if (zip.length !== 1) throw new Error(`Expected exactly one app ZIP, received ${zip.length}.`);
+  run('unzip', ['-t', zip[0]], { stdio: 'ignore' });
+  const zipManifest = JSON.parse(run('unzip', ['-p', zip[0],
+    'Hamster Archiver.app/Contents/Resources/release-manifest.json'], { stdio: ['ignore', 'pipe', 'inherit'] }));
+  if (zipManifest.version !== options.version || zipManifest.commit !== commit ||
+      zipManifest.sourceVersion !== packageJson.version || zipManifest.platform !== 'darwin-universal') {
+    throw new Error('The app ZIP does not contain the same exact Mac candidate.');
+  }
+  const assets = [];
+  for (const file of [dmg[0], zip[0]]) {
+    const digest = await hashFile(file);
+    await fs.writeFile(`${file}.sha256`, `${digest} *${path.basename(file)}\n`, 'ascii');
+    assets.push({ file, sha256: digest });
+  }
+  console.log(JSON.stringify({ commit, version: options.version, sourceVersion: packageJson.version, assets,
+    signed: 'ad-hoc', notarized: false, smoke: options.smoke }, null, 2));
 }
 
-main().catch((error) => { console.error(error.stack || error.message); process.exit(1); });
+if (require.main === module) main().catch((error) => { console.error(error.stack || error.message); process.exit(1); });
+module.exports = { buildOptions, smokeApp };

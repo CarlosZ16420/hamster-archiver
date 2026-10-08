@@ -30,6 +30,7 @@ const {
   normalizeVersion,
   prepareOnlineUpdate,
   prepareUpdate,
+  prepareLocalUpdate,
   prepareInstalledUpdate,
   readUpdateSuccessNotice,
   resolveDownloadTrust,
@@ -40,6 +41,72 @@ const {
 const { createFileIntegrityEntries } = require('../src/core/tool-integrity');
 
 const execFileAsync = promisify(execFile);
+
+test('portable 7z updates extract correctly and missing 7z falls back to independently verified ZIP', {
+  skip: process.platform !== 'win32'
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-update-7z-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const packageRoot = path.join(root, 'package');
+  await fs.mkdir(packageRoot);
+  await fs.writeFile(path.join(packageRoot, 'HamsterArchiver.exe'), 'fictional application');
+  const integrityFiles = await createFileIntegrityEntries(packageRoot, ['HamsterArchiver.exe']);
+  await fs.writeFile(path.join(packageRoot, 'release-manifest.json'), JSON.stringify({
+    schemaVersion: 2, version: '4.8.5', platform: 'win32-x64', integrity: { files: integrityFiles }
+  }));
+  const sevenZipPath = path.resolve(__dirname, '..', 'tools', '7zip', '7z.exe');
+  const assets = {};
+  for (const format of ['zip', '7z']) {
+    const name = `HamsterArchiver-v4.8.5-win-x64.${format}`;
+    const archive = path.join(root, name);
+    await execFileAsync(sevenZipPath, ['a', `-t${format}`, archive, packageRoot], { windowsHide: true });
+    const bytes = await fs.readFile(archive);
+    assets[format] = { bytes, metadata: { name, digest: `sha256:${await hashFile(archive)}`,
+      downloadUrl: `https://github.com/${name}`, digestDownloadUrl: `https://github.com/${name}.sha256` } };
+  }
+  assert.notEqual(assets.zip.metadata.digest, assets['7z'].metadata.digest);
+  const options = { applicationRoot: path.join(root, 'application'), sevenZipPath, currentVersion: '4.8.4', environment: {},
+    release: { latestVersion: '4.8.5', provider: 'github', distributionMode: 'portable',
+      asset: { ...assets['7z'].metadata, fallbackAsset: assets.zip.metadata } } };
+  for (const scenario of ['available', 'missing', 'missing-sidecar', 'mirror-missing', 'corrupt', 'mirror-zip-mismatch']) {
+    const calls = [];
+    const progress = [];
+    const release = scenario === 'missing-sidecar'
+      ? { ...options.release, asset: { ...options.release.asset, digest: '' } } : options.release;
+    const preparation = prepareOnlineUpdate({ ...options, release, userDataDirectory: path.join(root, scenario),
+      onProgress: value => progress.push(value),
+      fetchImpl: async url => {
+        calls.push(url);
+        if (url.endsWith('/releases/latest')) return new Response(null, { status: 307,
+          headers: { location: '/carlosz16420/hamster-archive/-/releases/tag/v4.8.5' } });
+        const format = /\.7z(?:\.sha256)?$/.test(url) ? '7z' : 'zip';
+        if (format === '7z' && scenario !== 'available' && scenario !== 'corrupt') {
+          return new Response(null, { status: scenario.startsWith('mirror-') && new URL(url).hostname === 'github.com' ? 503 : 404 });
+        }
+        if (url.endsWith('.sha256')) return new Response(scenario === 'mirror-zip-mismatch'
+          ? 'b'.repeat(64) : assets[format].metadata.digest.slice(7));
+        return new Response(scenario === 'corrupt' ? 'damaged package' : assets[format].bytes);
+      } });
+    if (scenario === 'corrupt' || scenario === 'mirror-zip-mismatch') {
+      await assert.rejects(preparation, scenario === 'corrupt' ? /SHA256 校验失败/ : /摘要与 GitHub 已确认/);
+      assert.equal(calls.some(url => /\.zip$/.test(url)), false);
+    } else {
+      const prepared = await preparation;
+      const format = scenario === 'available' ? '7z' : 'zip';
+      assert.equal(path.extname(prepared.archivePath), `.${format}`);
+      assert.equal(prepared.digest, assets[format].metadata.digest.slice(7));
+      assert.equal(prepared.release.asset.name, assets[format].metadata.name);
+      assert.equal(prepared.provider, scenario === 'mirror-missing' ? 'cnb' : 'github');
+      assert.equal(progress.some(value => value.stage === 'format-fallback'), scenario !== 'available');
+      assert.equal(progress.some(value => value.stage === 'fallback'), scenario === 'mirror-missing');
+      await fs.access(path.join(prepared.packageRoot, 'HamsterArchiver.exe'));
+    }
+  }
+  const local = await prepareLocalUpdate({ ...options, userDataDirectory: path.join(root, 'local'),
+    packagePath: path.join(root, assets['7z'].metadata.name) });
+  assert.equal(local.version, '4.8.5');
+  assert.equal(path.extname(local.archivePath), '.7z');
+});
 
 async function createUpdateSuccessHarness({ integrityTest = false } = {}) {
   const main = await fs.readFile(path.resolve(__dirname, '../src/main.js'), 'utf8');

@@ -19,6 +19,7 @@ const SIMILARITY_STRENGTH_LABELS = { loose: '宽松', standard: '标准', strict
 const elements = {
   intakeDirectory: document.querySelector('#intake-directory'),
   archiveStagingDirectory: document.querySelector('#archive-staging-directory'),
+  archiveStagingAutomatic: document.querySelector('#archive-staging-automatic'),
   archiveOutputDirectory: document.querySelector('#archive-output-directory'),
   moveCompleted: document.querySelector('#move-completed'),
   processedSourceDirectory: document.querySelector('#processed-source-directory'),
@@ -125,9 +126,6 @@ const elements = {
   bulkBackupDialog: document.querySelector('#bulk-backup-dialog'),
   bulkBackupForm: document.querySelector('#bulk-backup-form'),
   bulkBackupInput: document.querySelector('#bulk-backup-input'),
-  inventoryOnlyRiskDialog: document.querySelector('#inventory-only-risk-dialog'),
-  inventoryOnlyRiskForm: document.querySelector('#inventory-only-risk-form'),
-  suppressInventoryOnlyRisk: document.querySelector('#suppress-inventory-only-risk'),
   catalogCompressionRiskDialog: document.querySelector('#catalog-compression-risk-dialog'),
   catalogCompressionRiskForm: document.querySelector('#catalog-compression-risk-form'),
   suppressCatalogCompressionRisk: document.querySelector('#suppress-catalog-compression-risk'),
@@ -1333,11 +1331,13 @@ async function showRandomWalk(shouldScroll = true) {
 }
 
 function readConfig() {
+  updateArchiveStagingControls();
   const archiveVolumeMultiplier = elements.volumeUnit.value === 'gb' ? 1024 ** 3 : 1024 ** 2;
   return {
     language: i18n?.getLocale?.() === 'en-US' ? 'en-US' : 'zh-CN',
     intakeDirectory: elements.intakeDirectory.value.trim(),
     archiveStagingDirectory: elements.archiveStagingDirectory.value.trim(),
+    archiveStagingAutomatic: elements.archiveStagingAutomatic.checked,
     archiveOutputDirectory: elements.archiveOutputDirectory.value.trim(),
     moveCompleted: elements.moveCompleted.checked,
     processedSourceDirectory: elements.processedSourceDirectory.value.trim(),
@@ -1413,6 +1413,13 @@ function updateSettingsDigests() {
     : [t('定时运行关闭'), t('数据与维护工具')].join(' · ');
 }
 
+function updateArchiveStagingControls() {
+  const automatic = elements.archiveStagingAutomatic.checked;
+  if (automatic) elements.archiveStagingDirectory.value = deriveStagingDirectory(elements.archiveOutputDirectory.value);
+  elements.archiveStagingDirectory.readOnly = automatic;
+  document.querySelector('[data-pick="archive-staging-directory"]').disabled = automatic || Boolean(currentState?.running);
+}
+
 function updateBackupLocationControl() {
   const enabled = elements.recordBackupLocation.checked;
   elements.backupLocation.required = enabled;
@@ -1474,6 +1481,7 @@ function setConfigControlsLocked(locked) {
   ].join(',');
   for (const control of document.querySelectorAll(selector)) control.disabled = locked;
   if (locked) return;
+  updateArchiveStagingControls();
   updateBackupLocationControl();
   updateIntakeOptionControls();
   updateAutoSkipControls();
@@ -1536,8 +1544,9 @@ function renderConfig(config) {
   updateCatalogThumbnailButton();
   elements.intakeDirectory.value = config.intakeDirectory || '';
   elements.archiveOutputDirectory.value = config.archiveOutputDirectory || '';
-  elements.archiveStagingDirectory.value = config.archiveStagingDirectory ||
-    deriveStagingDirectory(config.archiveOutputDirectory);
+  elements.archiveStagingAutomatic.checked = config.archiveStagingAutomatic !== false;
+  elements.archiveStagingDirectory.value = config.archiveStagingDirectory || '';
+  updateArchiveStagingControls();
   elements.warehousePath.textContent = config.repositoryDirectory ? t(`仓库：${config.repositoryDirectory}`) : '';
   elements.warehousePath.title = config.repositoryDirectory || t('当前仓库位置');
   elements.userDataPath.value = config.userDataDirectory || '';
@@ -3480,9 +3489,12 @@ function renderSummary(state) {
 }
 
 function syncArchiveOutputFields(previousConfig, config) {
-  if (!previousConfig || config.archiveOutputDirectory === previousConfig.archiveOutputDirectory) return;
+  if (!previousConfig || ['archiveOutputDirectory', 'archiveStagingDirectory', 'archiveStagingAutomatic']
+    .every((key) => config[key] === previousConfig[key])) return;
   elements.archiveOutputDirectory.value = config.archiveOutputDirectory || '';
-  elements.archiveStagingDirectory.value = config.archiveStagingDirectory || deriveStagingDirectory(config.archiveOutputDirectory);
+  elements.archiveStagingDirectory.value = config.archiveStagingDirectory || '';
+  elements.archiveStagingAutomatic.checked = config.archiveStagingAutomatic !== false;
+  updateArchiveStagingControls();
 }
 
 function highlightQueueAttention(jobIds) {
@@ -3760,22 +3772,16 @@ setInterval(() => {
 document.querySelectorAll('[data-pick]').forEach((button) => {
   button.addEventListener('click', async () => {
     const input = document.querySelector(`#${button.dataset.pick}`);
-    const previousValue = input.value.trim();
-    const previousDerivedStaging = input === elements.archiveOutputDirectory
-      ? deriveStagingDirectory(previousValue)
-      : '';
     const selected = await safely(() => window.archiveApp.chooseDirectory(input.value.trim()));
     if (!selected) return;
     input.value = selected;
-    if (input === elements.archiveOutputDirectory &&
-        (!elements.archiveStagingDirectory.value.trim() ||
-          elements.archiveStagingDirectory.value.trim() === previousDerivedStaging)) {
-      elements.archiveStagingDirectory.value = deriveStagingDirectory(selected);
-    }
+    if (input === elements.archiveOutputDirectory) updateArchiveStagingControls();
     await saveConfig();
   });
 });
 
+elements.archiveStagingAutomatic.addEventListener('change', updateArchiveStagingControls);
+elements.archiveOutputDirectory.addEventListener('input', updateArchiveStagingControls);
 document.querySelector('.settings-col').addEventListener('input', updateSettingsDigests);
 document.querySelector('.settings-col').addEventListener('change', updateSettingsDigests);
 document.querySelector('#save-settings').addEventListener('click', saveConfig);
@@ -3839,6 +3845,7 @@ window.archiveApp.onUpdateProgress((progress) => {
   elements.updateStatusChip.dataset.state = 'checking';
   if (progress.stage === 'copying') elements.updateStatusLabel.textContent = t('正在读取更新包…');
   else if (progress.stage === 'fallback') elements.updateStatusLabel.textContent = t('GitHub 连接失败，正在尝试 CNB 镜像…');
+  else if (progress.stage === 'format-fallback') elements.updateStatusLabel.textContent = t('7z 更新包不可用，正在尝试 ZIP…');
   else if (progress.stage === 'verifying') elements.updateStatusLabel.textContent = t('正在校验更新…');
   else if (progress.stage === 'downloading') {
     elements.updateStatusLabel.textContent = t(progress.totalBytes
@@ -4154,30 +4161,7 @@ async function beginInventoryOnlyQueue() {
   }
 }
 
-document.querySelector('#start-inventory-only').addEventListener('click', () => {
-  if (currentState?.config?.suppressInventoryOnlyRisk) {
-    void beginInventoryOnlyQueue();
-    return;
-  }
-  elements.suppressInventoryOnlyRisk.checked = false;
-  elements.inventoryOnlyRiskDialog.showModal();
-});
-for (const selector of ['#close-inventory-only-risk', '#cancel-inventory-only-risk']) {
-  document.querySelector(selector).addEventListener('click', () => elements.inventoryOnlyRiskDialog.close());
-}
-elements.inventoryOnlyRiskForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  if (elements.suppressInventoryOnlyRisk.checked) {
-    const state = await safely(() => window.archiveApp.saveConfig({
-      ...readConfig(),
-      suppressInventoryOnlyRisk: true
-    }));
-    if (!state) return;
-    render(state, true);
-  }
-  elements.inventoryOnlyRiskDialog.close();
-  await beginInventoryOnlyQueue();
-});
+document.querySelector('#start-inventory-only').addEventListener('click', beginInventoryOnlyQueue);
 document.querySelector('#finish-next').addEventListener('click', async () => {
   const state = await safely(() => window.archiveApp.finishNextAndPause());
   if (state) render(state);

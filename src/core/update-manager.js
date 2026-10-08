@@ -136,6 +136,9 @@ catch {
 `;
 
 function manualUpdateInstructions(language = 'zh-CN', distributionMode = 'portable') {
+  if (distributionMode === 'mac') return language === 'en-US'
+    ? 'Quit Hamster Archiver, download the chosen Mac DMG, then replace only Hamster Archiver.app. Keep your Application Support data. Export the Warehouse before downgrading; an older Beta may not support newer data.'
+    : '退出 Hamster Archiver，下载所选 Mac DMG，仅替换 Hamster Archiver.app。保留 Application Support 中的用户资料。回退前先导出仓库，旧 Beta 可能无法读取新版数据。';
   if (distributionMode === 'installed') {
     if (language === 'en-US') {
       return [
@@ -155,7 +158,7 @@ function manualUpdateInstructions(language = 'zh-CN', distributionMode = 'portab
   if (language === 'en-US') {
     return [
       '1. In the old version, use Export warehouse to create a warehouse ZIP, then exit Hamster Archiver completely.',
-      '2. Download the latest Windows x64 ZIP from the authoritative GitHub Releases page or the configured CNB mirror and extract it into a new directory. Do not replace only the EXE or overwrite a running directory.',
+      '2. Download the latest Windows x64 7z or ZIP from the authoritative GitHub Releases page or the configured CNB mirror and extract it into a new directory. Do not replace only the EXE or overwrite a running directory.',
       '3. Run HamsterArchiver.exe from the new directory, open Warehouse, choose Import external warehouse, and select the ZIP exported in step 1.',
       '4. Verify the version, warehouse records and thumbnails. Keep the old program directory until the imported warehouse has been checked.'
     ].join('\n');
@@ -362,7 +365,7 @@ async function fetchDigestSidecar(url, fetchImpl, trust = { provider: 'github', 
     headers: { Accept: 'text/plain', 'User-Agent': 'hamster-archiver-update-manager' },
     signal: AbortSignal.timeout(30_000)
   }, fetchImpl, trust, 'SHA256 摘要地址');
-  if (!response.ok) throw Object.assign(new Error(`SHA256 摘要下载失败（HTTP ${response.status}）。`), { code: 'UPDATE_DOWNLOAD_HTTP_ERROR' });
+  if (!response.ok) throw Object.assign(new Error(`SHA256 摘要下载失败（HTTP ${response.status}）。`), { code: 'UPDATE_DOWNLOAD_HTTP_ERROR', status: response.status });
   try { return normalizeDigest(await response.text()); }
   catch (error) { throw updateDownloadNetworkError(error); }
 }
@@ -377,7 +380,7 @@ async function downloadFile(url, targetPath, fetchImpl, onProgress = () => {}, t
   const response = await fetchWithTrustedRedirects(url, {
     headers: { Accept: 'application/octet-stream', 'User-Agent': 'hamster-archiver-update-manager' }
   }, fetchImpl, trust, '更新包地址');
-  if (!response.ok) throw Object.assign(new Error(`更新包下载失败（HTTP ${response.status}）。`), { code: 'UPDATE_DOWNLOAD_HTTP_ERROR' });
+  if (!response.ok) throw Object.assign(new Error(`更新包下载失败（HTTP ${response.status}）。`), { code: 'UPDATE_DOWNLOAD_HTTP_ERROR', status: response.status });
   const totalBytes = Number(response.headers.get('content-length')) || 0;
   if (!response.body?.getReader) throw new Error('当前运行环境不支持流式下载更新包。');
   await fsp.mkdir(path.dirname(targetPath), { recursive: true });
@@ -459,28 +462,60 @@ async function validateUpdatePackage(packageRoot, currentVersion, expectedVersio
 
 async function prepareOnlineUpdate(options, { prepareImpl, checkCnbImpl = checkCnbForUpdates } = {}) {
   const release = options.release;
-  const prepare = prepareImpl || (release?.distributionMode === 'installed' ? prepareInstalledUpdate : prepareUpdate);
-  try { return { ...await prepare(options), release }; }
+  const prepare = prepareImpl || (release?.distributionMode === 'mac' ? require('./mac-update-manager').prepareMacUpdate
+    : release?.distributionMode === 'installed' ? prepareInstalledUpdate : prepareUpdate);
+  // Pin mirror digests by filename: ZIP and 7z contain the same release but
+  // have different bytes and must never inherit one another's checksum.
+  const confirmedDigests = new Map();
+  for (const asset of [release?.asset, release?.asset?.fallbackAsset].filter(Boolean)) {
+    const digest = normalizeDigest(asset.digest);
+    if (digest) confirmedDigests.set(asset.name, digest);
+  }
+  let attemptedAsset = release?.asset;
+  const prepareFormats = async (candidate, providerConfig = options.providerConfig) => {
+    let selected = candidate;
+    while (true) {
+      attemptedAsset = selected.asset;
+      const expectedDigest = confirmedDigests.get(selected.asset?.name) || '';
+      let prepared;
+      try {
+        prepared = await prepare({ ...options, release: selected, providerConfig, confirmedDigest: expectedDigest });
+        if (expectedDigest && prepared.digest !== expectedDigest) {
+          throw new Error('CNB 更新包摘要与 GitHub 已确认的摘要不一致，已停止更新。');
+        }
+        return { ...prepared, release: selected };
+      } catch (error) {
+        if (prepared?.runRoot) await fsp.rm(prepared.runRoot, { recursive: true, force: true }).catch(() => {});
+        if (error.updateExpectedDigest) confirmedDigests.set(selected.asset.name, error.updateExpectedDigest);
+        const fallback = selected.asset?.fallbackAsset;
+        if (/\.7z$/i.test(selected.asset?.name || '') && fallback?.downloadUrl &&
+            error.code === 'UPDATE_DOWNLOAD_HTTP_ERROR' && [404, 410].includes(error.status)) {
+          options.onProgress?.({ stage: 'format-fallback', provider: selected.provider, percentage: 0 });
+          selected = { ...selected, asset: fallback };
+          continue;
+        }
+        throw error;
+      }
+    }
+  };
+  try { return await prepareFormats(release); }
   catch (githubError) {
-    if (String(release?.provider || release?.asset?.provider || 'github') !== 'github' ||
+    if (release?.distributionMode === 'mac' || String(release?.provider || release?.asset?.provider || 'github') !== 'github' ||
         !['UPDATE_DOWNLOAD_NETWORK_ERROR', 'UPDATE_DOWNLOAD_HTTP_ERROR'].includes(githubError.code)) throw githubError;
     options.onProgress?.({ stage: 'fallback', provider: 'cnb', percentage: 0 });
-    let prepared;
     try {
       const mirrored = await checkCnbImpl({ currentVersion: options.currentVersion,
         distributionMode: release.distributionMode, expectedVersion: release.latestVersion,
         fetchImpl: options.fetchImpl, environment: options.environment,
         cnb: options.cnb, stableBranch: 'main' });
-      const expectedDigest = normalizeDigest(release.asset?.digest) || githubError.updateExpectedDigest;
-      const mirroredRelease = { ...mirrored, releaseNotes: release.releaseNotes || mirrored.releaseNotes };
-      prepared = await prepare({ ...options, providerConfig: resolveCnbConfig(options.cnb, options.environment),
-        confirmedDigest: expectedDigest, release: mirroredRelease });
-      if (expectedDigest && prepared.digest !== expectedDigest) {
-        throw new Error('CNB 更新包摘要与 GitHub 已确认的摘要不一致，已停止更新。');
+      let mirroredAsset = mirrored.asset;
+      if (/\.zip$/i.test(attemptedAsset?.name || '') && /\.7z$/i.test(mirroredAsset?.name || '')) {
+        mirroredAsset = mirroredAsset.fallbackAsset;
+        if (!mirroredAsset?.downloadUrl) throw new Error('这个 Release 没有可用的 Windows 更新包。');
       }
-      return { ...prepared, release: mirroredRelease };
+      const mirroredRelease = { ...mirrored, asset: mirroredAsset, releaseNotes: release.releaseNotes || mirrored.releaseNotes };
+      return await prepareFormats(mirroredRelease, resolveCnbConfig(options.cnb, options.environment));
     } catch (cnbError) {
-      if (prepared?.runRoot) await fsp.rm(prepared.runRoot, { recursive: true, force: true }).catch(() => {});
       throw new Error(`准备更新失败：${githubError.message}；${cnbError.message}`);
     }
   }
@@ -498,7 +533,7 @@ async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath,
   }
   const version = String(release.latestVersion || '').replace(/[^0-9A-Za-z.-]/g, '_');
   const runRoot = path.join(path.resolve(userDataDirectory), 'updates', `${version}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`);
-  const archivePath = path.join(runRoot, 'package.zip');
+  const archivePath = path.join(runRoot, /\.7z$/i.test(release.asset.name) ? 'package.7z' : 'package.zip');
   const extractRoot = path.join(runRoot, 'extracted');
   try {
     await fsp.mkdir(runRoot, { recursive: true });
@@ -656,7 +691,7 @@ async function prepareLocalUpdate({
 }) {
   if (process.platform !== 'win32') throw new Error('从压缩包更新目前仅支持 Windows 便携版。');
   const sourcePath = path.resolve(String(packagePath || '').trim());
-  if (!/\.zip$/i.test(sourcePath)) throw new Error('请选择 .zip 格式的新版本压缩包。');
+  if (!/\.(?:zip|7z)$/i.test(sourcePath)) throw new Error('请选择 .zip 或 .7z 格式的新版本压缩包。');
   let sourceStats;
   try {
     sourceStats = await fsp.stat(sourcePath);
@@ -670,7 +705,7 @@ async function prepareLocalUpdate({
     'updates',
     `local-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
   );
-  const archivePath = path.join(runRoot, 'package.zip');
+  const archivePath = path.join(runRoot, `package${path.extname(sourcePath).toLowerCase()}`);
   const extractRoot = path.join(runRoot, 'extracted');
   try {
     await fsp.mkdir(runRoot, { recursive: true });
@@ -724,11 +759,11 @@ async function waitForUpdaterStart(child, startedFile, {
     if (await existsImpl(startedFile)) return;
     if (launchError) throw launchError;
     if (child.exitCode !== null && child.exitCode !== undefined && child.exitCode !== 0) {
-      throw new Error(`PowerShell 更新助手过早退出（代码 ${child.exitCode}）。`);
+      throw new Error(`更新助手过早退出（代码 ${child.exitCode}）。`);
     }
     await delayImpl(intervalMs);
   }
-  throw new Error(`PowerShell 更新助手在 ${Math.ceil(timeoutMs / 1000)} 秒内没有确认启动。`);
+  throw new Error(`更新助手在 ${Math.ceil(timeoutMs / 1000)} 秒内没有确认启动。`);
 }
 
 async function launchUpdate({ prepared, targetPid }, {

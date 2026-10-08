@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "version": "4.8.5",
+  "readmeVersion": "4.8.4",
+  "notes": {
+    "zh-CN": [
+      "Windows 便携包新增 7z 并排除文档图片以减小体积；更新器优先校验 7z，仅在附件缺失时回退同版本 ZIP，并可选择更新的 Windows 正式版。",
+      "不压缩入库不再显示额外风险弹窗；暂存位置可默认自动跟随压缩包位置，启动与队列显示得到改善。",
+      "仓库格式和用户资料保持兼容，无需迁移；Mac Beta 更新通过独立测试通道提供。"
+    ],
+    "en-US": [
+      "Add 7z Windows portable packages and exclude documentation images to reduce size; the updater prefers verified 7z, falls back to the same-version ZIP only when assets are missing, and can select newer Windows stable releases.",
+      "Remove the extra caution dialog for uncompressed intake while retaining existing duplicate and source-change decisions; staging can follow the archive location, and startup and queue presentation improve.",
+      "The Warehouse format and user data remain compatible without migration; Mac Beta updates use a separate test channel."
+    ]
+  }
+}

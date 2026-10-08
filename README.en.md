@@ -5,7 +5,8 @@
 
 ### Enjoy collecting. Enjoy organizing, too.
 
-A local resource archiving tool. Quickly create browsable, searchable and easy-to-manage records for local files, track storage locations and verification information, and compress resources whenever you need.
+A local resource archiving tool. Quickly create browsable, searchable and easy-to-manage records for local files.<br>
+Track storage locations and verification information, and compress resources whenever you need.
 
 ![Version](https://img.shields.io/badge/version-4.8.4-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
@@ -14,9 +15,9 @@ A local resource archiving tool. Quickly create browsable, searchable and easy-t
 
 **[Download Windows stable](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[Download Mac beta](https://github.com/CarlosZ16420/hamster-archiver/releases/tag/v4.8.0-beta.mac.2)** · [简体中文](README.md) · [Report an issue](https://github.com/CarlosZ16420/hamster-archiver/issues)
 
-</div>
-
 [Quick start](#quick-start) · [Features](#features) · [FAQ](#frequently-asked-questions) · [Experimental AI integration](#experimental-ai-integration) · [Documentation and contributions](#documentation-and-contributions)
+
+</div>
 
 Are downloads and backups piling up, filling your drive before you have a chance to organize them?
 
@@ -41,6 +42,8 @@ The app packages files and keeps records; your cloud storage or drives hold the 
 
 [![Batch archiving, progress tracking and duplicate review](assets/readme/archive-showcase.en-US.png)](assets/readme/archive-showcase.en-US.png)
 
+The staging folder is created beside the archive folder by default and follows changes to that location. Uncheck automatic staging in advanced settings to set the folder manually and keep its current path.
+
 ## Quick start
 
 ### Windows
@@ -57,7 +60,7 @@ Scanning a parent directory adds its immediate subfolders and videos as separate
 
 Supports macOS 12 or later on Apple Silicon and Intel. Download the DMG from the [Mac beta release](https://github.com/CarlosZ16420/hamster-archiver/releases/tag/v4.8.0-beta.mac.2), open it, and drag the app to Applications. This beta is not Apple-notarized. If you trust the download, choose Open Anyway in System Settings → Privacy & Security when needed.
 
-7-Zip is included; video frame extraction requires your own FFmpeg setup. Keep or move originals after archiving; Windows Recycle Bin features are unavailable. To update, download a newer DMG and replace the app. See the [Mac guide](platforms/macos/README.md) for installation details and platform limits.
+7-Zip is included; video frame extraction requires your own FFmpeg setup. Keep or move originals after archiving; Windows Recycle Bin features are unavailable. Newer builds can choose, verify and install a Beta update or rollback. Export the Warehouse and back up user data before rolling back. The published `4.8.0-beta.mac.2` does not include this feature, so its first upgrade requires manually installing a newer build. See the [Mac guide](platforms/macos/README.md) for installation details and platform limits.
 
 ## Features
 
@@ -128,4 +131,8 @@ More details: [CLI reference](docs/CLI.md) · [MCP reference](docs/MCP.md) · [T
 - [Report an issue or suggestion](https://github.com/CarlosZ16420/hamster-archiver/issues): include the version, steps and error details; redact private paths and passwords.
 - [Contributing](CONTRIBUTING.md) · [Development guide](docs/DEVELOPMENT.md) · [Security](SECURITY.md) · [MIT License](LICENSE)
 
-Hamster Archiver started as a small tool for my own collection. I hope it helps you enjoy organizing yours, too. Thanks to 7-Zip, FFmpeg, the LinuxDo community and everyone who tries the app and shares feedback. If it helps you, a Star or a suggestion is always welcome.
+Hamster Archiver started as a small tool for my own collection. I hope it helps you enjoy collecting and organizing, too. Thanks to 7-Zip, FFmpeg, the LinuxDo community and everyone who tries the app and shares feedback. If it helps you, a Star or a suggestion is always welcome.
+
+## Friends
+
+- [LINUX DO](https://linux.do/)

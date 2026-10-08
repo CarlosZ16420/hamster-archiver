@@ -13,6 +13,12 @@ const { AppStore } = require('../src/core/store');
 const { ApplicationTaskService } = require('../src/core/application-task-service');
 const { LARGE_TASK_BYTES, MAX_ARCHIVE_VOLUME_BYTES, MIB } = require('../src/core/constants');
 
+// Config initialization creates automatic staging beside the archive location.
+// Keep mock-library identities on a real temporary volume on every runner.
+const testFixtureRoot = fsSync.mkdtempSync(path.join(os.tmpdir(), 'hamster-queue-fixtures-'));
+const testLibraryDirectory = path.join(testFixtureRoot, 'library');
+test.after(() => fs.rm(testFixtureRoot, { recursive: true, force: true }));
+
 class FakeStore {
   constructor() { this.pendingManifests = new Map(); }
   async loadJobs() { return []; }
@@ -161,7 +167,7 @@ test('startup restores recent persisted runtime logs', async () => {
       return [{ at: '2026-01-01T00:00:00.000Z', level: 'info', message: 'previous session', jobId: null }];
     }
   }
-  const manager = new QueueManager(new LogStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new LogStore(), { libraryDir: testLibraryDirectory });
 
   await manager.initialize();
 
@@ -210,7 +216,7 @@ test('shutdown waiting includes fire-and-forget runtime log writes', async () =>
     writeStarted();
     await new Promise((resolve) => { releaseWrite = resolve; });
   };
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
 
   void manager.log('info', 'pending');
   await started;
@@ -222,7 +228,7 @@ test('shutdown waiting includes fire-and-forget runtime log writes', async () =>
 });
 
 test('throttled progress keeps one pending update per concurrent task', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   const events = [];
   manager.on('progress', (progress) => events.push(progress));
   const first = { ...queuedJob('first-progress'), status: 'compressing', progress: 25 };
@@ -241,7 +247,7 @@ test('shutdown cancels current job and does not start the next queued job', asyn
   let signalStarted;
   const started = new Promise((resolve) => { signalStarted = resolve; });
   const calls = [];
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
     archiveRunner: blockingRunner(calls, signalStarted)
   });
   manager.jobs = [queuedJob('first'), queuedJob('second')];
@@ -258,7 +264,7 @@ test('shutdown cancels current job and does not start the next queued job', asyn
 });
 
 test('queue stops instead of repeating a job whose state did not advance', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   const job = queuedJob('stalled');
   manager.jobs = [job];
   let calls = 0;
@@ -279,7 +285,7 @@ test('confirming a duplicate while the queue runs does not start a concurrent qu
   const calls = [];
   let activeRunners = 0;
   let maxActiveRunners = 0;
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
     archiveRunner: async (job) => {
       calls.push(job.id);
       activeRunners += 1;
@@ -481,7 +487,7 @@ test('archive start keeps its selected batch fixed across persistence awaits', a
   let markFirstPersist;
   const firstPersistStarted = new Promise((resolve) => { markFirstPersist = resolve; });
   const firstPersistGate = new Promise((resolve) => { releaseFirstPersist = resolve; });
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
     archiveRunner: async (job) => {
       calls.push(job.id);
       return {
@@ -516,7 +522,7 @@ test('archive start keeps its selected batch fixed across persistence awaits', a
 });
 
 test('failed resume aborts the current task and stops the queue', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   let aborted = false;
   manager.running = true;
   manager.paused = true;
@@ -539,7 +545,7 @@ test('failed resume aborts the current task and stops the queue', async () => {
 test('a partial multi-task pause failure resumes tasks that were already paused', async () => {
   let firstPaused = false;
   let firstResumeCalls = 0;
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.running = true;
   manager.jobs = [
     { ...queuedJob('pause-first'), status: 'compressing' },
@@ -566,7 +572,7 @@ test('a partial multi-task pause failure resumes tasks that were already paused'
 
 test('cancelling a paused task always sends abort even when resume fails', async () => {
   let aborted = false;
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.running = true;
   manager.jobs = [{ ...queuedJob('cancel-paused'), status: 'compressing' }];
   manager.activeRuns.set('cancel-paused', {
@@ -584,7 +590,7 @@ test('cancelling a paused task always sends abort even when resume fails', async
 
 test('disk-space safety failure stops the whole queue before the next task', async () => {
   const calls = [];
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
     archiveRunner: async (job) => {
       calls.push(job.id);
       const error = new Error('暂存磁盘可用空间不足');
@@ -604,7 +610,7 @@ test('clear queue is rejected while a batch runs and leaves the batch intact', a
   let signalStarted;
   const started = new Promise((resolve) => { signalStarted = resolve; });
   const calls = [];
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
     archiveRunner: blockingRunner(calls, signalStarted)
   });
   manager.jobs = [queuedJob('first'), queuedJob('second')];
@@ -621,7 +627,7 @@ test('clear queue is rejected while a batch runs and leaves the batch intact', a
 });
 
 test('completed tasks can be cleared without touching active or failed tasks', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.jobs = [
     { ...queuedJob('done'), status: 'completed' },
     { ...queuedJob('cleanup-warning'), status: 'completed_cleanup_failed' },
@@ -633,7 +639,7 @@ test('completed tasks can be cleared without touching active or failed tasks', a
 });
 
 test('compressing an uncompressed catalog record ignores its completed intake job', () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [{
     id: 'uncompressed-record', title: '同一个项目', displayName: '同一个项目',
     archiveState: 'uncompressed', tags: ['未压缩'], manifest: [], directories: []
@@ -660,7 +666,7 @@ test('compressing an uncompressed catalog record ignores its completed intake jo
 });
 
 test('deleted catalog history cannot mark a new task as duplicate', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [{
     id: 'deleted-record', recordType: 'manual', title: '已经删除的项目', displayName: '已经删除的项目',
     notes: '测试', tags: [], rating: 0, manifest: [], directories: []
@@ -692,7 +698,7 @@ test('scan can add a source again after its earlier queue item was skipped', asy
   await fs.mkdir(sourcePath);
   await fs.writeFile(path.join(sourcePath, 'one.txt'), 'one');
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', smallItemFilter: false
+    libraryDir: testLibraryDirectory, smallItemFilter: false
   });
   manager.jobs = [{
     ...queuedJob('old-skipped'), sourcePath, displayName: '人物', status: 'skipped_duplicate'
@@ -706,7 +712,7 @@ test('scan can add a source again after its earlier queue item was skipped', asy
 });
 
 test('deleting a catalog record releases queue tasks that only referenced that record', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [{
     id: 'stale-record', recordType: 'manual', title: '旧候选', displayName: '旧候选',
     notes: '', tags: [], rating: 0, manifest: [], directories: []
@@ -734,7 +740,7 @@ test('deleting a catalog record releases queue tasks that only referenced that r
 });
 
 test('cancelled tasks can be cleared without touching failed or queued tasks', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.jobs = [
     { ...queuedJob('cancelled'), status: 'cancelled' },
     { ...queuedJob('failed'), status: 'failed' },
@@ -746,7 +752,7 @@ test('cancelled tasks can be cleared without touching failed or queued tasks', a
 });
 
 test('suspected duplicate cleanup excludes tasks with exact duplicate evidence', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.jobs = [
     { ...queuedJob('duplicate'), nameDuplicateMatches: [{ archiveId: 'old' }] },
     { ...queuedJob('mixed-exact'), nameDuplicateMatches: [{ archiveId: 'old' }], exactDuplicateMatches: [{ md5: 'abc' }] },
@@ -758,7 +764,7 @@ test('suspected duplicate cleanup excludes tasks with exact duplicate evidence',
 });
 
 test('exact duplicate tasks can be cleared separately', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.jobs = [
     { ...queuedJob('possible'), similarMatches: [{ id: 'old' }], exactDuplicateMatches: [] },
     { ...queuedJob('exact'), exactDuplicateMatches: [{ md5: 'abc' }] }
@@ -789,7 +795,7 @@ test('terminal duplicate states discard delayed inventory progress', async () =>
 
 test('name and similarity evidence is a nonblocking notice before MD5 work', () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     autoSkipExactDuplicates: true
   });
   manager.catalog = [{ id: 'existing', title: '相同项目', displayName: '相同项目', manifest: [] }];
@@ -814,7 +820,7 @@ test('name and similarity evidence is a nonblocking notice before MD5 work', () 
 
 test('nonblocking preflight similarity notice still waits for the user to select an intake mode', async () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     autoSkipExactDuplicates: true
   });
   manager.catalog = [{ id: 'existing', title: '相同项目', displayName: '相同项目', manifest: [] }];
@@ -2046,7 +2052,7 @@ test('name matches remain nonblocking until one post-fingerprint similarity revi
 });
 
 test('all duplicate and similar confirmations can be accepted in one action', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.jobs = [
     { ...queuedJob('similar'), intakeModeSelected: false, status: 'awaiting_confirmation', confirmationReasons: ['similar_title'] },
     { ...queuedJob('exact'), intakeModeSelected: false, status: 'awaiting_duplicate_confirmation', confirmationReasons: [] },
@@ -2065,7 +2071,7 @@ test('all duplicate and similar confirmations can be accepted in one action', as
 });
 
 test('bulk duplicate confirmation resumes tasks whose intake mode is already selected', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
     archiveRunner: async (job) => ({
       archiveFiles: [{ name: `${job.id}.7z`, size: 50 }],
       archiveTotalBytes: 50,
@@ -2092,7 +2098,7 @@ test('bulk duplicate confirmation resumes tasks whose intake mode is already sel
 
 test('each queued task keeps the password that was active when it was added', async () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     archivePassword: 'first-password'
   });
   const job = manager.createJob({
@@ -2114,7 +2120,7 @@ test('each queued task keeps the password that was active when it was added', as
 test('each queued task snapshots configurable volume settings within safe bounds', async () => {
   const firstVolumeBytes = 512 * MIB;
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     archiveVolumeEnabled: true,
     archiveVolumeBytes: firstVolumeBytes
   });
@@ -2155,7 +2161,7 @@ test('volume confirmation follows source size, configured threshold, mode and pr
     [10, 20, true, true, 'inventory_only', false]
   ]) {
     const manager = new QueueManager(new FakeStore(), {
-      libraryDir: 'E:\\library', archiveVolumeEnabled: enabled,
+      libraryDir: testLibraryDirectory, archiveVolumeEnabled: enabled,
       archiveVolumeBytes: volumeGiB * GiB, archiveVolumeConfirmation: confirmation
     });
     const job = manager.createJob({ ...source, totalBytes: totalGiB * GiB, processingMode: mode });
@@ -2167,7 +2173,7 @@ test('volume confirmation follows source size, configured threshold, mode and pr
 
 test('changing volume confirmation releases pending desktop jobs without starting or approving other risks', async () => {
   const store = new FakeStore();
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
   assert.equal(manager.config.archiveVolumeConfirmation, true);
   const create = (id) => manager.createJob({
     sourcePath: `E:\\source\\${id}`, sourceType: 'directory', displayName: id,
@@ -2203,7 +2209,7 @@ test('changing volume confirmation releases pending desktop jobs without startin
 
 test('changing intake mode removes and restores volume confirmation only for selected jobs', async () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', archiveOutputDirectory: 'E:\\archives'
+    libraryDir: testLibraryDirectory, archiveOutputDirectory: 'E:\\archives'
   });
   const create = (id) => manager.createJob({
     sourcePath: `E:\\source\\${id}`, sourceType: 'directory', displayName: id,
@@ -2229,7 +2235,7 @@ test('changing intake mode removes and restores volume confirmation only for sel
 
 test('already accepted legacy similarity confirmation is not reopened when starting archives', async () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', archiveOutputDirectory: 'E:\\archives'
+    libraryDir: testLibraryDirectory, archiveOutputDirectory: 'E:\\archives'
   });
   const job = { ...queuedJob('accepted'), confirmationReasons: ['name_match'],
     similarityPreflightBlocking: true, confirmedAt: 'accepted', duplicateConfirmedAt: 'accepted' };
@@ -2248,7 +2254,7 @@ test('startup reconciles legacy large confirmation against the snapshotted volum
         requiresConfirmation: true, similarityPreflightBlocking: false }];
     }
   }
-  const manager = new QueueManager(new LegacyStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new LegacyStore(), { libraryDir: testLibraryDirectory });
   await manager.initialize();
   assert.equal(manager.jobs[0].status, 'queued');
   assert.equal(manager.jobs[0].requiresConfirmation, false);
@@ -2258,7 +2264,7 @@ test('startup reconciles legacy large confirmation against the snapshotted volum
 test('completed archives remember their task password without exposing it in warehouse summaries', async () => {
   let runnerPassword = null;
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     archivePassword: 'per-task-secret'
   }, {
     archiveRunner: async (_job, config) => {
@@ -2286,7 +2292,7 @@ test('completed archives remember their task password without exposing it in war
 test('password recording can be disabled without changing the password used for compression', async () => {
   let runnerPassword = null;
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     archivePassword: 'compression-only',
     recordArchivePassword: false
   }, {
@@ -2326,7 +2332,7 @@ test('legacy-shaped records are never backfilled from the current global passwor
     directories: []
   }];
   const manager = new QueueManager(store, {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     archivePassword: 'must-not-be-copied'
   });
   await manager.initialize();
@@ -2346,7 +2352,7 @@ test('empty optional catalog fields normalize safely without null values', async
       }];
     }
   }
-  const manager = new QueueManager(new NullCatalogStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new NullCatalogStore(), { libraryDir: testLibraryDirectory });
   await manager.initialize();
   const record = manager.getCatalogDetails('null-fields');
   assert.equal(record.backupLocation, '');
@@ -2372,7 +2378,7 @@ test('desktop startup can defer catalog parsing and publish loading progress', a
     }
   }
   const store = new BackgroundCatalogStore();
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
 
   await manager.initialize({ deferCatalog: true });
   assert.equal(manager.getState().catalogLoading, true);
@@ -2386,7 +2392,7 @@ test('desktop startup can defer catalog parsing and publish loading progress', a
 });
 
 test('thumbnail limit is configurable within a bounded range', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   await manager.updateConfig({ thumbnailLimit: 250 });
   assert.equal(manager.config.thumbnailLimit, 250);
   await assert.rejects(manager.updateConfig({ thumbnailLimit: 501 }), /1—500/);
@@ -2474,7 +2480,7 @@ test('small items rejected during direct intake are logged by project name', asy
 });
 
 test('catalog fuzzy search ranks matches and supports time and filename sorting', () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'older', title: '美女旅行到台湾', displayName: 'B项目', inventoryDate: '2025-01-01T08:30:00.000Z', tags: [], manifest: [], directories: [] },
     { id: 'newer', title: '台湾风景', displayName: 'A项目', inventoryDate: '2026-01-01T08:30:00.000Z', tags: [], manifest: [], directories: [] }
@@ -2497,7 +2503,7 @@ test('catalog search scans each candidate manifest only once', () => {
       return 'nested/needle.txt';
     }
   });
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
   manager.catalog = [{
     id: 'needle', title: '普通项目', displayName: '普通项目', tags: [], manifest: [file], directories: []
   }];
@@ -2510,7 +2516,7 @@ test('catalog search scans each candidate manifest only once', () => {
 });
 
 test('the uncompressed system tag uses the normal exact tag filter', () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'uncompressed', title: '未压缩项目', tags: ['未压缩', '旅行'], archiveState: 'uncompressed', manifest: [], directories: [] },
     { id: 'compressed', title: '压缩项目', tags: ['旅行'], archiveState: 'compressed', manifest: [], directories: [] }
@@ -2520,7 +2526,7 @@ test('the uncompressed system tag uses the normal exact tag filter', () => {
 });
 
 test('catalog search does not create a second in-memory posting index', () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = Array.from({ length: 5000 }, (_, index) => ({
     id: `bulk-${index}`,
     title: `普通库存编号${index}`,
@@ -2537,7 +2543,7 @@ test('catalog search does not create a second in-memory posting index', () => {
 });
 
 test('similar project links are stored symmetrically', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'a', title: '王佳乐北京旅行记录', displayName: '项目A', tags: [], manifest: [], directories: [] },
     { id: 'b', title: '北京王佳乐旅行纪录', displayName: '项目B', tags: [], manifest: [], directories: [] }
@@ -2549,7 +2555,7 @@ test('similar project links are stored symmetrically', async () => {
 });
 
 test('similar project links can be recalculated and dismissed symmetrically', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'a', title: '王佳乐北京旅行记录', displayName: '项目A', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] },
     { id: 'b', title: '北京王佳乐旅行纪录', displayName: '项目B', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] }
@@ -2570,7 +2576,7 @@ test('similar project links can be recalculated and dismissed symmetrically', as
 });
 
 test('disabling similarity keeps old relations but skips new computations', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'a', title: '王佳乐北京旅行记录', displayName: '项目A', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] },
     { id: 'b', title: '北京王佳乐旅行纪录', displayName: '项目B', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] }
@@ -2605,7 +2611,7 @@ test('disabling similarity keeps old relations but skips new computations', asyn
 });
 
 test('changing similarity strength keeps existing relations until an explicit rebuild', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'a', title: '项目A', displayName: '项目A', similarRecords: [{ id: 'b', score: 0.75 }] },
     { id: 'b', title: '项目B', displayName: '项目B', similarRecords: [{ id: 'a', score: 0.75 }] }
@@ -2623,7 +2629,7 @@ test('changing similarity strength keeps existing relations until an explicit re
 
 test('thumbnail service log levels preserve successful FFmpeg probes as info', async () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', repositoryDirectory: 'E:\\warehouse'
+    libraryDir: testLibraryDirectory, repositoryDirectory: 'E:\\warehouse'
   }, {
     archiveRunner: async () => ({
       archiveFiles: [{ name: 'probe-log.7z', size: 50 }],
@@ -2651,7 +2657,7 @@ test('thumbnail service log levels preserve successful FFmpeg probes as info', a
 
 test('each queued task snapshots performance safeguard settings', async () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     largeFolderSimplification: true,
     largeFolderFileThreshold: 800,
     largeFolderMd5SampleLimit: 240,
@@ -2684,7 +2690,7 @@ test('each queued task snapshots performance safeguard settings', async () => {
 });
 
 test('all settings are rejected consistently while the queue is running', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.running = true;
 
   await assert.rejects(
@@ -2699,7 +2705,7 @@ test('adding a similarity whitelist term is serialized, normalized and does not 
   const termsPath = path.join(root, 'similarity-ignore-terms.txt');
   await fs.writeFile(termsPath, '# common terms\r\nExisting\r\n', 'utf8');
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     similarityIgnoreTermsPath: termsPath
   });
   manager.rebuildAllSimilarityRelations = async () => {
@@ -2723,14 +2729,14 @@ test('adding a similarity whitelist term is serialized, normalized and does not 
 });
 
 test('adding a similarity whitelist term rejects unsafe or meaningless text', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   await assert.rejects(() => manager.addSimilarityIgnoreTerm('line\nbreak'), /不能包含换行或控制字符/);
   await assert.rejects(() => manager.addSimilarityIgnoreTerm(' -- '), /至少包含一个文字或数字/);
   await assert.rejects(() => manager.addSimilarityIgnoreTerm('A'.repeat(201)), /不能超过 200 个字符/);
 });
 
 test('similarity rebuild clears every stale possible-duplicate label without a current relation', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     {
       id: 'stale', title: '阿尔法独有档案', displayName: '甲', tags: [], manifest: [], directories: [],
@@ -2757,7 +2763,7 @@ test('manifest similarity confirmation uses the configured strength', () => {
 });
 
 test('new jobs skip similarity confirmation while detection is disabled', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'a', title: '王佳乐北京旅行记录 第一卷', displayName: '项目A', tags: [], manifest: [], directories: [], dismissedSimilarRecordIds: [] }
   ];
@@ -2801,7 +2807,7 @@ test('similarity version upgrade removes stale domain-only FC2 relations', async
     async saveCatalog(_directory, records) { this.catalog = structuredClone(records); }
   }
   const store = new SimilarityUpgradeStore();
-  const manager = new QueueManager(store, { repositoryDirectory: 'E:\\library' });
+  const manager = new QueueManager(store, { repositoryDirectory: testLibraryDirectory });
   await manager.initialize();
   await manager.similarityMaintenanceTask;
   assert.deepEqual(manager.catalog.map((record) => record.similarRecords), [[], []]);
@@ -2818,7 +2824,7 @@ test('legacy catalog records receive an empty hidden original source location', 
     async saveCatalog(_directory, records) { this.catalog = structuredClone(records); }
   }
   const store = new LegacyStore();
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
   await manager.initialize();
   assert.equal(Object.hasOwn(manager.catalog[0], 'originalSourcePath'), true);
   assert.equal(manager.catalog[0].originalSourcePath, '');
@@ -2911,7 +2917,7 @@ test('cross-disk restore uses current source metadata and persists retained reco
 });
 
 test('finish next and pause runs one queued task only', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
     archiveRunner: async (job) => ({
       archiveFolder: null,
       archiveFiles: [{ name: `${job.id}.7z`, size: 1 }],
@@ -2989,7 +2995,7 @@ test('current batch runs up to the configured concurrency and never pulls in a l
   const threeStarted = new Promise((resolve) => { markThreeStarted = resolve; });
   const fourStarted = new Promise((resolve) => { markFourStarted = resolve; });
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', queueConcurrency: 3
+    libraryDir: testLibraryDirectory, queueConcurrency: 3
   }, {
     availableMemoryBytes: () => 8 * 1024 ** 3,
     archiveRunner: async (job) => {
@@ -3026,7 +3032,7 @@ test('cancelling one concurrent task leaves the other active task running', asyn
   let releaseSecond;
   const bothStarted = new Promise((resolve) => { markBothStarted = resolve; });
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', queueConcurrency: 2
+    libraryDir: testLibraryDirectory, queueConcurrency: 2
   }, {
     availableMemoryBytes: () => 8 * 1024 ** 3,
     archiveRunner: async (job, _config, _hooks, signal) => {
@@ -3070,7 +3076,7 @@ test('memory admission delays only new tasks and resumes after memory recovers',
   const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
   const allStarted = new Promise((resolve) => { markAllStarted = resolve; });
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', queueConcurrency: 3
+    libraryDir: testLibraryDirectory, queueConcurrency: 3
   }, {
     availableMemoryBytes: () => availableMemory,
     archiveRunner: async (job, _config, _hooks, signal) => {
@@ -3110,7 +3116,7 @@ test('parent and child sources that may move are never active together', async (
   const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
   const secondStarted = new Promise((resolve) => { markSecondStarted = resolve; });
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', queueConcurrency: 2, moveCompleted: true, processedSourceDirectory: 'E:\\done'
+    libraryDir: testLibraryDirectory, queueConcurrency: 2, moveCompleted: true, processedSourceDirectory: 'E:\\done'
   }, {
     availableMemoryBytes: () => 8 * 1024 ** 3,
     archiveRunner: async (job) => {
@@ -3150,7 +3156,7 @@ test('a pause in progress cannot fill a freed concurrency slot', async () => {
   const bothStarted = new Promise((resolve) => { markBothStarted = resolve; });
   let controllerCount = 0;
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', queueConcurrency: 2
+    libraryDir: testLibraryDirectory, queueConcurrency: 2
   }, {
     availableMemoryBytes: () => 8 * 1024 ** 3,
     createPauseController: () => {
@@ -3269,7 +3275,7 @@ test('same output reservation and same catalog record are serialized by the real
     const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
     const secondStarted = new Promise((resolve) => { markSecondStarted = resolve; });
     const manager = new QueueManager(new FakeStore(), {
-      libraryDir: 'E:\\library', archiveOutputDirectory: 'E:\\archives', queueConcurrency: 2
+      libraryDir: testLibraryDirectory, archiveOutputDirectory: 'E:\\archives', queueConcurrency: 2
     });
     manager.runOne = async (job) => {
       calls.push(job.id);
@@ -3303,7 +3309,7 @@ test('same output reservation and same catalog record are serialized by the real
 });
 
 test('tasks that target the same catalog record cannot run together after source review', () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library', queueConcurrency: 2 });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory, queueConcurrency: 2 });
   const active = { ...queuedJob('active'), sourceCatalogRecordId: 'record-one' };
   const reviewed = { ...queuedJob('reviewed'), sourceCatalogRecordId: null, sourceChangeTargetRecordId: 'record-one' };
   manager.jobs = [active, reviewed];
@@ -3314,7 +3320,7 @@ test('tasks that target the same catalog record cannot run together after source
 
 test('pause waits until every active source move has finished', async () => {
   let pauseCalls = 0;
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.running = true;
   manager.jobs = [{ ...queuedJob('moving'), status: 'moving' }];
   manager.activeRuns.set('moving', {
@@ -3333,7 +3339,7 @@ test('source disposition becomes non-interruptible before move or trash starts',
   const sourceDispositionStarted = new Promise((resolve) => { markSourceDispositionStarted = resolve; });
   const sourceDispositionGate = new Promise((resolve) => { releaseSourceDisposition = resolve; });
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', moveCompleted: true, processedSourceDirectory: 'E:\\completed'
+    libraryDir: testLibraryDirectory, moveCompleted: true, processedSourceDirectory: 'E:\\completed'
   }, {
     archiveRunner: async (job) => successfulArchiveResult(job)
   });
@@ -3374,7 +3380,7 @@ test('one failed concurrent catalog commit cannot roll back another successful t
   let archiveCount = 0;
   const archived = new Promise((resolve) => { bothArchived = resolve; });
   const manager = new QueueManager(store, {
-    libraryDir: 'E:\\library', queueConcurrency: 2
+    libraryDir: testLibraryDirectory, queueConcurrency: 2
   }, {
     availableMemoryBytes: () => 8 * 1024 ** 3,
     archiveRunner: async (job) => {
@@ -3404,7 +3410,7 @@ test('pause and cancel are honored while a task waits for the final catalog comm
     let markCatalogBlockStarted;
     const catalogBlockStarted = new Promise((resolve) => { markCatalogBlockStarted = resolve; });
     const catalogBlock = new Promise((resolve) => { releaseCatalogBlock = resolve; });
-    const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+    const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
       archiveRunner: async (job) => successfulArchiveResult(job)
     });
     manager.jobs = [{ ...queuedJob(`${action}-before-commit`), totalBytes: 100, intakeModeSelected: true }];
@@ -3462,7 +3468,7 @@ test('cancelling during a successful catalog save preserves the source and recor
   const store = new GatedCommitStore();
   let sourceDispositionCalls = 0;
   const manager = new QueueManager(store, {
-    libraryDir: 'E:\\library', moveCompleted: true, processedSourceDirectory: 'E:\\completed'
+    libraryDir: testLibraryDirectory, moveCompleted: true, processedSourceDirectory: 'E:\\completed'
   }, { archiveRunner: async (job) => successfulArchiveResult(job) });
   manager.completeSourceDisposition = async () => {
     sourceDispositionCalls += 1;
@@ -3485,7 +3491,7 @@ test('cancelling during a successful catalog save preserves the source and recor
 
 test('selected intake starts only applicable selected tasks and never falls back to all', async () => {
   const calls = [];
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
     archiveRunner: async (job) => {
       calls.push(job.id);
       return successfulArchiveResult(job);
@@ -3507,7 +3513,7 @@ test('selected intake starts only applicable selected tasks and never falls back
 
 test('schedule refuses a task whose estimate exceeds the remaining window', () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', scheduleEnabled: true, scheduleStart: '10:00', scheduleEnd: '10:10'
+    libraryDir: testLibraryDirectory, scheduleEnabled: true, scheduleStart: '10:00', scheduleEnd: '10:10'
   });
   const decision = manager.canStartScheduledJob({ totalBytes: 20 * 1024 ** 3 }, new Date(2026, 7, 15, 10, 5));
   assert.equal(decision.allowed, false);
@@ -3521,7 +3527,7 @@ test('a scanned task waits for an explicit intake mode and is ignored by the sch
   await fs.mkdir(item);
   await fs.writeFile(path.join(item, 'one.txt'), 'one');
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     smallItemFilter: false,
     scheduleEnabled: true,
     scheduleStart: '00:00',
@@ -3541,7 +3547,7 @@ test('a scanned task waits for an explicit intake mode and is ignored by the sch
 });
 
 test('manual compressed-intake selection outside the schedule is recorded in the run log', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
     archiveRunner: async (job) => successfulArchiveResult(job)
   });
   manager.jobs = [{
@@ -3574,7 +3580,7 @@ test('manual compressed-intake selection outside the schedule is recorded in the
 
 test('compression estimates use persisted recent speed samples', async () => {
   const store = new FakeStore();
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
   await manager.rememberCompressionSample(600 * 1024 ** 2, 30_000);
   const estimatedMs = manager.estimateJobDurationMs({ totalBytes: 1_200 * 1024 ** 2 });
   assert.equal(manager.config.compressionHistory.length, 1);
@@ -3582,7 +3588,7 @@ test('compression estimates use persisted recent speed samples', async () => {
 });
 
 test('abnormal compression ratio waits for explicit inventory confirmation', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
     archiveRunner: async () => ({
       archiveFolder: null,
       archiveFiles: [{ name: 'odd.7z', size: 200 }],
@@ -3604,7 +3610,7 @@ test('abnormal compression ratio waits for explicit inventory confirmation', asy
 
 test('anomaly confirmation refuses parent-child source conflicts before catalog commit', async () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', moveCompleted: true, processedSourceDirectory: 'E:\\completed'
+    libraryDir: testLibraryDirectory, moveCompleted: true, processedSourceDirectory: 'E:\\completed'
   });
   const anomaly = {
     ...queuedJob('anomaly-parent'),
@@ -3633,7 +3639,7 @@ test('anomaly confirmation refuses parent-child source conflicts before catalog 
 
 test('anomaly confirmation protects its frozen move target after settings change', async () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', moveCompleted: false, processedSourceDirectory: 'E:\\new-done'
+    libraryDir: testLibraryDirectory, moveCompleted: false, processedSourceDirectory: 'E:\\new-done'
   });
   const anomaly = {
     ...queuedJob('anomaly-move'), sourcePath: 'E:\\incoming\\clip.mp4', sourceType: 'video',
@@ -3660,7 +3666,7 @@ test('anomaly confirmation protects its frozen move target after settings change
 test('anomalous output reservation blocks the same output until confirmation', async () => {
   const calls = [];
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library', archiveOutputDirectory: 'E:\\archives', queueConcurrency: 2,
+    libraryDir: testLibraryDirectory, archiveOutputDirectory: 'E:\\archives', queueConcurrency: 2,
     autoSkipExactDuplicates: false, similarityEnabled: false
   }, {
     availableMemoryBytes: () => 8 * 1024 ** 3,
@@ -3697,6 +3703,7 @@ test('anomalous output reservation blocks the same output until confirmation', a
 });
 
 test('startup rebuilds output reservations for unresolved anomalous archives', async () => {
+  const archiveDirectory = path.join(testFixtureRoot, 'startup-output-reservations');
   class AnomalyStore extends FakeStore {
     async loadJobs() {
       return [{
@@ -3705,13 +3712,13 @@ test('startup rebuilds output reservations for unresolved anomalous archives', a
         status: 'awaiting_anomaly_confirmation',
         pendingCatalogRecord: {
           id: 'persisted-anomaly-record', archiveBaseName: 'persisted-output.7z',
-          archiveDirectory: 'E:\\archives', sourceDisposition: 'kept'
+          archiveDirectory, sourceDisposition: 'kept'
         }
       }];
     }
   }
   const manager = new QueueManager(new AnomalyStore(), {
-    repositoryDirectory: 'E:\\library', archiveOutputDirectory: 'E:\\archives', similarityEnabled: false
+    repositoryDirectory: testLibraryDirectory, archiveOutputDirectory: archiveDirectory, similarityEnabled: false
   });
   await manager.initialize();
   const queued = { ...queuedJob('new-output'), archiveBaseName: 'persisted-output.7z' };
@@ -3730,7 +3737,7 @@ test('confirm and discard anomaly actions are mutually exclusive per task', asyn
     await saveGate;
   };
   const manager = new QueueManager(store, {
-    repositoryDirectory: 'E:\\library', archiveOutputDirectory: 'E:\\archives', similarityEnabled: false
+    repositoryDirectory: testLibraryDirectory, archiveOutputDirectory: 'E:\\archives', similarityEnabled: false
   }, { trashItem: async () => {} });
   const job = {
     ...queuedJob('anomaly-operation-lock'),
@@ -3757,7 +3764,7 @@ test('confirm and discard anomaly actions are mutually exclusive per task', asyn
 test('confirming an anomalous archive still activates the recycle-bin safety halt', async () => {
   const store = new FakeStore();
   const manager = new QueueManager(store, {
-    repositoryDirectory: 'E:\\library',
+    repositoryDirectory: testLibraryDirectory,
     autoTrashCompleted: true
   }, {
     validateSourceBeforeDisposition: async () => {},
@@ -3797,7 +3804,7 @@ test('normalization retains the most recent 200 dismissed similarity ids', async
     }
   }
   const manager = new QueueManager(new DismissalStore(), {
-    repositoryDirectory: 'E:\\library', similarityEnabled: false
+    repositoryDirectory: testLibraryDirectory, similarityEnabled: false
   });
   await manager.initialize();
   assert.equal(manager.catalog[0].dismissedSimilarRecordIds.length, 200);
@@ -3857,7 +3864,7 @@ test('automatic trash runs only after archive metadata and thumbnails are saved'
   const store = new FakeStore();
   store.saveCatalog = async () => { events.push('catalog'); };
   const manager = new QueueManager(store, {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     autoTrashCompleted: true,
     recordBackupLocation: true,
     backupLocation: '百度网盘'
@@ -4012,7 +4019,7 @@ test('recycle-bin safety halt survives an application restart', async () => {
     detectedAt: '2026-08-19T00:00:00.000Z'
   };
   const manager = new QueueManager(store, {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     autoTrashCompleted: true,
     pendingTrashSafetyHalt
   });
@@ -4027,7 +4034,7 @@ test('recycle-bin safety halt survives an application restart', async () => {
 
 test('obsolete historical recycle-bin audit halt is cleared on startup', async () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     autoTrashCompleted: false,
     pendingTrashSafetyHalt: {
       id: 'old-audit-halt',
@@ -4052,7 +4059,7 @@ test('catalog metadata supports defaults, editing, cover thumbnails and filters'
     displayName: '原始项目名',
     sourcePath: 'E:\\source\\原始项目名',
     archiveBaseName: 'archive.7z',
-    archiveDirectory: 'E:\\library',
+    archiveDirectory: testLibraryDirectory,
     fileCount: 2,
     manifest: [
       { relativePath: 'cover.jpg', thumbnailPath: 'E:\\repository\\thumbnails\\job-one\\cover.png', md5: 'aaa' },
@@ -4063,7 +4070,7 @@ test('catalog metadata supports defaults, editing, cover thumbnails and filters'
   store.loadCatalog = async () => [legacyRecord];
   store.saveCatalog = async (_library, records) => { store.catalog = structuredClone(records); };
   const manager = new QueueManager(store, {
-    archiveOutputDirectory: 'E:\\library', repositoryDirectory: 'E:\\repository'
+    archiveOutputDirectory: testLibraryDirectory, repositoryDirectory: 'E:\\repository'
   });
 
   await manager.initialize();
@@ -4104,7 +4111,7 @@ test('catalog metadata supports defaults, editing, cover thumbnails and filters'
 
 test('backup location setting requires a text value when enabled', async () => {
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     recordBackupLocation: false,
     backupLocation: ''
   });
@@ -4121,7 +4128,7 @@ test('backup location setting requires a text value when enabled', async () => {
 test('manual inventory requires only a name and records inventory date', async () => {
   const store = new FakeStore();
   store.saveCatalog = async (_library, records) => { store.catalog = structuredClone(records); };
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
 
   const record = await manager.addManualCatalogRecord({ name: '纸质相册', notes: '存放在书柜第二层。' });
 
@@ -4136,7 +4143,7 @@ test('manual inventory requires only a name and records inventory date', async (
 
 test('manual inventory accepts optional locations and can receive stored images', async () => {
   const warehouseDir = 'E:\\warehouse';
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library', warehouseDir }, {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory, warehouseDir }, {
     storeCatalogImage: async (recordId, input) => ({
       id: 'image-one',
       ref: 'manual-image:image-one',
@@ -4165,7 +4172,7 @@ test('manual inventory accepts optional locations and can receive stored images'
 test('bulk tags append without replacing existing tags', async () => {
   const store = new FakeStore();
   store.saveCatalog = async (_library, records) => { store.catalog = structuredClone(records); };
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'one', title: '一', tags: ['原标签'] },
     { id: 'two', title: '二', tags: [] }
@@ -4179,7 +4186,7 @@ test('bulk tags append without replacing existing tags', async () => {
 
 test('bulk backup location and metadata changes can be undone up to the previous snapshot', async () => {
   const store = new FakeStore();
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
   manager.catalog = [{
     id: 'one', recordType: 'manual', displayName: '一', title: '一', notes: '备注', tags: [], rating: 0,
     backupLocation: '', manifest: [], directories: []
@@ -4195,7 +4202,7 @@ test('bulk backup undo does not recalculate similarity for every record', async 
   const store = new FakeStore();
   let subsetWrites = 0;
   store.saveCatalogRecords = async () => { subsetWrites += 1; };
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
   manager.catalog = Array.from({ length: 161 }, (_, index) => ({
     id: `record-${index}`, recordType: 'manual', displayName: `项目 ${index}`, title: `项目 ${index}`,
     notes: '备注', tags: [], rating: 0, backupLocation: '', manifest: [], directories: [], similarRecords: []
@@ -4210,7 +4217,7 @@ test('bulk backup undo does not recalculate similarity for every record', async 
 });
 
 test('single archive password changes only through explicit metadata editing', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'archive-a', recordType: 'archive', title: 'A', displayName: 'A', tags: [], manifest: [], directories: [], archivePassword: '', hasPassword: false },
     { id: 'manual-b', recordType: 'manual', title: 'B', displayName: 'B', tags: [], manifest: [], directories: [] }
@@ -4225,7 +4232,7 @@ test('single archive password changes only through explicit metadata editing', a
 });
 
 test('warehouse undo history is capped at ten actions', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [{
     id: 'one', recordType: 'manual', displayName: '一', title: '一', notes: '备注', tags: [], rating: 0,
     backupLocation: '', manifest: [], directories: []
@@ -4240,7 +4247,7 @@ test('warehouse undo history is capped at ten actions', async () => {
 test('catalog deletion is undoable without erasing unrelated undo history', async () => {
   const store = new FakeStore();
   store.saveCatalog = async () => {};
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'edited', recordType: 'manual', title: '编辑项', displayName: '编辑项', notes: '', tags: [], rating: 0 },
     { id: 'deleted', recordType: 'manual', title: '删除项', displayName: '删除项', notes: '', tags: [], rating: 0 }
@@ -4258,7 +4265,7 @@ test('catalog deletion undo restores similarity links before the database index 
   const store = new FakeStore();
   store.findCatalogIdsBySimilarityKeys = () => [];
   store.saveCatalog = async (_library, records) => { store.catalog = structuredClone(records); };
-  const manager = new QueueManager(store, { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(store, { libraryDir: testLibraryDirectory });
   manager.catalog = [
     {
       id: 'a', recordType: 'manual', title: '王佳乐北京旅行记录', displayName: '项目A',
@@ -4385,7 +4392,7 @@ test('catalog operation tracking waits for a deletion before shutdown', async ()
   const store = new FakeStore();
   store.saveCatalog = async () => trashGate;
   const manager = new QueueManager(store, {
-    repositoryDirectory: 'E:\\library', archiveStagingDirectory: 'E:\\staging'
+    repositoryDirectory: testLibraryDirectory, archiveStagingDirectory: 'E:\\staging'
   });
   manager.catalog = [{
     id: 'wait-delete', jobId: null, title: '等待删除', displayName: '等待删除', recordType: 'manual'
@@ -4438,7 +4445,7 @@ test('imported warehouse records keep external archive paths and deletion does n
 });
 
 test('bulk tag input rejects punctuation outside the tag rules', async () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [{
     id: 'one', recordType: 'manual', displayName: '一', title: '一', notes: '备注', tags: [], rating: 0,
     backupLocation: '', manifest: [], directories: []
@@ -4710,7 +4717,7 @@ test('multi-volume deletion rolls every part back when recycle-bin removal fails
 });
 
 test('warehouse insights calculate inventory, unique tags and GB activity', () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     {
       id: 'today', title: '今天入库', tags: ['旅行', '摄影'], originalBytes: 2_000_000_000,
@@ -4741,7 +4748,7 @@ test('a new similarity ignore list follows the configured English UI language', 
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-similarity-ignore-en-'));
   const termsPath = path.join(root, 'similarity-ignore-terms.txt');
   const manager = new QueueManager(new FakeStore(), {
-    libraryDir: 'E:\\library',
+    libraryDir: testLibraryDirectory,
     similarityIgnoreTermsPath: termsPath,
     language: 'en-US'
   });
@@ -4757,7 +4764,7 @@ test('a new similarity ignore list follows the configured English UI language', 
 });
 
 test('catalog search filters warehouse records by exact local inventory date', () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'aug-14', title: '前一天', inventoryDate: new Date(2026, 7, 14, 23, 30).toISOString(), manifest: [], directories: [] },
     { id: 'aug-15', title: '目标日期', inventoryDate: new Date(2026, 7, 15, 8, 30).toISOString(), manifest: [], directories: [] },
@@ -4873,7 +4880,7 @@ test('warehouse location change copies metadata and rewrites owned thumbnail pat
 });
 
 test('random warehouse recommendation avoids the active item when alternatives exist', () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = [
     { id: 'active', title: '当前', manifest: [], directories: [] },
     { id: 'other', title: '其他', manifest: [], directories: [] }
@@ -4884,7 +4891,7 @@ test('random warehouse recommendation avoids the active item when alternatives e
 });
 
 test('random warehouse recommendation visits every item before reshuffling', () => {
-  const manager = new QueueManager(new FakeStore(), { libraryDir: 'E:\\library' });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory });
   manager.catalog = Array.from({ length: 8 }, (_, index) => ({
     id: `record-${index}`, title: `库存 ${index}`, manifest: [], directories: []
   }));
