@@ -30,6 +30,23 @@ test('cooperative pause blocks and resume releases work', async () => {
   ]);
 });
 
+test('failed native pause rollback releases cooperative work after the child exits', { timeout: 2000 }, async () => {
+  let rejectSuspend;
+  const controller = new PauseController(() => new Promise((resolve, reject) => {
+    rejectSuspend = reject;
+  }));
+  await controller.attach(1234);
+  const pausing = controller.pause();
+  const pauseRejected = assert.rejects(pausing, /child exited during suspension/);
+  const waiting = controller.waitIfPaused();
+
+  controller.detach(1234);
+  rejectSuspend(new Error('child exited during suspension'));
+  await pauseRejected;
+  await controller.resume();
+  await waiting;
+});
+
 test('Windows process control stops waiting after its timeout', async () => {
   const child = new EventEmitter();
   child.stdout = new EventEmitter();

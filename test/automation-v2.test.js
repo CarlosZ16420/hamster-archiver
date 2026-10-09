@@ -11,7 +11,7 @@ const { createAutomationManifest } = require('../src/core/automation-definitions
 const { parse, exitCodeFor } = require('../src/core/hamster-cli');
 const { IntegrationManager, OWNED_BEGIN, OWNED_END } = require('../src/core/integration-manager');
 const { QueueManager } = require('../src/core/queue-manager');
-const { taskStatus } = require('../src/core/task-contracts');
+const { errorEnvelope, taskStatus } = require('../src/core/task-contracts');
 
 class TaskManager extends EventEmitter {
   constructor() {
@@ -64,6 +64,103 @@ class TaskManager extends EventEmitter {
     return this.jobs.find((job) => job.id === jobId);
   }
 }
+
+test('archive intake without output is explicitly rejected before ledger acceptance', async (t) => {
+  const manager = new TaskManager();
+  const service = new ApplicationTaskService(manager);
+  const valid = { responseVersion: 2, requestId: 'rejection',
+    paths: [path.resolve('source')], mode: 'inventory_only', waitMilliseconds: 0 };
+  for (const [code, changes] of [
+    ['ARCHIVE_OUTPUT_REQUIRED', { mode: 'archive' }],
+    ['INVALID_PATH', { paths: ['relative-source'] }],
+    ['INVALID_REQUEST_ID', { requestId: 'x'.repeat(129) }]
+  ]) {
+    await t.test(code, async () => {
+      await assert.rejects(service.submit({ ...valid, ...changes }), (error) => {
+        assert.equal(error.code, code);
+        assert.equal(errorEnvelope(error).error.acceptance, 'not_accepted');
+        return true;
+      });
+    });
+  }
+  manager.recordAutomationRequest = async () => { throw new Error('ledger write outcome is uncertain'); };
+  await assert.rejects(service.submit(valid), (error) => {
+    assert.equal(errorEnvelope(error).error.acceptance, undefined);
+    return true;
+  });
+  assert.deepEqual(manager.automationRequests, []);
+  assert.deepEqual(manager.jobs, []);
+});
+
+test('unstarted v2 preparation failures can be cancelled live and after restart without losing recovery evidence', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-prepare-cancel-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  for (const restart of [false, true]) {
+    await t.test(restart ? 'ledger-only job after restart' : 'live queued job', async () => {
+      const manager = new TaskManager();
+      const addSingle = manager.addSingle.bind(manager);
+      manager.addSingle = async (...args) => {
+        await addSingle(...args);
+        throw Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR' });
+      };
+      manager.persistJobs = async () => {};
+      manager.cancelJob = async (id) => {
+        const job = manager.findJob(id);
+        assert.ok(job, 'cancelJob must only receive a live job');
+        job.status = 'cancelled';
+      };
+      const service = new ApplicationTaskService(manager);
+      const accepted = await service.submit({ responseVersion: 2, requestId: `prepare-${restart}`,
+        paths: [root], mode: 'inventory_only', waitMilliseconds: 0 });
+      await service.v2Preparations.get(accepted.task.id);
+      const failed = service.findTask(accepted.task.id);
+      assert.equal(failed.recoveryRequired, true);
+      assert.equal(failed.preparationFailure.safeToCancel, true);
+      assert.equal(failed.startAuthorized, false);
+      assert.deepEqual(manager.started, []);
+      if (restart) {
+        manager.automationRequests = structuredClone(manager.automationRequests);
+        manager.jobs = [];
+      }
+      const cancelled = await service.cancel(accepted.task.id);
+      assert.equal(cancelled.task.status, 'cancelled');
+      assert.equal(cancelled.summary.pending, 0);
+      assert.equal(cancelled.summary.cancelled, 1);
+      assert.equal(service.findTask(accepted.task.id).asyncError.code, 'ERR_SQLITE_ERROR');
+      assert.deepEqual(manager.started, []);
+      assert.deepEqual(manager.catalog, []);
+      assert.equal((await service.cancel(accepted.task.id)).task.status, 'cancelled');
+      const reopened = new TaskManager();
+      reopened.automationRequests = structuredClone(manager.automationRequests);
+      assert.equal(new ApplicationTaskService(reopened).receipt(accepted.task.id, 2).task.status, 'cancelled');
+    });
+  }
+});
+
+test('cancelling preparation recovery keeps legacy and execution evidence protected', async (t) => {
+  for (const evidence of [{ legacy: true }, { startedAt: '2026-10-09T00:00:00Z' },
+    { runBatchId: 'run-1' }, { progress: 50 }, { errorCode: 'INTERRUPTED' },
+    { archiveFiles: [{ name: 'output.7z' }] },
+    { sourceDispositionRecovery: { originalPath: 'source' } }, { terminalResult: { catalogCommitted: true } },
+    { committed: true }]) {
+    await t.test(JSON.stringify(evidence), async () => {
+      const manager = new TaskManager();
+      const job = { id: 'protected', status: 'queued', applicationTaskId: 'task-protected',
+        mcpRequestId: 'protected-request', ...evidence };
+      manager.jobs = [job];
+      if (evidence.committed) manager.catalog = [{ id: 'record', archiveJobId: job.id }];
+      manager.automationRequests = [{ taskId: 'task-protected', requestId: 'protected-request',
+        responseVersion: 2, recoveryRequired: true, preparing: false, jobs: [job],
+        ...(!evidence.legacy ? { preparationFailure: { safeToCancel: true, jobIds: [job.id] } } : {}) }];
+      manager.cancelJob = async () => { assert.fail('unreviewed recovery must not cancel a job'); };
+      const service = new ApplicationTaskService(manager);
+      const receipt = await service.cancel('task-protected');
+      assert.equal(receipt.task.status, 'recovery_required');
+      assert.equal(job.status, 'queued');
+      assert.equal(service.findTask('task-protected').cancellationRequested, undefined);
+    });
+  }
+});
 
 test('application task intake is immutable, idempotent before busy, and task-scoped', async () => {
   const manager = new TaskManager();

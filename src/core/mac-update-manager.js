@@ -2,13 +2,13 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const crypto = require('node:crypto');
 const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const { readAndVerifyReleaseManifest } = require('./tool-integrity');
 const { compareVersions, isMacRelease } = require('./update-checker');
 const { downloadFile, fetchDigestSidecar, hashFile, normalizeDigest, resolveDownloadTrust,
   writeUpdateSuccessNotice, waitForUpdaterStart } = require('./update-manager');
+const { beginUpdateRun, finishUpdateRun, claimUpdateRun, discardUpdateRun, withUpdateOperation, setUpdateRunState, readJson } = require('./update-storage');
 
 const execute = promisify(execFile);
 
@@ -108,7 +108,7 @@ async function validateMacBundle(bundle, expectedVersion, executeImpl = execute)
   return manifest;
 }
 
-async function prepareMacUpdate({ applicationRoot, userDataDirectory, currentVersion, release, fetchImpl,
+async function prepareMacUpdateImpl({ applicationRoot, userDataDirectory, currentVersion, release, fetchImpl,
   onProgress = () => {}, rollbackConfirmed = false, packagePath = '', sevenZipPath = '' },
   { platform = process.platform, executeImpl = execute } = {}) {
   if (platform !== 'darwin') throw new Error('Mac 更新安装需要 macOS。');
@@ -136,17 +136,17 @@ async function prepareMacUpdate({ applicationRoot, userDataDirectory, currentVer
   if (release.asset?.name !== expectedName || (!packagePath && !release.asset.downloadUrl)) throw new Error('这个发行没有匹配的 Mac DMG。');
   const expectedDigest = normalizeDigest(release.asset.digest) || await fetchDigestSidecar(release.asset.digestDownloadUrl, fetchImpl, trust);
   if (!expectedDigest) throw new Error('Release 缺少 SHA256 摘要，已停止更新。');
-  const runRoot = path.join(dataRoot, 'updates', `mac-${version}-${crypto.randomUUID()}`);
-  const archivePath = path.join(runRoot, expectedName);
+  const { runRoot, archivePath, reused } = await beginUpdateRun({ userDataDirectory: dataRoot, kind: 'mac',
+    version, assetName: expectedName, digest: expectedDigest, currentVersion, applicationRoot, hashFile });
   const mountRoot = path.join(runRoot, 'mount');
   const packageRoot = path.join(runRoot, 'Hamster Archiver.app');
   let mounted = false;
   try {
     await fs.mkdir(mountRoot, { recursive: true });
-    if (packagePath) {
+    if (!reused && packagePath) {
       onProgress({ stage: 'copying', percentage: 0 });
       await fs.copyFile(packagePath, archivePath);
-    } else await downloadFile(release.asset.downloadUrl, archivePath, fetchImpl, onProgress, trust);
+    } else if (!reused) await downloadFile(release.asset.downloadUrl, archivePath, fetchImpl, onProgress, trust);
     onProgress({ stage: 'verifying', percentage: 100 });
     if (await hashFile(archivePath) !== expectedDigest) throw new Error('更新包 SHA256 校验失败，文件可能已损坏。');
     if (zip) {
@@ -173,8 +173,9 @@ async function prepareMacUpdate({ applicationRoot, userDataDirectory, currentVer
       await executeImpl('/usr/bin/hdiutil', ['detach', mountRoot]);
       mounted = false;
     }
+    await finishUpdateRun(runRoot, { userDataDirectory, currentVersion, applicationRoot });
     onProgress({ stage: 'prepared', percentage: 100 });
-    return { runRoot, packageRoot, archivePath, applicationBundle, version, currentVersion, rollback,
+    return { runRoot, packageRoot, archivePath, reused, applicationBundle, version, currentVersion, rollback,
       targetIdentity: { dev: targetInfo.dev, ino: targetInfo.ino }, source: packagePath ? 'package' : 'automatic',
       ...(packagePath ? {} : { provider: 'github' }),
       digest: expectedDigest, releaseUrl: release.releaseUrl, releaseNotes: packagePath ? manifest.releaseNotes : release.releaseNotes };
@@ -183,9 +184,15 @@ async function prepareMacUpdate({ applicationRoot, userDataDirectory, currentVer
     if (mounted) {
       try { await executeImpl('/usr/bin/hdiutil', ['detach', mountRoot]); mounted = false; } catch {}
     }
-    if (!mounted) await fs.rm(runRoot, { recursive: true, force: true }).catch(() => {});
+    await setUpdateRunState(runRoot, 'failed');
+    if (!mounted) await discardUpdateRun(runRoot);
     throw error;
   }
+}
+
+function prepareMacUpdate(options, dependencies) {
+  if (!options.userDataDirectory) return prepareMacUpdateImpl(options, dependencies);
+  return withUpdateOperation(options.userDataDirectory, () => prepareMacUpdateImpl(options, dependencies));
 }
 
 async function prepareLocalMacUpdate(options, dependencies = {}) {
@@ -210,11 +217,14 @@ async function prepareLocalMacUpdate(options, dependencies = {}) {
   } }, dependencies);
 }
 
-async function launchMacUpdate({ prepared, targetPid }, { spawnImpl = spawn } = {}) {
+async function launchMacUpdate({ prepared, targetPid, language = 'zh-CN' }, { spawnImpl = spawn } = {}) {
+  try {
+  await claimUpdateRun(prepared.runRoot, 'launching');
   const script = path.join(prepared.runRoot, 'mac-update-worker.js');
   await fs.copyFile(path.join(__dirname, 'mac-update-worker.js'), script);
+  await fs.copyFile(path.join(__dirname, 'update-storage.js'), path.join(prepared.runRoot, 'update-storage.js'));
   await writeUpdateSuccessNotice(prepared);
-  const control = { ...prepared, targetPid };
+  const control = { ...prepared, targetPid, language };
   const controlFile = path.join(prepared.runRoot, 'control.json');
   await fs.writeFile(controlFile, JSON.stringify(control), { mode: 0o600 });
   const environment = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
@@ -223,7 +233,13 @@ async function launchMacUpdate({ prepared, targetPid }, { spawnImpl = spawn } = 
   });
   await waitForUpdaterStart(child, path.join(prepared.runRoot, 'started.json'));
   child.unref();
+  const started = await readJson(path.join(prepared.runRoot, 'started.json'));
+  await setUpdateRunState(prepared.runRoot, 'applying', { workerPid: started?.pid || child.pid });
   return { runRoot: prepared.runRoot, updaterPid: child.pid };
+  } catch (error) {
+    await setUpdateRunState(prepared.runRoot, 'ready', { workerPid: 0 });
+    throw error;
+  }
 }
 
 module.exports = { macBundleFromResources, validateMacBundle, validateMacZipListing, prepareMacUpdate, prepareLocalMacUpdate, launchMacUpdate };

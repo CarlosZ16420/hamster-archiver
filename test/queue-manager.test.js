@@ -11,7 +11,7 @@ const { CancelledError, createArchivePublicationReceipt } = require('../src/core
 const { buildManifest, scanSourceSnapshot } = require('../src/core/manifest');
 const { AppStore } = require('../src/core/store');
 const { ApplicationTaskService } = require('../src/core/application-task-service');
-const { LARGE_TASK_BYTES, MAX_ARCHIVE_VOLUME_BYTES, MIB } = require('../src/core/constants');
+const { LARGE_TASK_BYTES, MIB } = require('../src/core/constants');
 
 // Config initialization creates automatic staging beside the archive location.
 // Keep mock-library identities on a real temporary volume on every runner.
@@ -586,6 +586,59 @@ test('cancelling a paused task always sends abort even when resume fails', async
   assert.equal(aborted, true);
   assert.equal(manager.jobs[0].stageText, '正在安全取消');
   assert.ok(manager.logs.some((entry) => /取消信号已继续发送/.test(entry.message)));
+});
+
+test('cancelling every job in a paused batch releases the queue and leaves late work pending', { timeout: 2000 }, async (t) => {
+  const calls = [];
+  let markStarted;
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
+    availableMemoryBytes: () => 8 * 1024 ** 3,
+    archiveRunner: blockingRunner(calls, markStarted)
+  });
+  manager.jobs = ['first', 'second'].map((id) => ({ ...queuedJob(id), intakeModeSelected: true }));
+  t.after(() => manager.stopForShutdown());
+
+  const running = manager.startQueue();
+  await started;
+  manager.jobs.push({ ...queuedJob('late'), intakeModeSelected: true, runBatchId: null });
+  await manager.pauseCurrent();
+  await manager.cancelJob('first');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(manager.activeRuns.size, 0);
+  await manager.cancelJob('second');
+  await running;
+
+  assert.deepEqual(calls, ['first']);
+  assert.deepEqual(manager.jobs.map((job) => job.status), ['cancelled', 'cancelled', 'queued']);
+  assert.equal(manager.jobs[2].runBatchId, null);
+  assert.equal(manager.activeRuns.size, 0);
+  assert.equal(manager.running, false);
+  assert.equal(manager.paused, false);
+});
+
+test('cancelling the last memory-blocked batch job releases the queue and leaves late work pending', { timeout: 2000 }, async (t) => {
+  const manager = new QueueManager(new FakeStore(), { libraryDir: testLibraryDirectory }, {
+    availableMemoryBytes: () => 0,
+    archiveRunner: async () => assert.fail('memory-blocked or late work must not start')
+  });
+  manager.jobs = [{ ...queuedJob('blocked'), intakeModeSelected: true }];
+  const memoryWaiting = new Promise((resolve) => manager.on('state', (state) => {
+    if (state.memoryWaiting) resolve();
+  }));
+  t.after(() => manager.stopForShutdown());
+
+  const running = manager.startQueue();
+  await memoryWaiting;
+  manager.jobs.push({ ...queuedJob('late'), intakeModeSelected: true, runBatchId: null });
+  await manager.cancelJob('blocked');
+  await running;
+
+  assert.deepEqual(manager.jobs.map((job) => job.status), ['cancelled', 'queued']);
+  assert.equal(manager.jobs[1].runBatchId, null);
+  assert.equal(manager.activeRuns.size, 0);
+  assert.equal(manager.running, false);
+  assert.equal(manager.memoryWaiting, false);
 });
 
 test('disk-space safety failure stops the whole queue before the next task', async () => {
@@ -2139,11 +2192,13 @@ test('each queued task snapshots configurable volume settings within safe bounds
   assert.equal(manager.config.archiveVolumeBytes, LARGE_TASK_BYTES);
   await assert.rejects(
     manager.updateConfig({ archiveVolumeEnabled: true, archiveVolumeBytes: (64 * MIB) - 1 }),
-    /64 MiB—100 GiB/
+    /不小于 64 MiB/
   );
+  await manager.updateConfig({ archiveVolumeEnabled: true, archiveVolumeBytes: 256 * 1024 ** 3 });
+  assert.equal(manager.config.archiveVolumeBytes, 256 * 1024 ** 3);
   await assert.rejects(
-    manager.updateConfig({ archiveVolumeEnabled: true, archiveVolumeBytes: MAX_ARCHIVE_VOLUME_BYTES + 1 }),
-    /64 MiB—100 GiB/
+    manager.updateConfig({ archiveVolumeEnabled: true, archiveVolumeBytes: Number.MAX_SAFE_INTEGER + 1 }),
+    /安全整数字节数/
   );
 });
 
@@ -2153,6 +2208,9 @@ test('volume confirmation follows source size, configured threshold, mode and pr
     displayName: 'volume', fileCount: 1 };
   for (const [volumeGiB, totalGiB, enabled, confirmation, mode, expected] of [
     [100, 20, true, true, 'archive', false],
+    [256, 200, true, true, 'archive', false],
+    [256, 256, true, true, 'archive', false],
+    [256, 257, true, true, 'archive', true],
     [10, 10, true, true, 'archive', false],
     [10, 20, true, true, 'archive', true],
     [1, 5, true, true, 'archive', true],
@@ -5097,6 +5155,115 @@ test('refreshing an uncompressed directory replaces the same record only after c
   assert.equal(manager.catalog[0].tags.includes('保留标签'), true);
   assert.notEqual(manager.catalog[0].manifest[0].md5, originalManifest[0].md5);
   assert.equal(await fs.readFile(sourceFile, 'utf8'), 'after with more content');
+});
+
+test('inventory-only read failures preserve existing records and allow a complete retry', async (t) => {
+  for (const mode of ['new', 'additions', 'overwrite']) {
+    await t.test(mode, async (t) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-inventory-read-failure-'));
+      t.after(() => fs.rm(root, { recursive: true, force: true }));
+      const sourcePath = path.join(root, 'source');
+      await fs.mkdir(sourcePath);
+      await fs.writeFile(path.join(sourcePath, 'old.txt'), 'original');
+      const originalManifest = await buildManifest(sourcePath, 'directory');
+      const originalRecord = {
+        id: 'read-failure-record', jobId: 'original-job', title: 'Keep this record',
+        displayName: 'source', recordType: 'archive', archiveState: 'uncompressed',
+        sourceType: 'directory', sourcePath, originalSourcePath: sourcePath,
+        sourceDisposition: 'kept', tags: ['未压缩'], fileCount: 1, originalBytes: 8,
+        manifest: originalManifest, directories: [], archiveFiles: [],
+        sourceSnapshot: originalManifest.sourceSnapshot, sourceTreeSnapshotComplete: true
+      };
+      const baseline = structuredClone(originalRecord);
+      const blockedFile = path.join(sourcePath, mode === 'overwrite' ? 'old.txt' : 'new.txt');
+      await fs.writeFile(blockedFile, 'changed content requiring a fresh fingerprint');
+      const manager = new QueueManager(new FakeStore(), {
+        repositoryDirectory: path.join(root, 'warehouse'), autoSkipExactDuplicates: false
+      });
+      manager.catalog = mode === 'new' ? [] : [originalRecord];
+      if (mode === 'new') {
+        manager.jobs = [manager.createJob({ sourcePath, sourceType: 'directory',
+          displayName: 'source', fileCount: 2, totalBytes: 53 })];
+      }
+      const originalRead = fsSync.createReadStream;
+      const readMock = t.mock.method(fsSync, 'createReadStream', function (filePath, ...args) {
+        if (path.resolve(filePath) === blockedFile) {
+          throw Object.assign(new Error('test source cannot be read'), { code: 'EACCES' });
+        }
+        return originalRead.call(this, filePath, ...args);
+      });
+      try {
+        if (mode === 'new') {
+          const idle = new Promise((resolve) => manager.once('idle', resolve));
+          await manager.startInventoryOnlyQueue();
+          await idle;
+        }
+        else {
+          const idle = new Promise((resolve) => manager.once('idle', resolve));
+          await manager.queueCatalogRecordsForRefresh([originalRecord.id]);
+          await idle;
+          if (mode === 'overwrite') {
+            assert.equal(manager.jobs[0].status, 'awaiting_source_change_confirmation');
+            const resolved = new Promise((resolve) => manager.once('idle', resolve));
+            await manager.resolveSourceChange(manager.jobs[0].id, 'overwrite');
+            await resolved;
+          }
+        }
+        assert.equal(manager.jobs[0].status, 'failed');
+        assert.equal(manager.jobs[0].errorCode, 'SOURCE_SCAN_INCOMPLETE');
+        assert.equal(manager.jobs[0].skippedFiles.some((file) => file.code === 'EACCES'), true);
+        assert.deepEqual(manager.catalog, mode === 'new' ? [] : [baseline]);
+      } finally {
+        readMock.mock.restore();
+      }
+      await manager.retryJob(manager.jobs[0].id);
+      assert.deepEqual(manager.jobs[0].skippedFiles, []);
+      const retryIdle = new Promise((resolve) => manager.once('idle', resolve));
+      await manager.startInventoryOnlyQueue();
+      await retryIdle;
+      assert.equal(manager.jobs[0].status, 'completed');
+      assert.equal(manager.catalog.length, 1);
+      if (mode !== 'new') assert.equal(manager.catalog[0].id, originalRecord.id);
+      assert.equal(manager.catalog[0].manifest.every((file) => /^[a-f0-9]{32}$/.test(file.md5)), true);
+      assert.deepEqual(manager.jobs[0].skippedFiles, []);
+      assert.deepEqual(manager.catalog[0].skippedFiles, []);
+      assert.equal(manager.catalog[0].sourceTreeSnapshotComplete, true);
+      assert.equal(await fs.readFile(blockedFile, 'utf8'), 'changed content requiring a fresh fingerprint');
+      assert.equal(manager.running, false);
+      assert.equal(manager.paused, false);
+    });
+  }
+});
+
+test('explicit refresh repairs a previously incomplete uncompressed record without source changes', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hamster-refresh-incomplete-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, 'source');
+  await fs.mkdir(sourcePath);
+  await fs.writeFile(path.join(sourcePath, 'one.txt'), 'readable after lock released');
+  const manifest = await buildManifest(sourcePath, 'directory');
+  const expectedMd5 = manifest[0].md5;
+  delete manifest[0].md5;
+  const manager = new QueueManager(new FakeStore(), { repositoryDirectory: path.join(root, 'warehouse') });
+  manager.catalog = [{
+    id: 'previously-incomplete', jobId: 'original-job', title: 'Keep title', displayName: 'source',
+    recordType: 'archive', archiveState: 'uncompressed', tags: ['未压缩'],
+    sourceType: 'directory', sourcePath, originalSourcePath: sourcePath, sourceDisposition: 'kept',
+    fileCount: 1, originalBytes: manifest[0].size, manifest, directories: [], archiveFiles: [],
+    sourceSnapshot: manifest.sourceSnapshot, sourceTreeSnapshotComplete: false,
+    skippedFiles: [{ path: 'one.txt', code: 'EBUSY', type: 'file' }]
+  }];
+  const idle = new Promise((resolve) => manager.once('idle', resolve));
+  await manager.queueCatalogRecordsForRefresh(['previously-incomplete']);
+  await idle;
+  assert.equal(manager.jobs[0].status, 'completed');
+  assert.notEqual(manager.jobs[0].stageText, '目录未发现变化');
+  assert.equal(manager.catalog.length, 1);
+  assert.equal(manager.catalog[0].id, 'previously-incomplete');
+  assert.equal(manager.catalog[0].title, 'Keep title');
+  assert.equal(manager.catalog[0].manifest[0].md5, expectedMd5);
+  assert.equal(manager.catalog[0].sourceTreeSnapshotComplete, true);
+  assert.deepEqual(manager.catalog[0].skippedFiles, []);
 });
 
 test('refreshing a directory auto-merges additions, reuses unchanged metadata, and leaves unrelated queue work alone', async (t) => {

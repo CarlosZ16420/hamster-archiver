@@ -61,14 +61,14 @@ test('disabled splitting keeps both small and large tasks whole', () => {
   assert.equal(largeArgs.some((arg) => arg.startsWith('-v')), false);
 });
 
-test('100 GiB volume threshold keeps a 20 GiB source whole and splits only above the threshold', () => {
-  for (const [totalGiB, expectedSplit] of [[20, false], [100, false], [101, true]]) {
+test('volume thresholds above 100 GiB keep sources whole until the configured size is exceeded', () => {
+  for (const [totalGiB, expectedSplit] of [[20, false], [200, false], [256, false], [257, true]]) {
     const args = buildCompressArgs({
       ...makeJob(totalGiB * 1024 ** 3),
       archiveVolumeEnabled: true,
-      archiveVolumeBytes: 100 * 1024 ** 3
+      archiveVolumeBytes: 256 * 1024 ** 3
     }, 'E:\\stage\\threshold.7z');
-    assert.equal(args.includes(`-v${100 * 1024 ** 3}b`), expectedSplit);
+    assert.equal(args.includes(`-v${256 * 1024 ** 3}b`), expectedSplit);
   }
 });
 

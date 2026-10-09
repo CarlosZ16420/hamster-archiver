@@ -39,6 +39,28 @@ test('CLI preserves required output fields returned by the application', async (
   assert.deepEqual(cli.errorEnvelope(failure).error.requiredFields, ['archiveOutputDirectory']);
 });
 
+test('explicit intake rejection does not leave an unknown pending request', async (t) => {
+  const root = await setup(t);
+  const userDataRoot = process.env.HAMSTER_CLI_USER_DATA_DIR;
+  mcpClient.startOrConnect = async () => 'test-connection';
+  mcpClient.withSession = async (_connection, action) => action();
+  mcpClient.request = async (_connection, rpc) => rpc.method === 'hamster/runtime/status'
+    ? { result: { instanceId: 'test-instance', repositoryDirectory: path.join(root, 'warehouse'),
+      userDataRoot, applicationRoot: root } }
+    : { result: { isError: true, structuredContent: { ok: false, error: {
+      code: 'ARCHIVE_OUTPUT_REQUIRED', stage: 'prepare', acceptance: 'not_accepted',
+      requiredAction: 'choose_archive_output_directory', requiredFields: ['archiveOutputDirectory'],
+      message: 'Choose an output location.' } } } };
+  let rejected;
+  try { await cli.runCommand(cli.parse(['intake', path.join(root, 'source'), '--archive', '--json'])); }
+  catch (error) { rejected = error; }
+  assert.equal(rejected.code, 'ARCHIVE_OUTPUT_REQUIRED');
+  assert.equal(rejected.acceptance, 'not_accepted');
+  assert.equal(cli.errorEnvelope(rejected).error.safeNextAction, 'choose_archive_output_directory');
+  assert.equal((await readRequestFile(rejected.requestFile)).value.status, 'failed');
+  assert.deepEqual(await pendingRequests(userDataRoot), []);
+});
+
 test('lost response leaves a request file and resume reuses the exact identity', async (t) => {
   const root = await setup(t);
   const repositoryDirectory = path.join(root, 'warehouse');

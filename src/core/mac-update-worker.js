@@ -3,8 +3,9 @@
 // Copied outside the .app before replacement; use only Node built-ins.
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { execFile } = require('node:child_process');
+const { execFile, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
+const { readJson } = require('./update-storage');
 const execute = promisify(execFile);
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -20,14 +21,53 @@ async function applyMacUpdate(control, dependencies = {}) {
       !Number.isSafeInteger(control.targetPid) || control.targetPid <= 0 ||
       !/^\d+\.\d+\.\d+(?:-beta\.mac\.\d+)?$/.test(control.version || '')) throw new Error('Invalid Mac updater control.');
   const token = path.basename(runRoot);
+  const message = (zh, en) => control.language === 'en-US' ? en : zh;
   const staged = path.join(path.dirname(target), `.hamster-stage-${token}.app`);
   const backup = path.join(path.dirname(target), `.hamster-backup-${token}.app`);
   let moved = false, installed = false, launchAttempted = false;
   const write = (name, value) => fs.writeFile(path.join(runRoot, name), JSON.stringify(value));
-  const launch = async () => {
+  const validationFile = path.join(runRoot, 'validation.json');
+  const launch = async (validate = false) => {
     const environment = { ...process.env };
     for (const name of Object.keys(environment)) if (/^(?:HAMSTER_(?:UPDATE|SMOKE|STARTUP_INTEGRITY|USER_DATA_VALIDATION)|ELECTRON_RUN_AS_NODE)/.test(name)) delete environment[name];
-    await executeImpl('/usr/bin/open', ['-n', target], { env: environment });
+    if (!validate) {
+      await executeImpl('/usr/bin/open', ['-n', target], { env: environment });
+      return;
+    }
+    environment.HAMSTER_UPDATE_VALIDATION_FILE = validationFile;
+    environment.HAMSTER_UPDATE_NOTICE_FILE = path.join(runRoot, 'update-notice.json');
+    const executable = path.join(target, 'Contents', 'MacOS', 'Hamster Archiver');
+    let launchedPid;
+    if (dependencies.launchImpl) launchedPid = await dependencies.launchImpl(executable, environment);
+    else {
+      // Start the exact replacement executable, without Launch Services choosing
+      // another registered copy with the same bundle identity.
+      const child = spawn(executable, [], { detached: true, stdio: 'ignore', env: environment, cwd: path.dirname(target) });
+      await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+      launchedPid = child.pid;
+      child.unref();
+    }
+    const deadline = Date.now() + (dependencies.validationTimeoutMs ?? 45_000);
+    while (Date.now() < deadline) {
+      const validation = await readJson(validationFile);
+      if (validation) {
+        let correctPath = validation.applicationBundle === target;
+        // Older Betas report only their version. Check the exact child process
+        // rather than requiring a field they cannot provide during rollback.
+        if (!validation.applicationBundle && Number.isSafeInteger(launchedPid) && launchedPid > 0) {
+          const processInfo = await executeImpl('/bin/ps', ['-p', String(launchedPid), '-o', 'comm=']);
+          correctPath = String(processInfo.stdout).trim() === executable;
+        }
+        if (validation.version !== control.version || !correctPath) {
+          throw new Error(message('Mac 新版本启动后报告的版本或应用位置不一致，已保留恢复文件。',
+            'The installed Mac app reported a different version or application path. Recovery files were preserved.'));
+        }
+        return;
+      }
+      await delay(100);
+    }
+    throw new Error(message('Mac 新版本未确认启动完成，已保留恢复文件。',
+      'The installed Mac app did not confirm startup. Recovery files were preserved.'));
   };
   try {
     await write('started.json', { pid: process.pid });
@@ -72,7 +112,8 @@ async function applyMacUpdate(control, dependencies = {}) {
     await fs.rename(staged, target);
     installed = true;
     launchAttempted = true;
-    await launch();
+    await fs.unlink(validationFile).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    await launch(true);
     await write('completed.json', { version: control.version, backup, completedAt: new Date().toISOString() });
   } catch (error) {
     // Once Launch Services was asked to open the app, it may be running even

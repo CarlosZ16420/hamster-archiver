@@ -399,21 +399,35 @@ class ApplicationTaskService {
   }
 
   async submitV2(input) {
-    const rawPaths = normalizeInputPaths(input.paths);
-    const requestId = String(input.requestId || '').trim() || `request-${crypto.randomUUID()}`;
-    if (requestId.length > 128) throw codedError('INVALID_REQUEST_ID', 'requestId cannot exceed 128 characters.', 'prepare');
-    const explicitFingerprint = explicitInputFingerprint(input, rawPaths);
+    let rawPaths;
+    let requestId;
+    let explicitFingerprint;
+    try {
+      rawPaths = normalizeInputPaths(input.paths);
+      requestId = String(input.requestId || '').trim() || `request-${crypto.randomUUID()}`;
+      if (requestId.length > 128) throw codedError('INVALID_REQUEST_ID', 'requestId cannot exceed 128 characters.', 'prepare');
+      explicitFingerprint = explicitInputFingerprint(input, rawPaths);
+    } catch (error) {
+      error.acceptance = 'not_accepted';
+      throw error;
+    }
     const accept = async () => {
-      const existing = this.manager.findAutomationRequest?.(requestId);
-      if (existing) {
-        if (existing.explicitFingerprint !== explicitFingerprint) {
-          throw codedError('REQUEST_ID_CONFLICT', 'This requestId is already bound to different explicit input.', 'prepare');
+      let options;
+      try {
+        const existing = this.manager.findAutomationRequest?.(requestId);
+        if (existing) {
+          if (existing.explicitFingerprint !== explicitFingerprint) {
+            throw codedError('REQUEST_ID_CONFLICT', 'This requestId is already bound to different explicit input.', 'prepare');
+          }
+          return { task: existing, replay: true };
         }
-        return { task: existing, replay: true };
-      }
-      const options = resolveIntakeOptions(input, savedIntakePreferences(this.manager.config));
-      if (options.layout !== 'single' && rawPaths.length !== 1) {
-        throw codedError('INVALID_LAYOUT', 'children and ask require exactly one source path.', 'prepare');
+        options = resolveIntakeOptions(input, savedIntakePreferences(this.manager.config));
+        if (options.layout !== 'single' && rawPaths.length !== 1) {
+          throw codedError('INVALID_LAYOUT', 'children and ask require exactly one source path.', 'prepare');
+        }
+      } catch (error) {
+        error.acceptance = 'not_accepted';
+        throw error;
       }
       const task = await this.manager.recordAutomationRequest({
         requestId, taskId: `task-${crypto.randomUUID()}`, fingerprint: explicitFingerprint,
@@ -444,12 +458,32 @@ class ApplicationTaskService {
     if (this.v2Preparations.has(task.taskId)) return this.v2Preparations.get(task.taskId);
     const operation = Promise.resolve().then(() => this.prepareV2(task)).catch(async (error) => {
       if (this.findTask(task.taskId)?.cancellationRequested) return;
-      await this.manager.recordAutomationRequest({ ...task, jobs: this.jobsFor(task), preparing: false,
+      const jobs = this.jobsFor(task);
+      const safeToCancel = this.unstartedPreparationJobs(jobs);
+      if (safeToCancel) for (const job of jobs) job.automationStartAuthorized = false;
+      await this.manager.recordAutomationRequest({ ...task, jobs, preparing: false,
+        ...(safeToCancel ? { startAuthorized: false } : {}),
+        preparationFailure: { safeToCancel, jobIds: jobs.map((job) => job.id) },
         recoveryRequired: true, asyncError: { code: error.code || 'INTAKE_PREPARATION_FAILED', message: error.message,
           at: new Date().toISOString() } });
     }).finally(() => this.v2Preparations.delete(task.taskId));
     this.v2Preparations.set(task.taskId, operation);
     return operation;
+  }
+
+  unstartedPreparationJobs(jobs) {
+    return jobs.every((job) => job.status === 'queued' && !job.errorCode && !(job.progress || 0) && !job.startedAt && !job.runBatchId &&
+      !job.completedAt && !job.verifiedAt && !job.terminalResult && !job.catalogRecovery &&
+      !job.sourceDispositionRecovery && !(job.archiveFiles || []).length &&
+      !this.manager.activeRuns?.has(job.id) && !(this.manager.catalog || []).some((record) =>
+        record.archiveJobId === job.id || record.jobId === job.id));
+  }
+
+  cancellablePreparationFailure(task) {
+    if (!task.recoveryRequired || task.preparing || task.preparationFailure?.safeToCancel !== true) return false;
+    const jobs = this.jobsFor(task);
+    const ids = new Set(task.preparationFailure.jobIds || []);
+    return ids.size === jobs.length && jobs.every((job) => ids.has(job.id)) && this.unstartedPreparationJobs(jobs);
   }
 
   async saveV2Decision(task, layout, kind, revision = 1) {
@@ -914,7 +948,8 @@ class ApplicationTaskService {
         'The archive is awaiting safety review. Review it in the desktop application before cancelling.', 'cancel');
     }
     if (task.responseVersion === 2) {
-      if (this.receipt(task, 2).task.terminal && (!task.cancellationRequested || task.cancelFinalized)) {
+      const cancelPreparationFailure = this.cancellablePreparationFailure(task);
+      if (!cancelPreparationFailure && this.receipt(task, 2).task.terminal && (!task.cancellationRequested || task.cancelFinalized)) {
         return this.receipt(task, 2);
       }
       // Signal synchronous intent first, before the ledger write yields. Any
@@ -932,14 +967,23 @@ class ApplicationTaskService {
       if (typeof this.manager.persistJobs === 'function') await this.manager.persistJobs();
       await this.v2Preparations.get(task.taskId);
       const current = this.findTask(taskId) || task;
+      if (cancelPreparationFailure && !this.cancellablePreparationFailure(current)) {
+        throw codedError('RECOVERY_REVIEW_REQUIRED', 'Review recovery evidence before cancelling this task.', 'cancel');
+      }
       for (const job of this.jobsFor(current)) {
         if (!['completed', 'completed_cleanup_failed', 'skipped_duplicate', 'cancelled'].includes(job.status)) {
-          await this.manager.cancelJob(job.id);
+          if (cancelPreparationFailure && !(this.manager.jobs || []).some((live) => live.id === job.id)) {
+            // A failed queue write can leave only a ledger snapshot after restart.
+            job.status = 'cancelled';
+            job.stageText = '已取消';
+            job.automationStartAuthorized = false;
+          } else await this.manager.cancelJob(job.id);
         }
       }
       const jobs = this.jobsFor(current);
       const saved = await this.manager.recordAutomationRequest({ ...current, jobs,
         decision: null, preparing: false, cancellationRequested: true,
+        ...(cancelPreparationFailure ? { recoveryRequired: false, terminalReceipts: null } : {}),
         cancelFinalized: true,
         cancelled: jobs.length === 0 });
       this.manager.clearAutomationCancellation?.(task.taskId);

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "version": "4.8.6-beta.mac.1",
+  "readmeVersion": "4.8.6",
+  "notes": {
+    "zh-CN": [
+      "修复 Mac 更新缓存和启动确认，更新提示确认状态持久保存。",
+      "保护来源读取失败时的仓库记录，修复队列取消与自动化受理状态，改善分卷、引导和标签显示。",
+      "提供 DMG 与 .app ZIP；仅临时签名，未经 Apple 公证，资料保持兼容，请使用副本测试并保留备份。"
+    ],
+    "en-US": [
+      "Fix Mac update caching and startup confirmation, and persist update-notice acknowledgments.",
+      "Protect Warehouse records after source-read failures, fix queue cancellation and automation acceptance, and improve splitting, onboarding and tag display.",
+      "Provide DMG and .app ZIP; the app is ad-hoc signed and not notarized, data remains compatible, and testing should use copies and independent backups."
+    ]
+  }
+}

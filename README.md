@@ -8,12 +8,12 @@
 本地资源归档工具，快速为本地文件建立可预览、可搜索、易管理的资源档案。<br>
 记录存放位置与校验信息，随时压缩存储。
 
-![Version](https://img.shields.io/badge/version-4.8.4-d45f3c?style=flat-square)
+![Version](https://img.shields.io/badge/version-4.8.6-d45f3c?style=flat-square)
 ![Windows x64](https://img.shields.io/badge/Windows-x64-23211d?style=flat-square)
-![Mac Beta](https://img.shields.io/badge/macOS_Beta-4.8.0--beta.mac.2-d45f3c?style=flat-square)
+![Mac Beta](https://img.shields.io/badge/macOS_Beta-4.8.6--beta.mac.1-d45f3c?style=flat-square)
 ![MIT](https://img.shields.io/badge/license-MIT-2f7558?style=flat-square)
 
-**[下载 Windows 正式版](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[下载 Mac Beta](https://github.com/CarlosZ16420/hamster-archiver/releases/tag/v4.8.0-beta.mac.2)** · [English](README.en.md) · [反馈问题](https://github.com/CarlosZ16420/hamster-archiver/issues)
+**[下载 Windows 正式版](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)** · **[下载 Mac Beta](https://github.com/CarlosZ16420/hamster-archiver/releases/tag/v4.8.6-beta.mac.1)** · [English](README.en.md) · [反馈问题](https://github.com/CarlosZ16420/hamster-archiver/issues)
 
 [快速开始](#快速开始) · [功能介绍](#功能介绍) · [常见问题](#常见问题) · [实验性 AI 接入](#实验性-ai-接入) · [文档与贡献](#文档与贡献)
 
@@ -42,26 +42,31 @@
 
 [![批量归档、进度追踪与重复确认](assets/readme/archive-showcase.zh-CN.png)](assets/readme/archive-showcase.zh-CN.png)
 
-压缩暂存目录默认自动建在压缩包存储点旁，并随存储位置变动；在高级设置中取消勾选后，可手动设置并保留当前暂存路径。
-
 ## 快速开始
 
 ### Windows
 
-1. 下载 [Windows 正式版](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)：使用 **Setup EXE 安装版**，或完整解压 **ZIP 便携版**（`HamsterArchiver-v4.8.4-win-x64/`）后运行 `HamsterArchiver.exe`。
+1. 下载 [Windows 正式版](https://github.com/CarlosZ16420/hamster-archiver/releases/latest)：使用 **Setup EXE 安装版**，或完整解压 **ZIP / 7z 便携版**（`HamsterArchiver-v4.8.6-win-x64/`）后运行 `HamsterArchiver.exe`。
 2. 在“归档工作台”扫描目录，或拖入文件夹、视频。
-3. 想先整理收藏，点击 **“不压缩入库”**；需要打包备份，点击 **“压缩入库”**并选择保存位置。完成后到“仓库”浏览、分类。
+3. 想先整理收藏，点击 **“不压缩入库”**；需要打包备份，点击 **“压缩入库”** 并选择保存位置。完成后到“仓库”浏览、分类。
 
 支持 Windows x64，提供中英文界面；压缩和视频预览工具已随发行包提供，无需另装 Node.js。请下载发行包，GitHub 的 Source code 用于源码开发。
+
+ZIP 与 7z 包含相同程序，7z 下载体积更小，需使用支持 7z 的工具解压。每个安装包或压缩包都附有同名 `.sha256` 校验文件，可核对下载是否完整。
 
 扫描主目录时，一级子文件夹和视频会分别作为项目加入；零散文件请先放进文件夹。默认过滤小于 100 MB 的项目，可在“收纳设置”调整或关闭。
 
 ### Mac Beta
 
-支持 macOS 12 及以上，兼容 Apple Silicon 与 Intel。从 [Mac Beta 下载页](https://github.com/CarlosZ16420/hamster-archiver/releases/tag/v4.8.0-beta.mac.2) 下载 DMG，打开后将应用拖入“应用程序”。本 Beta 未经 Apple 公证；确认信任下载来源后，可在“系统设置 → 隐私与安全性”中选择“仍要打开”。
+当前 Mac 版为 **4.8.6-beta.mac.1 测试版**，仍缺乏实际使用测试。请在使用过程中注意文件安全。
 
-Mac 版内置 7-Zip，视频抽帧需自行配置 FFmpeg；归档后可保留或移动原文件，不支持 Windows 回收站相关操作。新版更新窗口可选择 Beta 更新或回退，下载校验后自动替换应用；回退前请导出仓库并备份用户资料。已发布的 `4.8.0-beta.mac.2` 尚不含此功能，首次升级仍需手动安装新版。安装细节与平台限制见 [Mac 版指南](platforms/macos/README.md)。
+支持 macOS 12 及以上，兼容 Apple Silicon 与 Intel。从 [Mac Beta 下载页](https://github.com/CarlosZ16420/hamster-archiver/releases/tag/v4.8.6-beta.mac.1) 下载 **DMG**，打开后将应用拖入“应用程序”；也可下载 **ZIP**，解压后将 `.app` 放到“应用程序”或其他可写目录运行。资料仍保存在用户目录，不随 `.app` 携带。
 
+本 Beta 仅临时签名，未经 Apple 公证。请先核对下载包的 SHA-256；复制完成后，启动所选目录中的应用副本。首次打不开时，请按 [首次启动引导](platforms/macos/README.md#first-launch) 核对提示并操作，指南附有 Apple 官方截图链接；能正常打开时可跳过确认步骤，用户无需申请开发者授权。Mac 版内置 7-Zip，视频抽帧需自行配置 FFmpeg；归档后可保留或移动原文件，不支持自动移入废纸篓及相关恢复。
+
+**请您协助测试：** 先用小型副本验证扫描、归档、更新和恢复，并保留原文件、导出的仓库与独立用户资料备份。如有报错，反馈请附 macOS 版本、Mac 芯片类型、应用版本、操作步骤和错误信息，隐去私人路径及密码。
+
+Mac 会在后台检查新 Beta，**只有你选择版本并确认重启后才会安装**；也可在更新窗口选择本机 DMG / ZIP。手动更新需保留发行文件名，并把同名 `.sha256` 校验文件放在同一目录，目标版本必须高于当前版本。在线回退前请导出仓库并备份用户资料。旧 `4.8.0-beta.mac.2` 不含应用内更新功能，首次升级需手动安装。安装与校验步骤见 [Mac 版指南](platforms/macos/README.md)。
 
 
 ## 功能介绍
@@ -71,7 +76,6 @@ Mac 版内置 7-Zip，视频抽帧需自行配置 FFmpeg；归档后可保留或
 记录完整的目录树、缩略图，视频自动抽帧记录（缩略图保存数量可以在设置中调整）。允许备注、标记、修改添加包括图片在内的记录内容。
 
 支持按日期、备注内容、文件名、标签等各种方式模糊检索。标签化管理，一个文件可以交叉备注多个标签。
-
 [![标签、星级、备份位置、视频抽帧与完整目录](assets/readme/details-showcase.zh-CN.png)](assets/readme/details-showcase.zh-CN.png)
 
 ### 文件夹变了，仓库也能跟上
@@ -81,11 +85,7 @@ Mac 版内置 7-Zip，视频抽帧需自行配置 FFmpeg；归档后可保留或
 ### 相似资源，给出依据再决定
 
 根据文件MD5、文件名等信息计算相似度，对不同相似度的内容分级，加入仓库时自动报告。完整重复的项目可按设置自动跳过；允许手动添加白名单词汇、修改相似判断宽松度。
-
 [![队列相似入口、报告内白名单操作及相似度设置](assets/readme/similarity-showcase.zh-CN.png)](assets/readme/similarity-showcase.zh-CN.png)
-
-
-
 ### 批量打包，按你的备份习惯来
 
 支持 **7z / ZIP、密码和自定义分卷**，可批量排队、暂停或定时运行。处理当前批次时仍能添加下一批资源，视频抽帧和缩略图数量也可调整。
@@ -115,7 +115,10 @@ Mac 版内置 7-Zip，视频抽帧需自行配置 FFmpeg；归档后可保留或
 <details>
 <summary>如何更新？仓库导出能备份所有文件吗？</summary>
 
-Windows 版可用“检查更新”，或下载新版后选择“手动更新”：便携版选择 ZIP，安装版选择 Setup EXE。Mac Beta 下载新版 DMG，替换应用即可。
+Windows 和 Mac 的后台检查都只发现新版本，不会自动安装；在“检查更新”中选择目标版本，并确认后才开始升级。
+
+- **Windows：** 便携版在线更新优先使用校验后的 7z，缺失时使用同版本 ZIP；手动更新可选择更高版本的 ZIP / 7z，安装版选择 Setup EXE。
+- **Mac Beta：** 可在线选择版本并确认重启，或手动选择更高版本的 DMG / ZIP。手动包须保留发行文件名，并与同目录同名 `.sha256` 校验文件配套；详细步骤见 [Mac 版指南](platforms/macos/README.md)。旧 `4.8.0-beta.mac.2` 首次升级仍需手动安装新版。
 
 **仓库导出只包含索引和缩略图，不包含原文件或压缩包**，它们需要单独备份。旧版本没有可用更新入口时，可先导出仓库，再在新程序中“并入外部仓库”，核对后再处理旧目录。
 

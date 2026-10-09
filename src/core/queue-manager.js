@@ -13,7 +13,6 @@ const { isDeepStrictEqual, promisify } = require('node:util');
 const {
   ARCHIVE_PASSWORD,
   LARGE_TASK_BYTES,
-  MAX_ARCHIVE_VOLUME_BYTES,
   MIB,
   MIN_ARCHIVE_VOLUME_BYTES,
   RUNNING_STATUSES,
@@ -711,13 +710,19 @@ async function runInventoryOnlyJob(job, config, hooks = {}, signal) {
         hooks.onSkippedFile?.(item);
       }
     });
+  const skippedFiles = manifest.skippedFiles || job.skippedFiles || [];
+  if (skippedFiles.length > 0 || manifest.sourceSnapshot?.complete === false) {
+    const error = new Error('无法完整读取源文件或目录，已停止入库；原仓库记录未修改，请解除占用或检查权限后重试。');
+    error.code = 'SOURCE_SCAN_INCOMPLETE';
+    throw error;
+  }
   await hooks.onManifestReady?.(manifest, directories);
   return {
     archiveFiles: [],
     archiveTotalBytes: 0,
     manifest,
     directories,
-    skippedFiles: manifest.skippedFiles || job.skippedFiles || [],
+    skippedFiles,
     passwordScheme: 'none',
     hasPassword: false,
     verifiedAt: new Date().toISOString()
@@ -3270,9 +3275,9 @@ class QueueManager extends EventEmitter {
       ? config.archiveVolumeEnabled === true
       : this.config.archiveVolumeEnabled !== false;
     const archiveVolumeBytes = Number(config.archiveVolumeBytes ?? this.config.archiveVolumeBytes ?? LARGE_TASK_BYTES);
-    if (!Number.isInteger(archiveVolumeBytes) ||
-        archiveVolumeBytes < MIN_ARCHIVE_VOLUME_BYTES || archiveVolumeBytes > MAX_ARCHIVE_VOLUME_BYTES) {
-      throw new Error('单卷大小必须是 64 MiB—100 GiB 之间的整数。');
+    if (!Number.isSafeInteger(archiveVolumeBytes) ||
+        archiveVolumeBytes < MIN_ARCHIVE_VOLUME_BYTES) {
+      throw new Error('单卷大小必须是不小于 64 MiB 的安全整数字节数。');
     }
     const archiveVolumeConfirmation = Object.prototype.hasOwnProperty.call(config, 'archiveVolumeConfirmation')
       ? config.archiveVolumeConfirmation !== false
@@ -4207,7 +4212,8 @@ class QueueManager extends EventEmitter {
   automationJobSnapshot(job) {
     const snapshot = Object.fromEntries([
       'id', 'mcpRequestId', 'applicationTaskId', 'sourcePath', 'displayName', 'processingMode', 'status', 'progress',
-      'stageText', 'errorCode', 'errorMessage', 'completedAt', 'archiveDirectory', 'archiveBaseName',
+      'stageText', 'errorCode', 'errorMessage', 'startedAt', 'runBatchId', 'completedAt', 'archiveDirectory', 'archiveBaseName',
+      'archiveFiles', 'catalogRecovery',
       'sourceDisposition', 'archiveOutputDirectory', 'archiveStagingDirectory',
       'mcpSourceDisposition', 'mcpProcessedSourceDirectory', 'automationStartAuthorized',
       'automationDuplicatePolicy', 'exactProjectMatches', 'duplicateReviewFingerprint',
@@ -4987,7 +4993,13 @@ class QueueManager extends EventEmitter {
         activeRecordIds.add(record.id);
         added.push(job);
       } catch (error) {
-        failures.push({ id: record.id, title: record.title || record.displayName, reason: error.message });
+        const title = record.title || record.displayName || path.basename(sourcePath);
+        const name = Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(String(title)))
+          .slice(0, 10).map((item) => item.segment).join('');
+        const reason = error.code === 'ENOENT' || error.code === 'ENOTDIR'
+          ? `项目“${name}”的文件夹可能已移动或改名，无法找到，导致检查更新失败。请重新指定来源，或将文件恢复原位后再尝试。`
+          : error.message;
+        failures.push({ id: record.id, title, reason });
       }
     }
     if (added.length === 0 && failures.length === 0) throw new Error('所选内容中没有可更新的未压缩目录项目。');
@@ -5080,8 +5092,8 @@ class QueueManager extends EventEmitter {
     await this.persistJobs();
     const requestedVolumeBytes = Number(job.archiveVolumeBytes);
     const configuredVolumeBytes = job.archiveVolumeEnabled === true &&
-      Number.isInteger(requestedVolumeBytes) &&
-      requestedVolumeBytes >= MIN_ARCHIVE_VOLUME_BYTES && requestedVolumeBytes <= MAX_ARCHIVE_VOLUME_BYTES
+      Number.isSafeInteger(requestedVolumeBytes) &&
+      requestedVolumeBytes >= MIN_ARCHIVE_VOLUME_BYTES
       ? requestedVolumeBytes
       : LARGE_TASK_BYTES;
     const volumeLabel = configuredVolumeBytes % (1024 ** 3) === 0
@@ -5407,6 +5419,7 @@ class QueueManager extends EventEmitter {
       await this.store.deletePendingManifest(this.config.repositoryDirectory, job.id);
     }
     this.emitState();
+    this.wakeQueueScheduler();
     return this.getState();
   }
 
@@ -5427,6 +5440,7 @@ class QueueManager extends EventEmitter {
     job.progress = 0;
     job.errorCode = null;
     job.errorMessage = null;
+    job.skippedFiles = [];
     delete job.catalogRecovery;
     delete job.runBatchId;
     job.exactDuplicateMatches = [];
@@ -5943,6 +5957,9 @@ class QueueManager extends EventEmitter {
     try {
       while (!this.stopRequested) {
         if (this.paused) {
+          // A paused batch still finishes when its last active and queued jobs are cancelled.
+          if (this.activeRuns.size === 0 &&
+              !this.jobs.some((job) => batchJobIds.has(job.id) && isRunnableQueuedJob(job))) break;
           await this.waitForQueueScheduler();
           continue;
         }
@@ -6137,7 +6154,9 @@ class QueueManager extends EventEmitter {
       return null;
     }
 
-    if (job.taskKind === 'catalog_refresh' && difference.comparable && !difference.changed) {
+    const incompleteReference = referenceRecord.sourceTreeSnapshotComplete === false ||
+      (referenceRecord.skippedFiles || []).length > 0;
+    if (job.taskKind === 'catalog_refresh' && difference.comparable && !difference.changed && !incompleteReference) {
       await this.runCatalogOperation(async () => {
         if (!this.catalog.includes(referenceRecord)) {
           const error = new Error('原仓库项目已变化，请重新执行目录更新。');
@@ -6162,7 +6181,8 @@ class QueueManager extends EventEmitter {
     }
     return {
       preparedSnapshot: snapshot,
-      reuseManifest: job.sourceChangeDecision?.action === 'new_independent' ? [] : (referenceRecord.manifest || []),
+      reuseManifest: job.sourceChangeDecision?.action === 'new_independent' || incompleteReference
+        ? [] : (referenceRecord.manifest || []),
       difference
     };
   }

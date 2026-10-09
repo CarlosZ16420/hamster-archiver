@@ -43,7 +43,7 @@ const settingsPatchProperties = {
   archiveFormat: { type: 'string', enum: ['7z', 'zip'] },
   compressionLevel: { type: 'integer', minimum: 0, maximum: 9 },
   archiveVolumeEnabled: { type: 'boolean' },
-  archiveVolumeBytes: { type: 'integer', minimum: 64 * MIB, maximum: 100 * GIB },
+  archiveVolumeBytes: { type: 'integer', minimum: 64 * MIB },
   archiveVolumeConfirmation: { type: 'boolean' },
   archivePassword: optionalStringSchema(128),
   recordArchivePassword: { type: 'boolean' },

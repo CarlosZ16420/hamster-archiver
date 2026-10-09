@@ -125,6 +125,7 @@ async function createUpdateSuccessHarness({ integrityTest = false } = {}) {
     mainWindow: window,
     queueManager: { config: { language: 'zh-CN' } },
     appendReleaseNotes: text => text,
+    withPreparedUpdate: (_prepared, action) => action(),
     pendingUpdateSuccess: { fromVersion: '4.8.3', toVersion: '4.8.4', runRoot: 'test-update-root' },
     isSmokeTest: false,
     isStartupIntegrityTest: integrityTest,
@@ -144,10 +145,11 @@ async function createUpdateSuccessHarness({ integrityTest = false } = {}) {
         finishDialog = error => error ? reject(error) : resolve({ response: 0 });
       });
     } },
-    fs: { rm: async root => {
-      assert.equal(root, 'test-update-root');
+    userDataLayout: { root: 'test-profile' }, applicationRoot: 'test-app', app: { getVersion: () => '4.8.4' },
+    acknowledgeUpdateSuccess: async notice => {
+      assert.equal(notice.runRoot, 'test-update-root');
       events.push('cleanup');
-    } },
+    },
     console: { error: message => warnings.push(message), warn: message => warnings.push(message) }
   });
   vm.runInContext(main.slice(main.indexOf('async function showUpdateSuccessDialog('),
@@ -214,6 +216,7 @@ async function createUpdateRestartHarness() {
     mainWindow: {},
     releasesUrl: 'https://github.com/CarlosZ16420/hamster-archiver/releases',
     appendReleaseNotes: text => text,
+    withPreparedUpdate: (_prepared, action) => action(),
     launchUpdate: async () => { events.push('portable-launch'); },
     launchInstalledUpdate: async () => { events.push('installer-launch'); },
     showUpdateFailureDialog: async () => {},

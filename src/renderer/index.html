@@ -140,19 +140,19 @@
                 <div class="volume-setting enabled" id="volume-setting">
                   <label class="record-password-option volume-toggle">
                     <input type="checkbox" id="split-volume" checked>
-                    <span><strong>分卷压缩</strong><small>原始总大小超过单卷上限时分卷；默认 10 GiB，可设置至 100 GiB。</small></span>
+                    <span><strong>分卷压缩</strong><small>原始总大小超过单卷大小时分卷；默认 10 GiB。</small></span>
                   </label>
                   <div class="volume-inputs" id="volume-inputs">
                     <label class="volume-size-field">
                       <span>单卷大小</span>
                       <span class="volume-row">
-                        <input type="number" id="volume-size" min="1" max="100" step="0.25" value="10" aria-label="单卷大小">
+                        <input type="number" id="volume-size" min="1" step="0.25" value="10" aria-label="单卷大小">
                         <select id="volume-unit" aria-label="分卷大小单位"><option value="mb">MB</option><option value="gb" selected>GB</option></select>
                       </span>
                     </label>
                   </div>
                 </div>
-                <p class="safety-note">是否需要手动确认可在“扫描与队列”的“卡顿规避”中设置。关闭分卷压缩后不再自动分卷；分卷发布、校验、删除与回滚始终按整组处理。</p>
+                <p class="safety-note"><span>分卷压缩默认需要手动确认，可在扫描与队列的卡顿规避中设置关闭。</span><br><span>关闭分卷压缩后不再自动分卷；分卷发布、校验、删除与回滚始终按整组处理。</span></p>
               </div>
             </details>
           </section>
@@ -469,7 +469,7 @@
     <div id="onboarding-spotlight-secondary" class="onboarding-spotlight secondary" aria-hidden="true" hidden></div>
     <section id="onboarding-card" class="onboarding-card" role="dialog" aria-labelledby="onboarding-title" aria-describedby="onboarding-copy">
       <button id="close-onboarding" class="dialog-close" type="button" aria-label="关闭">×</button>
-      <p id="onboarding-progress" class="step">新手引导 · 1/5</p>
+      <p id="onboarding-progress" class="step">新手引导 · 1/6</p>
       <div id="onboarding-language-choice" class="onboarding-language-choice" role="group" aria-label="语言/Language">
         <span>语言/Language</span>
         <div class="onboarding-language-options">

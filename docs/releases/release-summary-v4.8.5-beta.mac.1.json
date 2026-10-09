@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "version": "4.8.5-beta.mac.1",
-  "readmeVersion": "4.8.4",
+  "readmeVersion": "4.8.5",
   "notes": {
     "zh-CN": [
       "Mac Beta 覆盖上次公开 Mac Beta 以来的共享归档、队列、仓库和 CLI/MCP 改进；Windows 正式版规范基线为 4.8.4。",

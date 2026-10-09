@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "version": "4.8.5",
-  "readmeVersion": "4.8.4",
+  "readmeVersion": "4.8.5",
   "notes": {
     "zh-CN": [
       "Windows 便携包新增 7z 并排除文档图片以减小体积；更新器优先校验 7z，仅在附件缺失时回退同版本 ZIP，并可选择更新的 Windows 正式版。",

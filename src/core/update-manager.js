@@ -10,6 +10,8 @@ const { Readable } = require('node:stream');
 const { verifyFileIntegrityEntries } = require('./tool-integrity');
 const { checkCnbForUpdates, compareVersions, resolveCnbConfig } = require('./update-checker');
 const { compactReleaseNotesPayload } = require('./release-notes');
+const { beginUpdateRun, cleanupUpdateRuns, discardUpdateRun, withUpdateOperation,
+  finishUpdateRun, claimUpdateRun, setUpdateRunState, readJson, runActive } = require('./update-storage');
 
 const execFileAsync = promisify(execFile);
 const UPDATE_LAUNCH_TIMEOUT_MS = 8_000;
@@ -113,8 +115,8 @@ try {
 
   Set-Content -LiteralPath (Join-Path $runRoot 'completed.json') -Value (@{ version = $version; completedAt = (Get-Date).ToString('o') } | ConvertTo-Json) -Encoding UTF8
   Write-UpdateLog '更新验证成功。'
-  $cleanup = "Start-Sleep -Seconds 3; Remove-Item -LiteralPath '$($runRoot.Replace("'", "''"))' -Recurse -Force -ErrorAction SilentlyContinue"
-  Start-Process powershell.exe -ArgumentList '-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-Command',$cleanup -WindowStyle Hidden
+  # The new application cleans this run after the worker exits. Keeping cleanup
+  # in one place also removes earlier abandoned runs without racing this worker.
 }
 catch {
   Write-UpdateLog "更新失败：$($_.Exception.Message)"
@@ -205,7 +207,7 @@ async function writeUpdateSuccessNotice(prepared) {
   return noticeFile;
 }
 
-async function readUpdateSuccessNotice({ userDataDirectory, noticeFile, currentVersion }) {
+async function readUpdateSuccessNotice({ userDataDirectory, noticeFile, currentVersion, includeAcknowledged = false }) {
   const updatesRoot = path.join(path.resolve(userDataDirectory), 'updates');
   let resolvedNoticeFile = noticeFile ? path.resolve(String(noticeFile)) : '';
   if (!resolvedNoticeFile) {
@@ -251,12 +253,15 @@ async function readUpdateSuccessNotice({ userDataDirectory, noticeFile, currentV
     throw new Error(`无法读取更新完成提示：${error.message}`);
   }
   if (notice.schemaVersion !== 1) throw new Error('更新完成提示版本不受支持。');
+  const acknowledged = await exists(path.join(path.dirname(resolvedNoticeFile), 'acknowledged.json'));
+  if (acknowledged && !includeAcknowledged) return null;
   const toVersion = normalizeVersion(notice.toVersion);
   if (!toVersion || toVersion !== normalizeVersion(currentVersion)) return null;
   return {
     fromVersion: normalizeVersion(notice.fromVersion),
     toVersion,
     source: notice.source === 'package' ? 'package' : 'automatic',
+    acknowledged,
     provider: ['github', 'cnb'].includes(notice.provider) ? notice.provider : '',
     releaseUrl: String(notice.releaseUrl || '').slice(0, 2_000),
     releaseNotes: compactReleaseNotesPayload(notice.releaseNotes),
@@ -521,7 +526,7 @@ async function prepareOnlineUpdate(options, { prepareImpl, checkCnbImpl = checkC
   }
 }
 
-async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath, currentVersion, release, fetchImpl, onProgress = () => {}, providerConfig, environment = process.env, confirmedDigest = '' }) {
+async function prepareUpdateImpl({ applicationRoot, userDataDirectory, sevenZipPath, currentVersion, release, fetchImpl, onProgress = () => {}, providerConfig, environment = process.env, confirmedDigest = '' }) {
   if (process.platform !== 'win32') throw new Error('自动更新目前仅支持 Windows 便携版。');
   if (!release?.asset?.downloadUrl) throw new Error('这个 Release 没有可用的 Windows 更新包。');
   const trust = resolveDownloadTrust(release, providerConfig, environment);
@@ -531,24 +536,26 @@ async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath,
   if (confirmedDigest && expectedDigest !== normalizeDigest(confirmedDigest)) {
     throw new Error('CNB 更新包摘要与 GitHub 已确认的摘要不一致，已停止更新。');
   }
-  const version = String(release.latestVersion || '').replace(/[^0-9A-Za-z.-]/g, '_');
-  const runRoot = path.join(path.resolve(userDataDirectory), 'updates', `${version}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`);
-  const archivePath = path.join(runRoot, /\.7z$/i.test(release.asset.name) ? 'package.7z' : 'package.zip');
+  const { runRoot, archivePath, reused } = await beginUpdateRun({ userDataDirectory, kind: 'portable',
+    version: normalizeVersion(release.latestVersion), assetName: release.asset.name, digest: expectedDigest,
+    applicationRoot, currentVersion, hashFile });
   const extractRoot = path.join(runRoot, 'extracted');
   try {
     await fsp.mkdir(runRoot, { recursive: true });
-    await downloadFile(release.asset.downloadUrl, archivePath, fetchImpl, onProgress, trust);
+    if (!reused) await downloadFile(release.asset.downloadUrl, archivePath, fetchImpl, onProgress, trust);
     onProgress({ stage: 'verifying', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
     const actualDigest = await hashFile(archivePath);
     if (actualDigest !== expectedDigest) throw new Error('更新包 SHA256 校验失败，文件可能已损坏。');
     await extractArchive(sevenZipPath, archivePath, extractRoot);
     const packageRoot = await locatePackageRoot(extractRoot);
     const validated = await validateUpdatePackage(packageRoot, currentVersion, release.latestVersion);
+    await finishUpdateRun(runRoot, { userDataDirectory, currentVersion, applicationRoot });
     onProgress({ stage: 'prepared', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
     return {
       runRoot,
       packageRoot,
       archivePath,
+      reused,
       version: release.latestVersion,
       currentVersion,
       applicationRoot: path.resolve(applicationRoot),
@@ -560,7 +567,7 @@ async function prepareUpdate({ applicationRoot, userDataDirectory, sevenZipPath,
     };
   } catch (error) {
     error.updateExpectedDigest = expectedDigest;
-    await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
+    await discardUpdateRun(runRoot);
     throw error;
   }
 }
@@ -582,7 +589,7 @@ function validateInstalledPackageVersion(packagePath, currentVersion, expectedVe
   return version;
 }
 
-async function prepareInstalledUpdate({ userDataDirectory, currentVersion, release, fetchImpl, onProgress = () => {}, providerConfig, environment = process.env, confirmedDigest = '' }) {
+async function prepareInstalledUpdateImpl({ userDataDirectory, currentVersion, release, fetchImpl, onProgress = () => {}, providerConfig, environment = process.env, confirmedDigest = '' }) {
   if (process.platform !== 'win32') throw new Error('安装版自动更新目前仅支持 Windows。');
   if (!release?.asset?.downloadUrl) throw new Error('这个 Release 没有可用的 Windows 安装程序。');
   const version = validateInstalledPackageVersion(release.asset.name, currentVersion, release.latestVersion);
@@ -593,22 +600,20 @@ async function prepareInstalledUpdate({ userDataDirectory, currentVersion, relea
   if (confirmedDigest && expectedDigest !== normalizeDigest(confirmedDigest)) {
     throw new Error('CNB 更新包摘要与 GitHub 已确认的摘要不一致，已停止更新。');
   }
-  const runRoot = path.join(
-    path.resolve(userDataDirectory),
-    'updates',
-    `installer-${version}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
-  );
-  const installerPath = path.join(runRoot, path.basename(release.asset.name));
+  const { runRoot, archivePath: installerPath, reused } = await beginUpdateRun({ userDataDirectory,
+    kind: 'installed', version, assetName: release.asset.name, digest: expectedDigest, currentVersion, hashFile });
   try {
     await fsp.mkdir(runRoot, { recursive: true });
-    await downloadFile(release.asset.downloadUrl, installerPath, fetchImpl, onProgress, trust);
+    if (!reused) await downloadFile(release.asset.downloadUrl, installerPath, fetchImpl, onProgress, trust);
     onProgress({ stage: 'verifying', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
     const actualDigest = await hashFile(installerPath);
     if (actualDigest !== expectedDigest) throw new Error('安装程序 SHA256 校验失败，文件可能已损坏。');
+    await finishUpdateRun(runRoot, { userDataDirectory, currentVersion });
     onProgress({ stage: 'prepared', downloadedBytes: release.asset.size || 0, totalBytes: release.asset.size || 0, percentage: 100 });
     return {
       runRoot,
       installerPath,
+      reused,
       version,
       currentVersion,
       source: 'automatic',
@@ -619,12 +624,12 @@ async function prepareInstalledUpdate({ userDataDirectory, currentVersion, relea
     };
   } catch (error) {
     error.updateExpectedDigest = expectedDigest;
-    await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
+    await discardUpdateRun(runRoot);
     throw error;
   }
 }
 
-async function prepareLocalInstalledUpdate({ userDataDirectory, currentVersion, packagePath, release = null, onProgress = () => {} }) {
+async function prepareLocalInstalledUpdateImpl({ userDataDirectory, currentVersion, packagePath, release = null, onProgress = () => {} }) {
   if (process.platform !== 'win32') throw new Error('从安装程序更新目前仅支持 Windows。');
   const sourcePath = path.resolve(String(packagePath || '').trim());
   const version = validateInstalledPackageVersion(sourcePath, currentVersion);
@@ -636,22 +641,23 @@ async function prepareLocalInstalledUpdate({ userDataDirectory, currentVersion, 
     throw error;
   }
   if (!sourceStats.isFile()) throw new Error('所选安装程序不是文件。');
-  const runRoot = path.join(
-    path.resolve(userDataDirectory),
-    'updates',
-    `installer-local-${version}-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`
-  );
-  const installerPath = path.join(runRoot, path.basename(sourcePath));
+  const digest = await hashFile(sourcePath);
+  const { runRoot, archivePath: installerPath, reused } = await beginUpdateRun({ userDataDirectory,
+    kind: 'installed', version, assetName: path.basename(sourcePath), digest, currentVersion, hashFile });
   try {
     await fsp.mkdir(runRoot, { recursive: true });
     onProgress({ stage: 'copying', downloadedBytes: 0, totalBytes: sourceStats.size, percentage: 0 });
-    await fsp.copyFile(sourcePath, installerPath);
+    if (!reused) await fsp.copyFile(sourcePath, installerPath);
     onProgress({ stage: 'verifying', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
     validateInstalledPackageVersion(installerPath, currentVersion, version);
+    if (await hashFile(installerPath) !== digest) throw new Error('安装程序在准备期间发生变化。');
+    await finishUpdateRun(runRoot, { userDataDirectory, currentVersion });
     onProgress({ stage: 'prepared', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
     return {
       runRoot,
       installerPath,
+      reused,
+      digest,
       version,
       currentVersion,
       source: 'package',
@@ -659,14 +665,17 @@ async function prepareLocalInstalledUpdate({ userDataDirectory, currentVersion, 
       releaseNotes: compactReleaseNotesPayload(release?.releaseNotes)
     };
   } catch (error) {
-    await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
+    await discardUpdateRun(runRoot);
     throw error;
   }
 }
 
 async function launchInstalledUpdate({ prepared }, { spawnImpl = spawn } = {}) {
+  let child;
+  try {
+  await claimUpdateRun(prepared.runRoot, 'launching');
   const noticeFile = await writeUpdateSuccessNotice(prepared);
-  const child = spawnImpl(prepared.installerPath, [], {
+  child = spawnImpl(prepared.installerPath, [], {
     cwd: path.dirname(prepared.installerPath),
     detached: true,
     windowsHide: false,
@@ -677,11 +686,16 @@ async function launchInstalledUpdate({ prepared }, { spawnImpl = spawn } = {}) {
     child.once('error', reject);
   });
   child.unref();
+  await setUpdateRunState(prepared.runRoot, 'applying', { workerPid: child.pid });
   return { installerPid: child.pid, noticeFile, runRoot: prepared.runRoot };
+  } catch (error) {
+    await setUpdateRunState(prepared.runRoot, 'ready', { workerPid: child?.pid || 0 });
+    throw error;
+  }
 }
 
 
-async function prepareLocalUpdate({
+async function prepareLocalUpdateImpl({
   applicationRoot,
   userDataDirectory,
   sevenZipPath,
@@ -700,6 +714,7 @@ async function prepareLocalUpdate({
     throw error;
   }
   if (!sourceStats.isFile()) throw new Error('所选更新包不是文件。');
+  await cleanupUpdateRuns({ userDataDirectory, currentVersion, applicationRoot, beforeUpdate: true, operationOwned: true });
   const runRoot = path.join(
     path.resolve(userDataDirectory),
     'updates',
@@ -709,6 +724,8 @@ async function prepareLocalUpdate({
   const extractRoot = path.join(runRoot, 'extracted');
   try {
     await fsp.mkdir(runRoot, { recursive: true });
+    await fsp.writeFile(path.join(runRoot, 'update-run.json'), JSON.stringify({ schemaVersion: 1, kind: 'portable',
+      version: '', phase: 'preparing', ownerPid: process.pid }));
     onProgress({ stage: 'copying', downloadedBytes: 0, totalBytes: sourceStats.size, percentage: 0 });
     await fsp.copyFile(sourcePath, archivePath);
     onProgress({ stage: 'copying', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
@@ -716,6 +733,8 @@ async function prepareLocalUpdate({
     const packageRoot = await locatePackageRoot(extractRoot);
     onProgress({ stage: 'verifying', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
     const { version, releaseNotes } = await validateUpdatePackage(packageRoot, currentVersion);
+    await finishUpdateRun(runRoot, { userDataDirectory, currentVersion, applicationRoot, record: {
+      version, assetName: path.basename(sourcePath), archiveName: path.basename(archivePath), digest: await hashFile(archivePath) } });
     onProgress({ stage: 'prepared', downloadedBytes: sourceStats.size, totalBytes: sourceStats.size, percentage: 100 });
     return {
       runRoot,
@@ -728,7 +747,7 @@ async function prepareLocalUpdate({
       releaseNotes
     };
   } catch (error) {
-    await fsp.rm(runRoot, { recursive: true, force: true }).catch(() => {});
+    await discardUpdateRun(runRoot);
     throw error;
   }
 }
@@ -766,7 +785,7 @@ async function waitForUpdaterStart(child, startedFile, {
   throw new Error(`更新助手在 ${Math.ceil(timeoutMs / 1000)} 秒内没有确认启动。`);
 }
 
-async function launchUpdate({ prepared, targetPid }, {
+async function launchUpdateImpl({ prepared, targetPid }, {
   spawnImpl = spawn,
   existsSyncImpl = fs.existsSync,
   startupTimeoutMs = UPDATE_LAUNCH_TIMEOUT_MS,
@@ -832,6 +851,8 @@ async function launchUpdate({ prepared, targetPid }, {
     throw wrapped;
   }
   child.unref();
+  const started = await readJson(startedFile);
+  await setUpdateRunState(prepared.runRoot, 'applying', { workerPid: started?.pid || child.pid });
   return {
     validationFile,
     startedFile,
@@ -894,19 +915,63 @@ async function consumeUpdateFailure(userDataDirectory) {
   return failures[0] || null;
 }
 
-async function cleanupSuccessfulUpdateRuns(userDataDirectory) {
-  const updatesRoot = path.join(path.resolve(userDataDirectory), 'updates');
-  let entries;
-  try { entries = await fsp.readdir(updatesRoot, { withFileTypes: true }); } catch (error) {
-    if (error.code === 'ENOENT') return;
-    throw error;
+async function cleanupSuccessfulUpdateRuns(userDataDirectory, options = {}) {
+  if (options.waitForRunRoot) await waitForUpdateRunExit(options.waitForRunRoot);
+  await cleanupUpdateRuns({ userDataDirectory, ...options,
+    isObsolete: version => Boolean(version && options.currentVersion &&
+      compareVersions(normalizeVersion(version), normalizeVersion(options.currentVersion)) <= 0) });
+}
+
+async function waitForUpdateRunExit(runRoot) {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && await runActive(runRoot, await readJson(path.join(runRoot, 'update-run.json')))) {
+    await new Promise(resolve => setTimeout(resolve, 200));
   }
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const runRoot = path.join(updatesRoot, entry.name);
-    if (await exists(path.join(runRoot, 'completed.json'))) {
-      await fsp.rm(runRoot, { recursive: true, force: true });
-    }
+}
+
+async function acknowledgeUpdateSuccess(notice, { userDataDirectory, applicationRoot, currentVersion }) {
+  // Only the version actually running can authorize retirement of rollback files.
+  if (normalizeVersion(notice.toVersion) !== normalizeVersion(currentVersion)) return;
+  await fsp.writeFile(path.join(notice.runRoot, 'acknowledged.json'), JSON.stringify({ version: currentVersion }));
+  await waitForUpdateRunExit(notice.runRoot);
+  await cleanupSuccessfulUpdateRuns(userDataDirectory, { applicationRoot, currentVersion, confirmedSuccess: true });
+}
+
+async function withPreparedUpdate(prepared, action) {
+  try {
+    await claimUpdateRun(prepared.runRoot, 'confirming');
+    return await action();
+  }
+  finally {
+    const record = await readJson(path.join(prepared.runRoot, 'update-run.json'));
+    if (['prepared', 'confirming'].includes(record?.phase)) await setUpdateRunState(prepared.runRoot, 'ready');
+  }
+}
+
+function prepareUpdate(options) {
+  if (!options.userDataDirectory) return prepareUpdateImpl(options);
+  return withUpdateOperation(options.userDataDirectory, () => prepareUpdateImpl(options));
+}
+function prepareInstalledUpdate(options) {
+  if (!options.userDataDirectory) return prepareInstalledUpdateImpl(options);
+  return withUpdateOperation(options.userDataDirectory, () => prepareInstalledUpdateImpl(options));
+}
+function prepareLocalInstalledUpdate(options) {
+  if (!options.userDataDirectory) return prepareLocalInstalledUpdateImpl(options);
+  return withUpdateOperation(options.userDataDirectory, () => prepareLocalInstalledUpdateImpl(options));
+}
+function prepareLocalUpdate(options) {
+  if (!options.userDataDirectory) return prepareLocalUpdateImpl(options);
+  return withUpdateOperation(options.userDataDirectory, () => prepareLocalUpdateImpl(options));
+}
+async function launchUpdate(options, dependencies) {
+  try {
+    await claimUpdateRun(options.prepared.runRoot, 'launching');
+    return await launchUpdateImpl(options, dependencies);
+  }
+  catch (error) {
+    await setUpdateRunState(options.prepared.runRoot, 'ready', { workerPid: 0 });
+    throw error;
   }
 }
 
@@ -932,6 +997,8 @@ module.exports = {
   validateUpdatePackage,
   launchUpdate,
   cleanupSuccessfulUpdateRuns,
+  acknowledgeUpdateSuccess,
+  withPreparedUpdate,
   consumeUpdateFailure,
   readUpdateSuccessNotice,
   writeUpdateSuccessNotice,

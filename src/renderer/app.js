@@ -505,7 +505,7 @@ async function confirmDirectoryRefresh(message, title = '校对更新') {
 const onboardingSteps = [
   {
     target: '.nav-button[data-page="workbench-page"]',
-    progress: '新手引导 · 1/5',
+    progress: '新手引导 · 1/6',
     title: '仓库还是空的',
     copy: '先到归档工作台选择文件夹或视频，完成第一次入库后，这里就会显示可以搜索和整理的内容。',
     nextLabel: '进入归档工作台'
@@ -513,30 +513,37 @@ const onboardingSteps = [
   {
     target: '.location-panel',
     placement: 'right',
-    progress: '新手引导 · 2/5',
+    progress: '新手引导 · 2/6',
     title: '首先进行收纳设置',
     copy: '',
     nextLabel: '下一步'
   },
   {
     target: ['#source-disposition-options', '#source-safety-chip'],
-    progress: '新手引导 · 3/5',
+    progress: '新手引导 · 3/6',
     title: '可以设置收纳后，自动改动原文件的位置，不勾选任何选项，就不会移动',
     copy: '',
     nextLabel: '下一步'
   },
   {
-    target: '.queue-actions',
-    progress: '新手引导 · 4/5',
-    title: '把内容加入队列并开始',
+    target: '.queue-scan-actions',
+    progress: '新手引导 · 4/6',
+    title: '把内容加入队列',
     copy: '',
     nextLabel: '下一步'
   },
   {
     target: '#drop-zone',
-    progress: '新手引导 · 5/5',
+    progress: '新手引导 · 5/6',
     title: '也可以直接把要收纳的内容拖拽到这里，快速开始',
     copy: '默认会过滤小于 100 MB 的项目；如需收纳更小的项目，请在现有设置中调整小项目过滤阈值。',
+    nextLabel: '下一步'
+  },
+  {
+    target: '.queue-run-actions',
+    progress: '新手引导 · 6/6',
+    title: '最后，选择入库方式',
+    copy: '点击“不压缩入库”或“压缩入库”，开始处理队列中的内容。',
     nextLabel: '完成'
   }
 ];
@@ -1518,14 +1525,12 @@ function updateVolumeControls({ unitChanged = false, normalize = true } = {}) {
   }
   if (nextUnit === 'gb') {
     elements.volumeSize.min = '1';
-    elements.volumeSize.max = '100';
     elements.volumeSize.step = '0.25';
-    if (normalize) size = Math.min(100, Math.max(1, size));
+    if (normalize) size = Math.max(1, size);
   } else {
     elements.volumeSize.min = '64';
-    elements.volumeSize.max = '102400';
     elements.volumeSize.step = '1';
-    if (normalize) size = Math.min(102400, Math.max(64, Math.round(size)));
+    if (normalize) size = Math.max(64, Math.round(size));
   }
   if (normalize) elements.volumeSize.value = String(size);
   elements.volumeUnit.dataset.previousUnit = nextUnit;
@@ -1738,8 +1743,8 @@ function renderJobs(jobs) {
     if (job.status === 'awaiting_confirmation' && !job.backupLocationConfirmation && job.confirmationReasons?.includes('large_task')) {
       const requestedVolumeBytes = Number(job.archiveVolumeBytes);
       const configuredVolumeBytes = job.archiveVolumeEnabled === true &&
-        Number.isInteger(requestedVolumeBytes) &&
-        requestedVolumeBytes >= 64 * 1024 ** 2 && requestedVolumeBytes <= 100 * 1024 ** 3
+        Number.isSafeInteger(requestedVolumeBytes) &&
+        requestedVolumeBytes >= 64 * 1024 ** 2
         ? requestedVolumeBytes
         : 10 * 1024 ** 3;
       actionCell.append(actionButton(`确认并按 ${formatBytes(configuredVolumeBytes)} 分卷`, 'confirm', job.id, 'confirm'));
@@ -2062,23 +2067,27 @@ function renderCatalog(catalog) {
           : formatBytes(record.archiveTotalBytes)}`),
       makeCatalogDate('small', '', record.inventoryDate || record.completedAt, '入库')
     );
-    const visibleTags = catalogTags(record).filter((tag) => !hideUncompressedTag || tag !== '未压缩');
-    if (visibleTags.length > 0) {
-      const tags = make('div', 'catalog-card-tags');
-      for (const tag of visibleTags.slice(0, catalogViewMode === 'grid' ? 4 : 2)) {
-        tags.append(tag === '未压缩'
-          ? make('span', 'uncompressed-tag', tag)
-          : makeUserText('span', '', tag));
-      }
-      info.append(tags);
-    }
     if (record.backupLocation) {
       const backupChip = make('span', 'backup-location-chip');
-      backupChip.append(make('span', '', '备份 · '), makeUserText('span', '', record.backupLocation));
+      const backupValue = makeUserText('span', '', record.backupLocation);
+      backupValue.title = record.backupLocation;
+      backupChip.append(make('span', '', '备份 · '), backupValue);
       info.append(backupChip);
     }
     if (record.possibleDuplicate) {
       info.append(make('span', 'duplicate-chip', `可能重复${record.similarCount ? ` · ${record.similarCount} 个相似项` : ''}`));
+    }
+    const visibleTags = catalogTags(record).filter((tag) => !hideUncompressedTag || tag !== '未压缩');
+    if (visibleTags.length > 0) {
+      const tags = make('div', 'catalog-card-tags');
+      for (const tag of visibleTags) {
+        const chip = tag === '未压缩'
+          ? make('span', 'uncompressed-tag', tag)
+          : makeUserText('span', '', tag);
+        chip.title = tag;
+        tags.append(chip);
+      }
+      info.append(tags);
     }
     button.append(cover, info);
     card.append(checkbox, button);
@@ -4823,8 +4832,13 @@ elements.warehouseDiscovery.addEventListener('click', (event) => {
 function showDirectoryRefreshSubmission(result) {
   render(result.state);
   if (result.failedCount > 0) {
-    const firstReason = result.failures?.[0]?.reason ? `：${result.failures[0].reason}` : '';
-    showToast(`${result.failedCount} 个项目未能开始${firstReason}；${result.queuedCount} 个已开始检查`, true);
+    const firstReason = result.failures?.[0]?.reason;
+    if (firstReason && result.failedCount === 1 && result.queuedCount === 0) {
+      showToast(firstReason, true, 12000);
+    } else {
+      const summary = `${result.failedCount} 个项目未能更新；${result.queuedCount} 个已开始检查`;
+      showToast(firstReason ? `${firstReason}\n${summary}` : summary, true, 12000);
+    }
     return;
   }
   if (result.queuedCount <= 0) return;

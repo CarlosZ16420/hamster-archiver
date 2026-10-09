@@ -60,6 +60,8 @@ Decision receipts include `questionLocalized.en-US` and `questionLocalized.zh-CN
 
 Advanced `task.retry` accepts `jobIds` and/or `failureSources` to select recorded failed items. It never retries completed or user-cancelled jobs. Intake failures that were not selected remain in the new attempt, while the old terminal receipt remains in attempt history. A recovery-required task needs manual review before retry.
 
+A newly recorded v2 preparation failure can be cancelled with `task.cancel` when the ledger proves that none of its projects started execution or committed a result. Cancellation retains the preparation error, clears its pending projects, and allows a new corrected request. Older recovery entries without this evidence, interrupted execution and source-disposition failures still require manual review. / 新记录的 v2 准备失败，在账本明确证明所有项目尚未执行或提交结果时，可通过 `task.cancel` 安全取消；原准备错误保留，待处理项目清空，之后可提交修正后的新请求。缺少此证据的旧恢复记录、执行中断及源文件处置失败仍需人工检查。
+
 Terminal receipts are saved with an `asOf` time. `task get` first checks the saved receipt for the current warehouse without starting the app; it is a historical result, not a new disk verification. Missing local evidence falls through to the online lookup. Jobs removed from the visible queue retain their task receipt.
 
 ## Submission recovery
@@ -69,6 +71,8 @@ Before sending v2 intake, the CLI writes a small `requestFile` in the effective 
 `task pending` checks every request file and preserves unknown, accepted and damaged entries. On a later CLI call, accepted files are reconciled against terminal receipts for the same warehouse. The CLI then retains at most 256 completed, failed or cancelled request files; the task ledger remains the authoritative history. Unknown or in-flight files are retained for explicit recovery.
 
 An error result has `schemaVersion:2`, `ok:false`, and `error` fields including `code`, `stage`, `message`, `acceptance`, `requestId`, `taskId`, `retryClass`, `safeNextAction`, and `diagnosticRef`. `acceptance` is `not_accepted`, `accepted`, or `unknown`; a transport failure after sending normally reports `unknown` and links the request file. `call --input -` reads one UTF-8 JSON object from stdin; a file input is also a capability input object, not an outer MCP request. Raw `call` passes `--confirmation-token` outside the business input.
+
+A validation error explicitly rejected before task registration reports `not_accepted`. Its local request is retained as failed history, is excluded from `task pending`, and points to the required correction rather than resume. Errors after registration or without a conclusive response remain conservative and require reconciliation. / 在登记任务前已明确拒绝的校验错误会返回 `not_accepted`；本地请求保留为失败历史，不列入待恢复请求，并提示修正所需字段。登记后出错或未取得明确回执时，仍保留待核对状态。
 
 For a stale local connection, `knownCause` is taken from evidence for the same application instance. The app keeps a bounded diagnostic record in its effective user data area; missing or mismatched evidence reports `unknown`. A GPU child-process event is recorded as `gpu_process_failure` without claiming that it caused every later main-process exit.
 

@@ -164,7 +164,8 @@ async function main() {
         { from: 'docs/AI-TASK-RECEIPT-v2.schema.json', to: 'docs/AI-TASK-RECEIPT-v2.schema.json' },
         { from: 'LICENSE', to: 'LICENSE' },
         { from: 'llms.txt', to: 'llms.txt' },
-        { from: 'platforms/macos/README.md', to: 'README.md' }
+        { from: 'platforms/macos/README.md', to: 'README.md' },
+        { from: 'platforms/macos/README.en.md', to: 'README.en.md' }
       ],
       afterPack,
       mac: {

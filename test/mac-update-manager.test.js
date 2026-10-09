@@ -85,7 +85,7 @@ async function fixture(t) {
   await fs.writeFile(path.join(packageRoot, 'Contents', 'Resources', 'app', 'package.json'), JSON.stringify({ version: '4.8.0-beta.mac.2' }));
   await fs.writeFile(path.join(root, 'data', 'settings.json'), 'user data must stay');
   const info = await fs.lstat(applicationBundle);
-  const control = { runRoot, applicationBundle, packageRoot, targetPid: 123456,
+  const control = { runRoot, applicationBundle, packageRoot, targetPid: 123456, language: 'en-US',
     version: '4.8.0-beta.mac.2', targetIdentity: { dev: info.dev, ino: info.ino } };
   const calls = [];
   const executeImpl = async (command, args, options) => {
@@ -94,12 +94,19 @@ async function fixture(t) {
     if (command.endsWith('Hamster Archiver')) return { stdout: 'HAMSTER_STARTUP_INTEGRITY_TEST_OK' };
     return { stdout: '' };
   };
-  return { root, control, calls, executeImpl };
+  const launchImpl = async (executable, environment) => {
+    calls.push({ command: executable, environment });
+    assert.equal(executable, path.join(applicationBundle, 'Contents', 'MacOS', 'Hamster Archiver'));
+    await fs.writeFile(environment.HAMSTER_UPDATE_VALIDATION_FILE, JSON.stringify({
+      version: control.version, applicationBundle
+    }));
+  };
+  return { root, control, calls, executeImpl, launchImpl };
 }
 
 test('Mac replacement verifies a fresh profile, preserves data and retains the original app', async t => {
   const f = await fixture(t);
-  await applyMacUpdate(f.control, { alive: () => false, executeImpl: f.executeImpl });
+  await applyMacUpdate(f.control, { alive: () => false, executeImpl: f.executeImpl, launchImpl: f.launchImpl });
   assert.equal(await fs.readFile(path.join(f.root, 'data', 'settings.json'), 'utf8'), 'user data must stay');
   const validation = f.calls.find(call => call.command.endsWith('Hamster Archiver'));
   assert.equal(validation.options.env.HAMSTER_STARTUP_INTEGRITY_TEST, '1');
@@ -107,7 +114,7 @@ test('Mac replacement verifies a fresh profile, preserves data and retains the o
   assert.equal(validation.options.env.HAMSTER_SMOKE_USER_DATA_DIR, path.join(f.control.runRoot, 'validation-profile'));
   const completed = JSON.parse(await fs.readFile(path.join(f.control.runRoot, 'completed.json'), 'utf8'));
   assert.equal(await fs.readFile(path.join(completed.backup, 'old.txt'), 'utf8'), 'original app');
-  assert.equal(f.calls.at(-1).command, '/usr/bin/open');
+  assert.equal(f.calls.at(-1).command, path.join(f.control.applicationBundle, 'Contents', 'MacOS', 'Hamster Archiver'));
 });
 
 test('failed isolated Mac startup leaves the installed application and user data untouched', async t => {
@@ -204,14 +211,81 @@ test('Mac refuses to replace an app reopened during isolated validation', async 
 
 test('an ambiguous Mac launch failure preserves the newly installed and previous apps', async t => {
   const f = await fixture(t);
-  await assert.rejects(applyMacUpdate(f.control, { alive: () => false, executeImpl: async (command, ...args) => {
-    if (command.endsWith('/open')) throw new Error('Launch Services failed after request');
-    return f.executeImpl(command, ...args);
-  } }), /Launch Services/);
+  await assert.rejects(applyMacUpdate(f.control, { alive: () => false, executeImpl: f.executeImpl,
+    launchImpl: async () => { throw new Error('Application launch failed after request'); }
+  }), /Application launch/);
   assert.equal(JSON.parse(await fs.readFile(path.join(f.control.applicationBundle, 'Contents', 'Resources', 'app', 'package.json'), 'utf8')).version, f.control.version);
   const failure = JSON.parse(await fs.readFile(path.join(f.control.runRoot, 'failed.json'), 'utf8'));
   assert.equal(await fs.readFile(path.join(failure.backup, 'old.txt'), 'utf8'), 'original app');
   assert.equal(await fs.readFile(path.join(f.root, 'data', 'settings.json'), 'utf8'), 'user data must stay');
+});
+
+for (const failure of ['version', 'path', 'timeout']) test(`Mac replacement cannot report success after a ${failure} startup failure`, async t => {
+  const f = await fixture(t);
+  await assert.rejects(applyMacUpdate(f.control, { alive: () => false, executeImpl: f.executeImpl,
+    validationTimeoutMs: failure === 'timeout' ? 0 : 1000,
+    launchImpl: async (_file, env) => {
+      if (failure !== 'timeout') await fs.writeFile(env.HAMSTER_UPDATE_VALIDATION_FILE, JSON.stringify({
+        version: failure === 'version' ? '4.8.0-beta.mac.1' : f.control.version,
+        applicationBundle: failure === 'path' ? f.control.packageRoot : f.control.applicationBundle
+      }));
+    }
+  }), failure === 'timeout' ? /did not confirm/ : /different version or application path/);
+  await assert.rejects(fs.access(path.join(f.control.runRoot, 'completed.json')), { code: 'ENOENT' });
+  const failed = JSON.parse(await fs.readFile(path.join(f.control.runRoot, 'failed.json'), 'utf8'));
+  assert.equal(await fs.readFile(path.join(failed.backup, 'old.txt'), 'utf8'), 'original app');
+  assert.equal(await fs.readFile(path.join(f.root, 'data', 'settings.json'), 'utf8'), 'user data must stay');
+});
+
+for (const correctPath of [true, false]) test(`legacy Mac startup reports are verified against the actual child path (${correctPath})`, async t => {
+  const f = await fixture(t);
+  const operation = applyMacUpdate(f.control, { alive: () => false,
+    launchImpl: async (_file, env) => {
+      await fs.writeFile(env.HAMSTER_UPDATE_VALIDATION_FILE, JSON.stringify({ version: f.control.version }));
+      return 424242;
+    }, executeImpl: async (command, args, options) => {
+      if (command === '/bin/ps' && args[0] === '-p') {
+        assert.equal(args[1], '424242');
+        return { stdout: correctPath ? path.join(f.control.applicationBundle, 'Contents', 'MacOS', 'Hamster Archiver') : '/Other.app/Contents/MacOS/Hamster Archiver' };
+      }
+      return f.executeImpl(command, args, options);
+    }
+  });
+  if (correctPath) {
+    await operation;
+    await fs.access(path.join(f.control.runRoot, 'completed.json'));
+  } else await assert.rejects(operation, /different version or application path/);
+});
+
+test('Mac preparation reuses a deferred DMG while rechecking the mounted app', async t => {
+  const f = await fixture(t);
+  const resources = path.join(f.control.packageRoot, 'Contents', 'Resources');
+  await fs.writeFile(path.join(resources, 'release-manifest.json'), JSON.stringify({ schemaVersion: 2,
+    platform: 'darwin-universal', version: f.control.version, commit: 'c'.repeat(40),
+    integrity: { files: await createFileIntegrityEntries(resources, ['app/package.json']) } }));
+  const content = Buffer.from('Mac cache fixture');
+  const digest = require('node:crypto').createHash('sha256').update(content).digest('hex');
+  let downloads = 0, checks = 0;
+  const options = { applicationRoot: path.join(f.control.applicationBundle, 'Contents', 'Resources'),
+    userDataDirectory: path.join(f.root, 'profile'), currentVersion: '4.8.0-beta.mac.1',
+    release: { latestVersion: f.control.version, asset: { name: `HamsterArchiver-v${f.control.version}-mac-universal.dmg`,
+      downloadUrl: 'https://github.com/fixture.dmg', digest } },
+    fetchImpl: async () => { downloads++; return new Response(content); } };
+  const dependencies = { platform: 'darwin', executeImpl: async (command, args) => {
+    if (command.endsWith('hdiutil') && args[0] === 'attach') {
+      await fs.cp(f.control.packageRoot, path.join(args[args.indexOf('-mountpoint') + 1], 'Hamster Archiver.app'), { recursive: true });
+    }
+    if (command.endsWith('ditto')) await fs.cp(args[0], args[1], { recursive: true });
+    if (command.endsWith('codesign')) checks++;
+    return { stdout: command.endsWith('plutil') ? 'com.carlosz.hamsterarchiver' : '' };
+  } };
+  const first = await prepareMacUpdate(options, dependencies);
+  await require('../src/core/update-manager').withPreparedUpdate(first, async () => {});
+  const reused = await prepareMacUpdate(options, dependencies);
+  assert.equal(reused.reused, true);
+  assert.equal(downloads, 1);
+  assert.equal(checks, 4);
+  assert.deepEqual(await fs.readdir(path.join(options.userDataDirectory, 'updates')), [path.basename(reused.runRoot)]);
 });
 
 test('real Mac DMG staging and application replacement preserve an isolated Warehouse', {
@@ -239,7 +313,10 @@ test('real Mac DMG staging and application replacement preserve an isolated Ware
     }, fetchImpl: async () => new Response(await fs.readFile(dmg)) });
   let opened = false;
   await applyMacUpdate({ ...prepared, targetPid: process.pid }, {
-    alive: () => false, executeImpl: async (command, args, options) => {
+    alive: () => false, launchImpl: async (_file, env) => {
+      opened = true;
+      await fs.writeFile(env.HAMSTER_UPDATE_VALIDATION_FILE, JSON.stringify({ version: manifest.version, applicationBundle: installed }));
+    }, executeImpl: async (command, args, options) => {
       if (command === '/usr/bin/open') { opened = true; return { stdout: '' }; }
       return execute(command, args, options);
     }
