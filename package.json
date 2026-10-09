@@ -41,7 +41,7 @@
   },
   "devDependencies": {
     "electron": "43.7.1",
-    "electron-builder": "26.15.7",
+    "electron-builder": "26.17.0",
     "resedit": "3.0.2"
   }
 }
