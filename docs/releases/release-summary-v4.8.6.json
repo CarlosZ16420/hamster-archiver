@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "version": "4.8.6",
+  "readmeVersion": "4.8.6",
+  "notes": {
+    "zh-CN": [
+      "修复 Windows 沙箱启动权限、更新缓存复用与清理，并持久保存更新提示确认。",
+      "来源读取失败时保留原仓库记录，修复队列暂停与取消收尾，并明确 CLI/MCP 请求受理和安全取消状态。",
+      "移除分卷大小的固定 100 GiB 上限，补齐首次入库引导、标签显示与双语指南；资料格式兼容，无需迁移。"
+    ],
+    "en-US": [
+      "Fix Windows sandbox startup permissions and update-cache reuse and cleanup; persist update-notice acknowledgments.",
+      "Preserve Warehouse records after source-read failures, fix queue pause and cancellation completion, and clarify CLI/MCP acceptance and safe cancellation.",
+      "Remove the fixed 100 GiB volume ceiling and improve first-intake onboarding, tag display and bilingual guides; data remains compatible without migration."
+    ]
+  }
+}

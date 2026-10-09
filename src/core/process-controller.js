@@ -107,7 +107,8 @@ class PauseController {
   }
 
   async resume() {
-    if (!this.paused && !this.processSuspended) return;
+    // A failed native pause can clear paused while cooperative work is still waiting.
+    if (!this.paused && !this.processSuspended && this.waiters.size === 0) return;
     if (this.childPid && this.processSuspended) {
       await this.processControl(this.childPid, 'resume');
     }

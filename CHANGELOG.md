@@ -1,5 +1,25 @@
 # Changelog
 
+## 4.8.6 · Windows Stable
+
+### 中文
+
+覆盖公开 Windows 正式版 4.8.5 → 4.8.6：修复沙箱启动权限、更新缓存与确认提示；来源读取失败时保留原仓库记录，修复队列暂停和取消收尾，明确 CLI/MCP 受理与安全取消。移除分卷大小固定 100 GiB 上限，保留默认手动确认，补齐入库引导、全部标签、来源恢复指引与双语指南。资料保持兼容，无需迁移。完整双语说明见 docs/releases/public-release-notes-v4.8.6.md。
+
+### English
+
+Covers public Windows stable 4.8.5 → 4.8.6: fixes sandbox startup permissions, update caches and acknowledged notices; preserves Warehouse records after source-read failures, fixes queue pause and cancellation completion, and clarifies CLI/MCP acceptance and safe cancellation. Removes the fixed 100 GiB volume ceiling while retaining default manual confirmation, and improves onboarding, complete tags, source-recovery guidance and bilingual guides. Data stays compatible without migration. See docs/releases/public-release-notes-v4.8.6.md for full bilingual notes.
+
+## 4.8.6-beta.mac.1 · macOS Beta
+
+### 中文
+
+覆盖公开 Mac Beta 4.8.5-beta.mac.1 → 4.8.6-beta.mac.1：修复更新缓存、启动验证与主窗口就绪后的恢复文件清理和提示确认状态，包含同来源的入库保护、队列与自动化修复、分卷和界面改善。提供 DMG、.app ZIP 及摘要。仅临时签名，未经 Apple 公证；资料保持兼容，请先使用副本测试并保留备份。完整说明见 docs/releases/public-release-notes-v4.8.6-beta.mac.1.md。
+
+### English
+
+Covers public Mac Beta 4.8.5-beta.mac.1 → 4.8.6-beta.mac.1: fixes update caches, startup validation and recovery-file cleanup after main-window readiness and notice acknowledgments, with same-source intake protection, queue and automation fixes, volume and UI improvements. Provides DMG, .app ZIP and digests. Ad-hoc signed and not notarized by Apple; data stays compatible, and testing should use copies and backups. See docs/releases/public-release-notes-v4.8.6-beta.mac.1.md for full notes.
+
 ## 4.8.5 · Windows Stable
 
 ### 中文

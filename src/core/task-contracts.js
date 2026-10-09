@@ -44,6 +44,7 @@ function errorEnvelope(error, fallbackStage = 'request') {
       message: String(error?.message || error || 'Hamster Archiver operation failed.'),
       retryable: error?.retryable === true,
       requiredAction: error?.requiredAction || null,
+      ...(error?.acceptance ? { acceptance: error.acceptance } : {}),
       ...(error?.requiredFields ? { requiredFields: error.requiredFields } : {})
     }
   };

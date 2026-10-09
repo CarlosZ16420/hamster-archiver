@@ -975,16 +975,42 @@ test('warehouse is the default page and empty warehouses offer a dismissible onb
   assert.match(app, /target:\s*'\.location-panel',[\s\S]*?placement:\s*'right'/);
   const onboardingSource = app.slice(app.indexOf('const onboardingSteps = ['), app.indexOf('function closeOnboarding('));
   const onboarding = vm.runInNewContext(`${onboardingSource}\nonboardingSteps`);
-  assert.equal(onboarding.length, 5);
+  assert.equal(onboarding.length, 6);
   assert.deepEqual(Array.from(onboarding, (step) => step.progress), [
-    '新手引导 · 1/5', '新手引导 · 2/5', '新手引导 · 3/5', '新手引导 · 4/5', '新手引导 · 5/5'
+    '新手引导 · 1/6', '新手引导 · 2/6', '新手引导 · 3/6', '新手引导 · 4/6', '新手引导 · 5/6', '新手引导 · 6/6'
   ]);
+  assert.equal(onboarding[3].target, '.queue-scan-actions');
+  assert.equal(onboarding[3].title, '把内容加入队列');
+  assert.equal(onboarding[4].nextLabel, '下一步');
+  assert.equal(onboarding[5].target, '.queue-run-actions');
+  assert.equal(onboarding[5].nextLabel, '完成');
   assert.ok(onboarding.every((step) => step.target !== '#archive-output-directory-field'));
   assert.match(app, /target:\s*\['#source-disposition-options', '#source-safety-chip'\]/);
   assert.match(app, /target:\s*'#drop-zone'/);
   assert.match(app, /celebration-burst/);
   assert.match(app, /celebration-spark/);
   assert.match(app, /celebrateOnboardingCompletion/);
+});
+
+test('volume controls preserve sizes above 100 GiB when switching units', () => {
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  const source = app.slice(app.indexOf('function updateVolumeControls('), app.indexOf('function renderConfig('));
+  const elements = {
+    splitVolume: { checked: true },
+    volumeUnit: { value: 'gb', dataset: { previousUnit: 'gb' } },
+    volumeSize: { value: '256' },
+    volumeSetting: { classList: { toggle() {} } }
+  };
+  const context = vm.createContext({ elements, updateSettingsDigests() {} });
+  vm.runInContext(source, context);
+  vm.runInContext('updateVolumeControls()', context);
+  assert.equal(elements.volumeSize.value, '256');
+  elements.volumeUnit.value = 'mb';
+  vm.runInContext('updateVolumeControls({ unitChanged: true })', context);
+  assert.equal(elements.volumeSize.value, '262144');
+  elements.volumeUnit.value = 'gb';
+  vm.runInContext('updateVolumeControls({ unitChanged: true })', context);
+  assert.equal(elements.volumeSize.value, '256');
 });
 
 test('warehouse copy and controls use the concise labels and clarified recycle-bin warning', () => {

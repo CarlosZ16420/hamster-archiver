@@ -8,7 +8,6 @@ const { spawn } = require('node:child_process');
 const {
   ARCHIVE_PASSWORD,
   LARGE_TASK_BYTES,
-  MAX_ARCHIVE_VOLUME_BYTES,
   MIN_ARCHIVE_VOLUME_BYTES,
   PASSWORD_SCHEME
 } = require('./constants');
@@ -21,8 +20,8 @@ const { samePublishedFileIdentity } = require('./file-metadata');
 function resolveArchiveVolumeBytes(job) {
   const totalBytes = Number(job.totalBytes) || 0;
   const configuredBytes = Number(job.archiveVolumeBytes ?? LARGE_TASK_BYTES);
-  const validConfiguredSize = Number.isInteger(configuredBytes) &&
-    configuredBytes >= MIN_ARCHIVE_VOLUME_BYTES && configuredBytes <= MAX_ARCHIVE_VOLUME_BYTES;
+  const validConfiguredSize = Number.isSafeInteger(configuredBytes) &&
+    configuredBytes >= MIN_ARCHIVE_VOLUME_BYTES;
   const customVolumeBytes = job.archiveVolumeEnabled !== false && validConfiguredSize
     ? configuredBytes
     : 0;

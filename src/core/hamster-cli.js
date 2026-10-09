@@ -308,7 +308,7 @@ function errorEnvelope(error) {
     code: error.code || 'HAMSTER_CLI_ERROR', stage: error.stage || 'cli', message: error.message,
     acceptance: error.acceptance || 'not_accepted', requestId: error.requestId || null,
     taskId: error.taskId || null, retryClass: error.retryable ? 'retryable' : 'inspect',
-    safeNextAction: error.requestFile ? { kind: 'resume', requestFile: error.requestFile }
+    safeNextAction: error.requestFile && error.acceptance !== 'not_accepted' ? { kind: 'resume', requestFile: error.requestFile }
       : error.requiredAction || null,
     ...(error.requiredFields ? { requiredFields: error.requiredFields } : {}),
     diagnosticRef: error.diagnosticRef || null,
@@ -457,10 +457,11 @@ async function runCommand(options) {
         status: result?.task?.terminal ? 'completed' : result?.requiresConfirmation ? 'not_accepted' : 'accepted' });
       return { ...result, requestFile };
     } catch (error) {
-      await requestStore.updateRequestFile(requestFile, { status: 'unknown' }).catch(() => {});
+      const acceptance = error.acceptance === 'not_accepted' ? 'not_accepted' : 'unknown';
+      await requestStore.updateRequestFile(requestFile, { status: acceptance === 'not_accepted' ? 'failed' : 'unknown' }).catch(() => {});
       error.requestFile = requestFile;
       error.requestId = input.requestId;
-      error.acceptance = 'unknown';
+      error.acceptance = acceptance;
       throw error;
     }
   }

@@ -26,6 +26,7 @@ const { IMAGE_EXTENSIONS, LARGE_TASK_BYTES, isVideoFile } = require('./core/cons
 const { formatReleaseNotes } = require('./core/release-notes');
 const { findTrashItems, isTrashItemPresent, restoreTrashItem } = require('./core/recycle-bin');
 const { verifyReleaseManifestAtStartup } = require('./core/startup-integrity');
+const { repairWindowsSandboxAccess } = require('./core/windows-sandbox-access');
 const { resolveDevelopmentUserDataRoot } = require('./core/development-paths');
 const { isValidMcpDiagnosticFile, isValidMcpReadyFile, mcpTempDirectory, takeDesktopLaunchRequest } = require('./core/mcp-launch');
 
@@ -34,7 +35,7 @@ const { isValidMcpDiagnosticFile, isValidMcpReadyFile, mcpTempDirectory, takeDes
 let AppStore, QueueManager, generateThumbnails, checkForUpdates, selectCheckedRelease, rendererI18n;
 let prepareOnlineUpdate, prepareLocalUpdate, prepareLocalInstalledUpdate, createUpdateDownloadFetch, fetchUpdateResource;
 let launchUpdate, launchInstalledUpdate, launchMacUpdate, prepareLocalMacUpdate, cleanupSuccessfulUpdateRuns;
-let consumeUpdateFailure, readUpdateSuccessNotice, manualUpdateInstructions;
+let consumeUpdateFailure, readUpdateSuccessNotice, acknowledgeUpdateSuccess, withPreparedUpdate, manualUpdateInstructions;
 
 function loadRuntimeModules() {
   ({ AppStore } = require('./core/store'));
@@ -45,7 +46,7 @@ function loadRuntimeModules() {
   ({ prepareOnlineUpdate, prepareLocalUpdate, prepareLocalInstalledUpdate,
     createUpdateDownloadFetch,
     launchUpdate, launchInstalledUpdate, cleanupSuccessfulUpdateRuns,
-    consumeUpdateFailure, readUpdateSuccessNotice, manualUpdateInstructions } = require('./core/update-manager'));
+    consumeUpdateFailure, readUpdateSuccessNotice, acknowledgeUpdateSuccess, withPreparedUpdate, manualUpdateInstructions } = require('./core/update-manager'));
   const downloadFetch = createUpdateDownloadFetch((options) => net.request(options));
   fetchUpdateResource = (url, options) => options?.redirect === 'manual'
     ? downloadFetch(url, options) : net.fetch(url, options);
@@ -132,6 +133,13 @@ const electronRuntimeDirectory = (isSmokeTest || isStartupIntegrityTest) && proc
   : path.join(configuredUserDataRoot, 'electron');
 app.setPath('userData', electronRuntimeDirectory);
 const hasSingleInstanceLock = isSmokeTest || app.requestSingleInstanceLock();
+let startupSandboxAccess = null;
+if (hasSingleInstanceLock && app.isPackaged && process.platform === 'win32' && !isSmokeTest) {
+  // Complete before Electron's ready event can start GPU/renderer processes.
+  // An asynchronous check lets repeated bootstrap crashes terminate Chromium.
+  try { startupSandboxAccess = repairWindowsSandboxAccess(process.execPath); }
+  catch (error) { startupSandboxAccess = { changed: 0, failed: 1, error: error.message }; }
+}
 const startupDesktopMcpRequest = hasSingleInstanceLock && !isSmokeTest
   ? takeDesktopLaunchRequest({ applicationExecutable: process.execPath,
       tempDirectory: mcpTempDirectory(process.argv) })
@@ -746,6 +754,7 @@ async function promptAndLaunchPreparedUpdate({
   version,
   releaseUrl = releasesUrl
 }) {
+  return withPreparedUpdate(prepared, async () => {
   const english = queueManager?.config?.language === 'en-US';
   const restart = await dialog.showMessageBox(mainWindow, {
     type: 'info',
@@ -771,7 +780,8 @@ async function promptAndLaunchPreparedUpdate({
       : '归档任务运行期间不能更新，请先暂停或完成当前任务。');
   }
   try {
-    await (process.platform === 'darwin' ? launchMacUpdate : launchUpdate)({ prepared, targetPid: process.pid });
+    await (process.platform === 'darwin' ? launchMacUpdate : launchUpdate)({ prepared, targetPid: process.pid,
+      language: queueManager?.config?.language || 'zh-CN' });
   } catch (error) {
     console.error(`UPDATE_LAUNCH_FAILED ${error.stack || error.message}`);
     await queueManager?.log('error', `启动更新助手失败：${error.message}`);
@@ -784,9 +794,11 @@ async function promptAndLaunchPreparedUpdate({
   updateQuitRequested = true;
   app.quit();
   return { restarting: true };
+  });
 }
 
 async function promptAndLaunchPreparedInstaller({ prepared, version, releaseUrl = releasesUrl }) {
+  return withPreparedUpdate(prepared, async () => {
   const english = queueManager?.config?.language === 'en-US';
   const response = await dialog.showMessageBox(mainWindow, {
     type: 'info',
@@ -823,6 +835,7 @@ async function promptAndLaunchPreparedInstaller({ prepared, version, releaseUrl 
   updateQuitRequested = true;
   app.quit();
   return { restarting: true, installerStarted: true };
+  });
 }
 
 async function runLocalPackageUpdate(release = null) {
@@ -2263,6 +2276,15 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const mcpRequested = !migrationRequest && !isSmokeTest && (startupMcpArgs.includes('--enable-mcp') || process.env.HAMSTER_MCP_ENABLED === '1');
   startedAsMcpBackground = mcpRequested && startupMcpArgs.includes('--background') && !startupMcpArgs.includes('--show-ui');
   if (app.isPackaged && !isSmokeTest) {
+    if (startupSandboxAccess) {
+      const access = startupSandboxAccess;
+      if (access.changed || access.failed) console.warn(`WINDOWS_SANDBOX_ACCESS ${JSON.stringify(access)}`);
+      if (access.blocked) {
+        throw new Error(usesEnglishUi()
+          ? 'Windows blocked the startup permission repair. Right-click the application and choose "Run as administrator" once. After it starts, close it and open it normally. If it still fails, send the application log to the developer.'
+          : 'Windows 阻止了启动权限修复。请右键程序，选择“以管理员身份运行”一次；成功启动后关闭，再正常打开。如果仍然失败，请将程序日志反馈给开发者。');
+      }
+    }
     if (!startedAsMcpBackground) await createStartupWindow();
     updateStartupWindow('verify-cache');
     const integrityResult = await verifyReleaseManifestAtStartup({
@@ -2334,12 +2356,13 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   const pendingUpdateSuccess = await readUpdateSuccessNotice({
     userDataDirectory: userDataLayout.root,
     noticeFile: process.env.HAMSTER_UPDATE_NOTICE_FILE,
+    includeAcknowledged: true,
     currentVersion: app.getVersion()
   }).catch((error) => {
     console.warn(`UPDATE_SUCCESS_READ_WARNING ${error.message}`);
     return null;
   });
-  const pendingUpdateFailure = await consumeUpdateFailure(userDataLayout.root).catch((error) => {
+  const pendingUpdateFailure = pendingUpdateSuccess ? null : await consumeUpdateFailure(userDataLayout.root).catch((error) => {
     console.warn(`UPDATE_FAILURE_READ_WARNING ${error.message}`);
     return null;
   });
@@ -2537,10 +2560,12 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   applicationReady = true;
   if (!startedAsMcpBackground) createWindow();
   else if (pendingWindowShow) createWindow();
-  if (pendingUpdateSuccess && !isSmokeTest && !isStartupIntegrityTest && !startedAsMcpBackground) {
+  if (pendingUpdateSuccess && !pendingUpdateSuccess.acknowledged && !isSmokeTest && !isStartupIntegrityTest && !startedAsMcpBackground) {
     setImmediate(() => {
       void showUpdateSuccessDialog(pendingUpdateSuccess)
-        .then(() => fs.rm(pendingUpdateSuccess.runRoot, { recursive: true, force: true })
+        .then(() => acknowledgeUpdateSuccess(pendingUpdateSuccess, {
+          userDataDirectory: userDataLayout.root, applicationRoot, currentVersion: app.getVersion()
+        })
           .catch((error) => console.warn(`UPDATE_SUCCESS_CLEANUP_WARNING ${error.message}`)))
         .catch((error) => console.error(`UPDATE_SUCCESS_DIALOG_WARNING ${error.message}`));
     });
@@ -2613,7 +2638,14 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   setImmediate(() => {
     void (async () => {
       if (mainWindow && !mainWindow.isDestroyed()) await waitForWindowReady(mainWindow);
-      await cleanupSuccessfulUpdateRuns(userDataLayout.root);
+      if (!isSmokeTest && !isStartupIntegrityTest) {
+        await cleanupSuccessfulUpdateRuns(userDataLayout.root, {
+          applicationRoot, currentVersion: app.getVersion(), confirmedSuccess: Boolean(pendingUpdateSuccess),
+          keepNoticeRoots: pendingUpdateSuccess ? [pendingUpdateSuccess.runRoot] : [],
+          waitForRunRoot: pendingUpdateSuccess?.runRoot,
+          keepRoots: pendingUpdateFailure ? [pendingUpdateFailure.runRoot] : []
+        });
+      }
     })().catch((error) => console.warn(`UPDATE_CLEANUP_WARNING ${error.message}`));
   });
   resolveApplicationInitialized();
@@ -2635,6 +2667,7 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
   if (process.env.HAMSTER_UPDATE_VALIDATION_FILE) {
     await fs.writeFile(process.env.HAMSTER_UPDATE_VALIDATION_FILE, JSON.stringify({
       version: app.getVersion(),
+      ...(process.platform === 'darwin' ? { applicationBundle: path.resolve(applicationRoot, '..', '..') } : {}),
       validatedAt: new Date().toISOString()
     }), 'utf8');
   }

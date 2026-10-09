@@ -624,7 +624,7 @@ test('common settings schema is explicit, rejects repository bypass, and never r
   const service = createMcpTools(manager);
   const described = await service.call('hamster_describe', { capability: 'settings.patch' });
   const properties = described.inputSchema.properties.patch.properties;
-  assert.equal(properties.archiveVolumeBytes.maximum, 100 * 1024 ** 3);
+  assert.equal(properties.archiveVolumeBytes.maximum, undefined);
   assert.equal(properties.archiveVolumeConfirmation.type, 'boolean');
   for (const key of ['archivePassword', 'archiveNamingMode', 'archiveFormat', 'videoFrameBackup', 'videoFrameCount', 'thumbnailLimit', 'smallItemFilter', 'minimumTaskBytes', 'autoSkipExactDuplicates', 'autoSkipExactDuplicateAction']) {
     assert.ok(Object.hasOwn(properties, key), `missing settings field ${key}`);
@@ -635,7 +635,7 @@ test('common settings schema is explicit, rejects repository bypass, and never r
   }), /Unknown argument/);
 
   const input = { patch: { archivePassword: 'private-test-password', recordArchivePassword: false, archiveNamingMode: 'original', videoFrameCount: 5,
-    archiveVolumeBytes: 100 * 1024 ** 3, archiveVolumeConfirmation: false } };
+    archiveVolumeBytes: 256 * 1024 ** 3, archiveVolumeConfirmation: false } };
   const preview = await service.call('hamster_call', { capability: 'settings.patch', input });
   assert.equal(preview.requiresConfirmation, true);
   const applied = await service.call('hamster_call', {
@@ -645,7 +645,7 @@ test('common settings schema is explicit, rejects repository bypass, and never r
   assert.equal(applied.settings.recordArchivePassword, false);
   assert.equal(applied.settings.archiveNamingMode, 'original');
   assert.equal(applied.settings.videoFrameCount, 5);
-  assert.equal(applied.settings.archiveVolumeBytes, 100 * 1024 ** 3);
+  assert.equal(applied.settings.archiveVolumeBytes, 256 * 1024 ** 3);
   assert.equal(applied.settings.archiveVolumeConfirmation, false);
   assert.equal(JSON.stringify(applied).includes('private-test-password'), false);
 });
