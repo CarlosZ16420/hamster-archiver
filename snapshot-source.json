@@ -1,6 +1,13 @@
 {
   "schemaVersion": 1,
   "privateSourceCommit": "6ecfdc3d01f65da096c51ead940268ff87fdf311",
-  "exportDigest": "9c1f768b6c8176aabdef8367b55e06f747eb2c4d6a234a4644f7ee2200bf3f2f",
-  "exportedAt": "2026-10-07T20:53:48.630Z"
+  "exportDigest": "3367c7e7e244569e008d9856d7fc5748c209800a11b1294e1d065a8089ff0205",
+  "exportedAt": "2026-10-07T20:53:48.630Z",
+  "boundaryMaintenance": {
+    "basePublicCommit": "1a389279f6c6bf2a215d029c12df695d0d549649",
+    "sourceExportDigest": "9c1f768b6c8176aabdef8367b55e06f747eb2c4d6a234a4644f7ee2200bf3f2f",
+    "changedPaths": [
+      "src/config/public-snapshot-boundary.json"
+    ]
+  }
 }
