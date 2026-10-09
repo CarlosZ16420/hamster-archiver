@@ -98,6 +98,8 @@
     "test/ui-state.test.js",
     "test/update-checker.test.js",
     "test/update-manager.test.js",
-    "test/warehouse-paths.test.js"
+    "test/update-storage.test.js",
+    "test/warehouse-paths.test.js",
+    "test/windows-sandbox-access.test.js"
   ]
 }
