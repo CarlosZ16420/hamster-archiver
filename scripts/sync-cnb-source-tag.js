@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { isCnbReleaseTag } = require('../src/core/sync-cnb-release-assets');
 
 function parseArgs(argv) {
   const options = {};
@@ -22,7 +23,7 @@ function validateConfig(options, environment = process.env) {
   const cnbRepo = options.cnbRepo || environment.CNB_REPO_SLUG || '';
   const token = environment.CNB_TOKEN || '';
   if (environment.CNB_SYNC_ENABLED !== 'true') throw new Error('CNB synchronization is disabled.');
-  if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error('The CNB source tag must be an exact vX.Y.Z tag.');
+  if (!isCnbReleaseTag(tag)) throw new Error('The CNB source tag must be an exact vX.Y.Z or vX.Y.Z-beta.mac.N tag.');
   if (githubRepo !== 'CarlosZ16420/hamster-archiver') {
     throw new Error('CNB source tags may come only from the public Hamster GitHub snapshot.');
   }

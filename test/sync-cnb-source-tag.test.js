@@ -15,6 +15,11 @@ const config = {
 
 test('CNB source tag configuration accepts only the public snapshot route', () => {
   assert.equal(validateConfig(config, { CNB_SYNC_ENABLED: 'true', CNB_TOKEN: 'secret' }).cnbRepo, config.cnbRepo);
+  const environment = { CNB_SYNC_ENABLED: 'true', CNB_TOKEN: 'secret' };
+  assert.equal(validateConfig({ ...config, tag: 'v4.8.6-beta.mac.1' }, environment).tag, 'v4.8.6-beta.mac.1');
+  for (const tag of ['v4.8.6-beta.task.1', 'v4.8.6-beta.mac.0', 'v4.8.6-beta.mac.1-extra']) {
+    assert.throws(() => validateConfig({ ...config, tag }, environment), /exact/);
+  }
   assert.throws(() => validateConfig({ ...config, githubRepo: 'CarlosZ16420/hamster-archive' }, {
     CNB_SYNC_ENABLED: 'true', CNB_TOKEN: 'secret'
   }), /public Hamster GitHub snapshot/);
