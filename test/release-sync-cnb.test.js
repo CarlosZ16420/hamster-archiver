@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -10,12 +11,14 @@ const {
   createCnbClient,
   createGithubClient,
   planCnbUploads,
+  prepareGithubBundle,
   requestJson,
   requestWithTrustedRedirects,
   syncReleaseBundle,
   validateConfig,
   withRetry
 } = require('../scripts/release-sync-cnb');
+const { expectedReleaseAssetNames } = require('../src/core/sync-cnb-release-assets');
 
 function bundle() {
   return {
@@ -64,6 +67,83 @@ test('CNB synchronization is default-disabled before any remote operation', asyn
   assert.match(result.reason, /CNB_SYNC_ENABLED=true/);
   assert.equal(calls, 0);
   assert.throws(() => createCnbClient({ enabled: false }), /disabled/);
+});
+
+test('Mac Beta configuration accepts only the dedicated channel and never promotes latest', () => {
+  const options = { tag: 'v4.8.6-beta.mac.1', githubRepo: 'CarlosZ16420/hamster-archiver', cnbRepo: 'group/repo', makeLatest: 'true' };
+  const environment = { CNB_SYNC_ENABLED: 'true', CNB_TOKEN: 'test-token', CNB_UPLOAD_HOSTS: 'upload.cnb.cool' };
+  assert.equal(validateConfig(options, environment).makeLatest, false);
+  for (const tag of ['v4.8.6-beta.task.1', 'v4.8.6-beta.mac.0', 'v4.8.6-beta.mac.1-extra', 'v4.8.6-beta.mac']) {
+    assert.throws(() => validateConfig({ ...options, tag }, environment), /exact/);
+  }
+  assert.equal(expectedReleaseAssetNames('v4.8.6').length, 6);
+  assert.equal(expectedReleaseAssetNames('v4.8.4').length, 4);
+  assert.equal(expectedReleaseAssetNames('v4.8.0-beta.mac.2').length, 2);
+});
+
+test('Mac Beta bundle preparation verifies all four original attachments and preserves prerelease', async () => {
+  const tag = 'v4.8.6-beta.mac.1';
+  const names = expectedReleaseAssetNames(tag);
+  assert.deepEqual(names, [
+    `HamsterArchiver-${tag}-mac-universal.dmg`, `HamsterArchiver-${tag}-mac-universal.dmg.sha256`,
+    `HamsterArchiver-${tag}-mac-universal.zip`, `HamsterArchiver-${tag}-mac-universal.zip.sha256`
+  ]);
+  const payloads = new Map();
+  for (const name of names.filter(name => !name.endsWith('.sha256'))) {
+    const bytes = Buffer.from(`original ${name}`);
+    payloads.set(name, bytes);
+    payloads.set(`${name}.sha256`, Buffer.from(`${crypto.createHash('sha256').update(bytes).digest('hex')}  ${name}\n`));
+  }
+  const release = {
+    tag_name: tag, name: `Hamster Archiver ${tag}`, body: bundle().body,
+    draft: false, prerelease: true, published_at: '2026-10-09T06:51:43Z',
+    assets: names.map(name => ({ name, size: payloads.get(name).length, browser_download_url: `https://github.com/${name}` }))
+  };
+  let downloads = 0;
+  const client = {
+    getRelease: async () => release,
+    downloadAsset: async (asset, target) => { downloads += 1; await fs.writeFile(target, payloads.get(asset.name)); }
+  };
+  const prepared = await prepareGithubBundle({ tag }, client);
+  try {
+    assert.equal(prepared.bundle.prerelease, true);
+    assert.deepEqual(prepared.bundle.assets.map(asset => asset.name), names);
+    assert.equal(downloads, 4);
+  } finally {
+    await prepared.cleanup();
+  }
+  const sidecar = names[1];
+  payloads.set(sidecar, Buffer.from(`${'0'.repeat(64)}  ${names[0]}\n`));
+  await assert.rejects(() => prepareGithubBundle({ tag }, client), /checksum attachment does not verify/);
+  const beforeInvalid = downloads;
+  for (const overrides of [{ draft: true }, { prerelease: false }, { tag_name: 'v4.8.5-beta.mac.1' }, { assets: release.assets.slice(1) }]) {
+    await assert.rejects(() => prepareGithubBundle({ tag }, { ...client, getRelease: async () => ({ ...release, ...overrides }) }));
+  }
+  assert.equal(downloads, beforeInvalid);
+});
+
+test('Mac Beta CNB creation and retry preserve prerelease and never promote latest', async () => {
+  const source = { ...bundle(), tag: 'v4.8.6-beta.mac.1', prerelease: true };
+  source.assets = expectedReleaseAssetNames(source.tag).map((name, index) => ({ name, size: 10, digest: String(index + 1).repeat(64) }));
+  let release;
+  let publishOptions;
+  const client = {
+    getTag: async () => ({ name: source.tag }),
+    getRelease: async () => release,
+    createRelease: async payload => { release = { id: 'mac-beta', ...payload, assets: [] }; return release; },
+    uploadAsset: async (current, asset) => { current.assets.push(remoteAsset(asset)); },
+    publishRelease: async (current, options) => { publishOptions = options; current.draft = false; }
+  };
+  const first = await syncReleaseBundle(source, client, { enabled: true, makeLatest: true });
+  assert.equal(first.release.prerelease, true);
+  assert.equal(first.release.make_latest, 'false');
+  assert.deepEqual(publishOptions, { makeLatest: false });
+  assert.equal(first.uploaded.length, 4);
+  const second = await syncReleaseBundle(source, client, { enabled: true, makeLatest: true });
+  assert.deepEqual(second.uploaded, []);
+  assert.equal(second.skipped.length, 4);
+  release.prerelease = false;
+  await assert.rejects(() => syncReleaseBundle(source, client, { enabled: true }), /invalid release metadata/);
 });
 
 test('same-name same-digest CNB assets are skipped and conflicts stop without overwrite', () => {
@@ -239,7 +319,9 @@ test('CNB publication request encodes make_latest only from the explicit caller 
   const release = { id: 'release-1', name: 'Release', body: 'notes' };
   await client.publishRelease(release);
   await client.publishRelease(release, { makeLatest: true });
-  assert.deepEqual(payloads.map(payload => payload.make_latest), ['false', 'true']);
+  await client.publishRelease({ ...release, prerelease: true }, { makeLatest: true });
+  assert.deepEqual(payloads.map(payload => payload.make_latest), ['false', 'true', 'false']);
+  assert.deepEqual(payloads.map(payload => payload.prerelease), [false, false, true]);
 });
 
 test('a single request attempt times out during fetch or JSON response-body reading and remains retryable', async () => {
@@ -345,7 +427,28 @@ test('workflow is default-disabled, repository-guarded, checks out github.sha, a
   assert.match(workflow.slice(workflow.indexOf('- name: Ensure'), workflow.indexOf('- name: Mirror')), /CNB_TOKEN: \$\{\{ secrets\.CNB \}\}/);
   assert.match(workflow.slice(workflow.indexOf('- name: Mirror')), /CNB_TOKEN: \$\{\{ secrets\.CNB \}\}/);
   assert.match(workflow, /CNB_SYNC_ENABLED: 'true'/);
-  assert.match(workflow, /CNB_MAKE_LATEST: \$\{\{ github\.event_name == 'release' \|\| inputs\.make_latest \}\}/);
+  assert.match(workflow, /CNB_MAKE_LATEST: \$\{\{ !contains\(github\.event\.release\.tag_name \|\| inputs\.tag, '-'\) && \(github\.event_name == 'release' \|\| inputs\.make_latest\) \}\}/);
   assert.match(workflow, /--make-latest "\$CNB_MAKE_LATEST"/);
   assert.doesNotMatch(workflow, /CNB_TOKEN_PERMISSION|repo-code:rw/);
+});
+
+test('workflow selects stable and Mac Beta releases and retries without promoting Mac Beta', async () => {
+  const workflow = await fs.readFile(path.resolve(__dirname, '..', '.github', 'workflows', 'sync-cnb-release.yml'), 'utf8');
+  const conditions = [...workflow.matchAll(/if: >-\s+\$\{\{ ([\s\S]*?) \}\}/g)].map(match => match[1]);
+  const latest = /CNB_MAKE_LATEST: \$\{\{ (.*?) \}\}/.exec(workflow)[1];
+  const evaluate = (expression, github, inputs, vars) => Function('github', 'inputs', 'vars', 'contains', `return (${expression});`)(github, inputs, vars, (value, part) => String(value || '').includes(part));
+  for (const event of ['release', 'workflow_dispatch']) {
+    for (const [tag, allowed] of [['v4.8.6', true], ['v4.8.6-beta.mac.1', true], ['v4.8.6-beta.task.1', false]]) {
+      const github = { repository: 'CarlosZ16420/hamster-archiver', event_name: event, event: { release: event === 'release' ? { tag_name: tag, prerelease: tag.includes('-') } : {} } };
+      const inputs = { tag, make_latest: true };
+      assert.equal(evaluate(conditions[1], github, inputs, { CNB_SYNC_ENABLED: 'true' }), allowed);
+      assert.equal(evaluate(conditions[0], github, inputs, {}), allowed);
+      assert.equal(evaluate(conditions[1], { ...github, repository: 'CarlosZ16420/hamster-archive' }, inputs, { CNB_SYNC_ENABLED: 'true' }), false);
+      assert.equal(evaluate(latest, github, inputs, {}), tag === 'v4.8.6');
+      if (event === 'release' && tag === 'v4.8.6') {
+        github.event.release.prerelease = true;
+        assert.equal(evaluate(conditions[1], github, inputs, { CNB_SYNC_ENABLED: 'true' }), false);
+      }
+    }
+  }
 });

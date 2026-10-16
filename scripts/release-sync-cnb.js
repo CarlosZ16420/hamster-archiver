@@ -7,7 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
 const { Readable } = require('node:stream');
-const { expectedReleaseAssetNames } = require('../src/core/sync-cnb-release-assets');
+const { expectedReleaseAssetNames, isCnbReleaseTag, isMacBetaTag } = require('../src/core/sync-cnb-release-assets');
 
 const DEFAULT_CNB_API_BASE = 'https://api.cnb.cool';
 const DEFAULT_CNB_WEB_BASE = 'https://cnb.cool';
@@ -60,7 +60,7 @@ function validateConfig(options, environment = process.env) {
   const requestTimeoutMs = Number(environment.CNB_REQUEST_TIMEOUT_MS || DEFAULT_REQUEST_TIMEOUT_MS);
   const makeLatestValue = String(options.makeLatest ?? environment.CNB_MAKE_LATEST ?? 'false');
   if (!enabled) throw new Error(disabledMessage());
-  if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error('RELEASE_TAG or --tag must be an exact vX.Y.Z tag.');
+  if (!isCnbReleaseTag(tag)) throw new Error('RELEASE_TAG or --tag must be an exact vX.Y.Z or vX.Y.Z-beta.mac.N tag.');
   if (githubRepo !== 'CarlosZ16420/hamster-archiver') throw new Error('GitHub source must be the authoritative CarlosZ16420/hamster-archiver repository.');
   if (!/^[^\s/]+(?:\/[^\s/]+)+$/.test(cnbRepo)) throw new Error('CNB_REPO_SLUG or --cnb-repo must identify the existing public CNB repository. No default is guessed.');
   if (!token) throw new Error('CNB_TOKEN is required. Configure its permissions against the current official CNB contract; this script cannot verify authorization from a declaration string. No synchronization was attempted.');
@@ -75,7 +75,7 @@ function validateConfig(options, environment = process.env) {
   if (!uploadHosts.size) {
     throw new Error('CNB_UPLOAD_HOSTS is required. Set the exact comma-separated hostnames returned by the official CNB pre-signed upload API.');
   }
-  return { enabled, tag, githubRepo, cnbRepo, token, githubToken: environment.GH_TOKEN || '', attempts, requestTimeoutMs, makeLatest: makeLatestValue === 'true', apiBase, webBase, uploadHosts };
+  return { enabled, tag, githubRepo, cnbRepo, token, githubToken: environment.GH_TOKEN || '', attempts, requestTimeoutMs, makeLatest: !isMacBetaTag(tag) && makeLatestValue === 'true', apiBase, webBase, uploadHosts };
 }
 
 function encodeRepo(repo) {
@@ -253,7 +253,7 @@ function planCnbUploads(localAssets, remoteAssets) {
 }
 
 function inspectCnbRelease(release, bundle) {
-  if (!release || release.prerelease || release.tag_name !== bundle.tag) {
+  if (!release || Boolean(release.prerelease) !== Boolean(bundle.prerelease) || release.tag_name !== bundle.tag) {
     throw new Error(`CNB ${bundle.tag} is missing or has invalid release metadata.`);
   }
   if (normalizedText(release.body) !== normalizedText(bundle.body)) {
@@ -280,6 +280,10 @@ async function syncReleaseBundle(bundle, cnbClient, { attempts = 2, delay, enabl
   if (!enabled) {
     return { disabled: true, created: false, uploaded: [], skipped: [], reason: disabledMessage() };
   }
+  if (!isCnbReleaseTag(bundle.tag) || Boolean(bundle.prerelease) !== isMacBetaTag(bundle.tag)) {
+    throw new Error('CNB synchronization requires a stable Release or a Mac Beta with matching prerelease metadata.');
+  }
+  makeLatest = !bundle.prerelease && makeLatest;
   const tagExists = await withRetry(() => cnbClient.getTag(bundle.tag), { attempts, delay });
   if (!tagExists) throw new Error(`CNB tag ${bundle.tag} does not exist in the public snapshot repository. Source or tags were not pushed.`);
   let release = await withRetry(() => cnbClient.getRelease(bundle.tag), { attempts, delay });
@@ -294,7 +298,7 @@ async function syncReleaseBundle(bundle, cnbClient, { attempts = 2, delay, enabl
           name: bundle.name,
           body: bundle.body,
           draft: true,
-          prerelease: false,
+          prerelease: Boolean(bundle.prerelease),
           make_latest: 'false'
         });
         created = true;
@@ -450,7 +454,7 @@ function createCnbClient(config, fetchImpl = globalThis.fetch) {
     publishRelease: (release, { makeLatest = false } = {}) => requestAndDrain(`${apiRoot}/releases/${encodeURIComponent(release.id)}`, {
       method: 'PATCH',
       headers,
-      body: JSON.stringify({ body: release.body, name: release.name, draft: false, prerelease: false, make_latest: makeLatest ? 'true' : 'false' })
+      body: JSON.stringify({ body: release.body, name: release.name, draft: false, prerelease: Boolean(release.prerelease), make_latest: !release.prerelease && makeLatest ? 'true' : 'false' })
     }, [200], 'CNB Release publication', fetchImpl, apiHosts, config.requestTimeoutMs),
     async uploadAsset(release, asset) {
       const reservation = await requestJson(`${apiRoot}/releases/${encodeURIComponent(release.id)}/asset-upload-url`, {
@@ -477,8 +481,9 @@ function createCnbClient(config, fetchImpl = globalThis.fetch) {
 
 async function prepareGithubBundle(config, githubClient) {
   const release = await githubClient.getRelease(config.tag);
-  if (!release || release.draft || release.prerelease || !release.published_at) {
-    throw new Error(`GitHub ${config.tag} must be a published stable Release before CNB synchronization.`);
+  if (!isCnbReleaseTag(config.tag) || !release || release.tag_name !== config.tag || release.draft ||
+      Boolean(release.prerelease) !== isMacBetaTag(config.tag) || !release.published_at) {
+    throw new Error(`GitHub ${config.tag} must be a published stable Release or Mac Beta with matching tag and prerelease metadata before CNB synchronization.`);
   }
   assertBilingualNotes(release.body);
   const expectedNames = expectedReleaseAssetNames(config.tag);
@@ -505,7 +510,7 @@ async function prepareGithubBundle(config, githubClient) {
       }
     }
     return {
-      bundle: { tag: config.tag, name: release.name || `Hamster Archiver ${config.tag}`, body: release.body, assets },
+      bundle: { tag: config.tag, name: release.name || `Hamster Archiver ${config.tag}`, body: release.body, prerelease: Boolean(release.prerelease), assets },
       cleanup: () => fsp.rm(tempRoot, { recursive: true, force: true })
     };
   } catch (error) {
